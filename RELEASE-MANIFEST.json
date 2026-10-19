@@ -1,7 +1,7 @@
 {
   "format": "sovite-source-release/v1",
   "version": "0.1.1",
-  "created_at": "2026-10-19T20:37:27.616365+00:00",
+  "created_at": "2026-10-19T20:41:18.425034+00:00",
   "contents": "Application, configuration, deployment, tests and operating evidence",
   "excluded": [
     "runtime state",
@@ -216,8 +216,8 @@
       "bytes": 64
     },
     "sovite/adapters.py": {
-      "sha256": "e33e174ce6ef1eca6e1c28cc091d682c89b82bda4b0b17dd1de28474b0d725bd",
-      "bytes": 17994
+      "sha256": "25ae927f786b3f62c8f5fa38b6199f5dc75fed26d80a4cd87bde608079807183",
+      "bytes": 18366
     },
     "sovite/api.py": {
       "sha256": "39384e4d1f37679e173fff64048deb46f2feabca1d17581d5128a76a9966fe92",
@@ -276,8 +276,8 @@
       "bytes": 11498
     },
     "tests/test_backend.py": {
-      "sha256": "921550887f6e02a5ab40c0dc3e305a155b8f3aebeef801e34bb0d5ad139c925f",
-      "bytes": 23383
+      "sha256": "c340a02d227caf7a2179051ea570a1cf174b1766ea841535d5887152a5d1073d",
+      "bytes": 24701
     },
     "tests/test_deployment.py": {
       "sha256": "eb1c50be7da8292f67e889ada7b083b3e4e6a4259ac7ceecf7840149e7beefb5",

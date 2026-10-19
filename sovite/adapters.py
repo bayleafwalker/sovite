@@ -180,11 +180,15 @@ class AdapterRunner:
                     try:
                         arguments = json.loads(arguments)
                     except json.JSONDecodeError:
-                        raise RuntimeFailure("invalid_tool_arguments") from None
+                        arguments = None
                 if not isinstance(arguments, dict) or set(arguments) - {"operation", "arguments"}:
-                    raise RuntimeFailure("invalid_tool_arguments")
-                output = await self.execute_tool(tools[name], arguments, f"{job_id}:{step}:{index}")
-                trace.append({"tool": name, "operation": arguments.get("operation"), "result": output})
+                    # Malformed calls are never executed; the model sees the expected shape and may
+                    # correct itself within the step limit. Undeclared tools and denied operations stay fatal.
+                    output = {"error": "invalid_tool_arguments", "expected": {"operation": tools[name].get("allowed_operations", []), "arguments": {}}}
+                    trace.append({"tool": name, "operation": None, "result": output})
+                else:
+                    output = await self.execute_tool(tools[name], arguments, f"{job_id}:{step}:{index}")
+                    trace.append({"tool": name, "operation": arguments.get("operation"), "result": output})
                 tool_message: dict = {"role": "tool", "content": json.dumps(output, ensure_ascii=False), "name": name}
                 if call.get("id"):
                     tool_message["tool_call_id"] = call["id"]

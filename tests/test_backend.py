@@ -212,6 +212,29 @@ def test_mutating_tool_failure_never_replays_whole_agent(setup):
     assert len(calls) == 2
 
 
+def test_malformed_tool_call_is_not_executed_and_model_can_correct_it(setup):
+    settings, platform, bundle = setup
+    runtime_bundle(settings, platform, bundle, tools=True, readonly=True)
+    chats, tool_requests = [], []
+    def handler(request):
+        if request.url.port != 11434:
+            tool_requests.append(json.loads(request.content))
+            return httpx.Response(200, json={"pods": 1})
+        chats.append(json.loads(request.content)["messages"])
+        if len(chats) == 1:
+            call = {"operation": "inspect", "namespace": "elsewhere"}
+        elif len(chats) == 2:
+            call = {"operation": "inspect", "arguments": {}}
+        else:
+            return httpx.Response(200, json={"message": {"role": "assistant", "content": "one pod"}})
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "cluster", "arguments": call}}]}})
+    job = platform.submit("incident-forensics", "task", "cloud-codex", "r")
+    asyncio.run(Worker(platform, AdapterRunner(httpx.MockTransport(handler))).run_once())
+    assert platform.get_job(job.id).status == "completed"
+    assert json.loads(chats[1][-1]["content"])["error"] == "invalid_tool_arguments"
+    assert tool_requests == [{"operation": "inspect", "arguments": {}}]
+
+
 def test_concurrent_workers_cannot_claim_same_task(setup):
     _, platform, _ = setup
     job = platform.submit("incident-forensics", "task", "cloud-codex", "r")
