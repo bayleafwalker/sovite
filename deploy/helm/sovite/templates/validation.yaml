@@ -30,7 +30,10 @@
 {{- if and .Values.nativeHarness.workspace.subPath (not .Values.nativeHarness.workspace.existingClaim) -}}
 {{- fail "nativeHarness.workspace.subPath requires an existing approved claim" -}}
 {{- end -}}
-{{- if and .Values.nativeHarness.workspace.existingClaim (not .Values.nativeHarness.enabled) -}}
+{{- if and .Values.nativeHarness.workspace.configMap .Values.nativeHarness.workspace.existingClaim -}}
+{{- fail "Select one native workspace source: configMap or existingClaim" -}}
+{{- end -}}
+{{- if and (or .Values.nativeHarness.workspace.existingClaim .Values.nativeHarness.workspace.configMap) (not .Values.nativeHarness.enabled) -}}
 {{- fail "An approved workspace requires nativeHarness.enabled" -}}
 {{- end -}}
 {{- range .Values.networkPolicy.stateEgress -}}

@@ -50,7 +50,7 @@ spec:
             - {name: SOVITE_BUNDLE_PATH, value: /config/bundle.yaml}
             - {name: SOVITE_HARNESS_AGENT_ID, value: {{ .Values.nativeHarness.agentId | quote }}}
             - {name: SOVITE_HARNESS_STATE_PATH, value: /state/harness}
-            {{- if .Values.nativeHarness.workspace.existingClaim }}
+            {{- if or .Values.nativeHarness.workspace.existingClaim .Values.nativeHarness.workspace.configMap }}
             - {name: SOVITE_NATIVE_WORKSPACE, value: /workspace/input}
             {{- end }}
             - name: SOVITE_HARNESS_TOKEN
@@ -64,7 +64,7 @@ spec:
             - {name: bundle, mountPath: /config, readOnly: true}
             - {name: state, mountPath: /state/harness}
             - {name: tmp, mountPath: /tmp}
-            {{- if .Values.nativeHarness.workspace.existingClaim }}
+            {{- if or .Values.nativeHarness.workspace.existingClaim .Values.nativeHarness.workspace.configMap }}
             - name: approved-workspace
               mountPath: /workspace/input
               readOnly: true
@@ -80,10 +80,14 @@ spec:
         - name: state
           persistentVolumeClaim: {claimName: {{ $name }}-native-harness}
         - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
-        {{- if .Values.nativeHarness.workspace.existingClaim }}
+        {{- if or .Values.nativeHarness.workspace.existingClaim .Values.nativeHarness.workspace.configMap }}
         - name: approved-workspace
+          {{- if .Values.nativeHarness.workspace.configMap }}
+          configMap: {name: {{ .Values.nativeHarness.workspace.configMap | quote }}}
+          {{- else }}
           persistentVolumeClaim:
             claimName: {{ .Values.nativeHarness.workspace.existingClaim | quote }}
             readOnly: true
+          {{- end }}
         {{- end }}
 {{- end }}

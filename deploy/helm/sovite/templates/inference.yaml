@@ -36,6 +36,9 @@ spec:
       labels: {app.kubernetes.io/name: sovite, app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: ollama}
     spec:
       automountServiceAccountToken: false
+      {{- with .Values.ollama.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
       securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
       nodeSelector: {{ toYaml .Values.ollama.nodeSelector | nindent 8 }}
       tolerations: {{ toYaml .Values.ollama.tolerations | nindent 8 }}
@@ -50,6 +53,7 @@ spec:
             - {name: OLLAMA_NO_CLOUD, value: "1"}
             - {name: OLLAMA_NUM_PARALLEL, value: "1"}
             - {name: OLLAMA_MAX_QUEUE, value: "16"}
+            - {name: OLLAMA_GPU_OVERHEAD, value: {{ .Values.ollama.gpuOverheadBytes | quote }}}
             - {name: OLLAMA_KEEP_ALIVE, value: "10m"}
           resources: {{ toYaml .Values.ollama.resources | nindent 12 }}
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}

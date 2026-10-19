@@ -47,6 +47,7 @@ nativeHarness:
   # Optional previously staged input. No hostPath or writable input mount is created.
   workspace:
     existingClaim: ""
+    configMap: ""
     subPath: ""
   resources:
     requests: {cpu: 250m, memory: 512Mi}
@@ -74,6 +75,8 @@ artifacts:
   region: garage
 ollama:
   enabled: true
+  runtimeClassName: ""
+  gpuOverheadBytes: "0"
   image: ollama/ollama:0.40.6
   storage: 50Gi
   storageClass: ""
@@ -100,6 +103,7 @@ networkPolicy:
   harnessPeers: []
   # Only these gateway pods can reach the private operator/API service.
   controlIngress:
+    ciliumGateway: false
     namespaceSelector:
       matchLabels: {kubernetes.io/metadata.name: gateway-system}
     podSelector:
