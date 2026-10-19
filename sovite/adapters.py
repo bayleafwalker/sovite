@@ -241,7 +241,9 @@ class AdapterRunner:
                 "-c", 'model_provider="sovite"', "-c", "model=" + json.dumps(model["model"]),
                 "-c", 'model_providers.sovite.name="Sovite configured provider"',
                 "-c", "model_providers.sovite.base_url=" + json.dumps(model["endpoint"]),
-                "-c", 'model_providers.sovite.wire_api="responses"']
+                "-c", 'model_providers.sovite.wire_api="responses"',
+                # The native service has no Internet path; an offered search tool only costs model turns.
+                "-c", 'web_search="disabled"']
             if auth_env:
                 command += ["-c", "model_providers.sovite.env_key=" + json.dumps(auth_env)]
             reasoning_effort = model.get("parameters", {}).get("reasoning_effort")

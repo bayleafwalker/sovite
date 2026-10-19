@@ -1,7 +1,7 @@
 {
   "format": "sovite-source-release/v1",
-  "version": "0.1.0",
-  "created_at": "2026-10-19T07:46:19.809409+00:00",
+  "version": "0.1.1",
+  "created_at": "2026-10-19T20:37:27.616365+00:00",
   "contents": "Application, configuration, deployment, tests and operating evidence",
   "excluded": [
     "runtime state",
@@ -28,7 +28,7 @@
       "bytes": 9002
     },
     "compose.yaml": {
-      "sha256": "bd20e765e6697b107b52f4cb8af17f76729a9f6a0ec33cd91b66d1cb970c11bb",
+      "sha256": "088bd9fbc770d47c2d6361465948bec88399a146c2da3a64ca83497445ad87ac",
       "bytes": 5124
     },
     "config/codex.mcp.toml": {
@@ -64,7 +64,7 @@
       "bytes": 564
     },
     "deploy/compose/native-codex.yaml": {
-      "sha256": "bfa0b94ebcf13c47b2ae7e77ed28dc0b52c352f7b6a8172526f7167423c230ff",
+      "sha256": "6b3c83535aa3508555990454820c3dacacb632099bef15a26fe3078b5619fad2",
       "bytes": 1227
     },
     "deploy/compose/native-workspace.yaml": {
@@ -84,7 +84,7 @@
       "bytes": 96
     },
     "deploy/helm/sovite/Chart.yaml": {
-      "sha256": "ed1307bc45e2df33a0bc4ddff946ac3b2727cbfc48b84bb74a4ad25103226c59",
+      "sha256": "71168d8e95d2b81dff1f590112c2ef477dc556289783eca1b1d9a4d5f4f30c48",
       "bytes": 197
     },
     "deploy/helm/sovite/templates/_helpers.tpl": {
@@ -96,36 +96,36 @@
       "bytes": 3621
     },
     "deploy/helm/sovite/templates/inference.yaml": {
-      "sha256": "d2431ce0b40273ac75ca8ddde7b39a67e1c3384c29f1c3e73e42babaac728d39",
-      "bytes": 2943
+      "sha256": "ceecde33f297966690136ac48735c7abc886437d3096edc36d24604e2ab9c5dc",
+      "bytes": 3243
     },
     "deploy/helm/sovite/templates/native-harness.yaml": {
-      "sha256": "405cfdaf54df969d9ccb6452ee0ea80e994a2d84c8e045c79179f74f00d31814",
-      "bytes": 4042
+      "sha256": "7b5e7d0630ac80c7ddbe62021f948cf877318f6f9d0c791abe105074876cbd57",
+      "bytes": 4471
     },
     "deploy/helm/sovite/templates/network.yaml": {
-      "sha256": "aa763493442e37653e97f78332c7d3d12e1d0848117ed06173e374a93edb76f7",
-      "bytes": 8373
+      "sha256": "e74ea12687359c16fb737ac8076d2ee3854c49aa1a9635cc7e12541ca89b2d6b",
+      "bytes": 9239
     },
     "deploy/helm/sovite/templates/state.yaml": {
-      "sha256": "03e1e1357a58639dc4ac39ea93678c1d3b8f3c0227e8e9f66776b2cc176dab29",
-      "bytes": 5962
+      "sha256": "3357275c4379cd3c3e1b58823881d9202c587d34168055803a25bd12ba3b60e3",
+      "bytes": 6208
     },
     "deploy/helm/sovite/templates/validation.yaml": {
-      "sha256": "649615b66109e1a1526045cc9818d4581b0374f586b0691cc7e56d36a10c0673",
-      "bytes": 2215
+      "sha256": "6d8c8a65a4f2011b58f05c47979147593b1b8654d0e2a01e74c59510c0ceb275",
+      "bytes": 2455
     },
     "deploy/helm/sovite/templates/worker.yaml": {
-      "sha256": "e9503da81b0bc408d77e8b6837c15b179a97fcf252cc2f33ad1cb5880a0e2f98",
-      "bytes": 3584
+      "sha256": "b402d9aab38a3f93f57cf848c907bf3692a08ba27f71c7d8fce34ce98e8dc560",
+      "bytes": 3703
     },
     "deploy/helm/sovite/values.schema.json": {
-      "sha256": "f613c8da5eb51f2da7d9d5b511dfb906ffd392e018fbca83049a6161448b6670",
-      "bytes": 9626
+      "sha256": "92ce2ebd2a867509443a4c98ac5c3b6774aa1ba507ec56567ae560e15fdd3ed2",
+      "bytes": 9763
     },
     "deploy/helm/sovite/values.yaml": {
-      "sha256": "3c341b51bacc84f1f1cefb891c620a62f79c0cbcae269bde6e7df67ba8e5c829",
-      "bytes": 3243
+      "sha256": "6f54b0b3cc04f1c5267f5a489ebfb93bb5463a9e3041991ed84be28487a4e36d",
+      "bytes": 3468
     },
     "docs/API_CONTRACT.md": {
       "sha256": "0c1b20ee8da1d173cb92c4f165896ca982ed30bbc0fbce6fb306197949d62cf4",
@@ -136,8 +136,8 @@
       "bytes": 8434
     },
     "docs/OPERATIONS.md": {
-      "sha256": "ff7b82ff7da950c4c566e15766cb014ec2f9c1a8202bfe2b962302e09b530bc1",
-      "bytes": 20592
+      "sha256": "c0d74baff39abbc86df3d6e9c47113d2b88b0a78a6923a9a58af3ec3fc72f32e",
+      "bytes": 22467
     },
     "docs/PLATFORM-SPEC.md": {
       "sha256": "d9c19ce142a97a4d1b38e35b0e38d1526cfeca394b3581ab1ae327da421d7c99",
@@ -168,7 +168,7 @@
       "bytes": 6150
     },
     "pyproject.toml": {
-      "sha256": "5dfecc2a136257153dfe2fffda3ee6de5531235a50542c3ce14d33a5b1b9739a",
+      "sha256": "fb7e5b294567f4b746fe05e4f48abfd9e131804e0bd9bbcd4f6543c4e41494ab",
       "bytes": 790
     },
     "requirements.lock": {
@@ -196,8 +196,12 @@
       "bytes": 2548
     },
     "scripts/package_release.py": {
-      "sha256": "7fbdc757e83e77e82793a331fc429424526412e796f1ebd4d87872c82b4a2736",
+      "sha256": "ce67ca5e0fbd4510a6ad35553dda5f8a17caa9bdc5a37c8f33364688c33e34e6",
       "bytes": 3955
+    },
+    "scripts/qualify_kubernetes.py": {
+      "sha256": "9242f3aa158b172088945e6673fb7c246f60ca0e308d56753a4a1545144aebfe",
+      "bytes": 3365
     },
     "scripts/state_archive.py": {
       "sha256": "ecb205d5ec172901052e5918db7dfd685534f724a7f50fdca5e0a54c71167d33",
@@ -208,15 +212,15 @@
       "bytes": 5048
     },
     "sovite/__init__.py": {
-      "sha256": "c5ae1dd17dae941fd044405a9783d876cc047593e8030a2c6727cc4b9dd161d1",
+      "sha256": "6a4cc649085534d7686adb19cd63fa950741d69bd29acfbbb35db1353e1e8f82",
       "bytes": 64
     },
     "sovite/adapters.py": {
-      "sha256": "e932811c0c5e602ee818f0a6d5b2e79a19b8024d3743cdced709e4ea01d1f1bb",
-      "bytes": 17841
+      "sha256": "e33e174ce6ef1eca6e1c28cc091d682c89b82bda4b0b17dd1de28474b0d725bd",
+      "bytes": 17994
     },
     "sovite/api.py": {
-      "sha256": "db897eae364c67b36f4e6cb319a4f73a0b2a647f8c0b753bfb9bfd95def2b2ee",
+      "sha256": "39384e4d1f37679e173fff64048deb46f2feabca1d17581d5128a76a9966fe92",
       "bytes": 21294
     },
     "sovite/cli.py": {
@@ -274,6 +278,10 @@
     "tests/test_backend.py": {
       "sha256": "921550887f6e02a5ab40c0dc3e305a155b8f3aebeef801e34bb0d5ad139c925f",
       "bytes": 23383
+    },
+    "tests/test_deployment.py": {
+      "sha256": "eb1c50be7da8292f67e889ada7b083b3e4e6a4259ac7ceecf7840149e7beefb5",
+      "bytes": 3351
     },
     "tests/test_policy.py": {
       "sha256": "604ab2ca3bbd317183f624c90b29b80df925f1cbe1438a89116e1a9751301d37",
