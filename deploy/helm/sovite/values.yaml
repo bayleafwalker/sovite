@@ -89,6 +89,7 @@ ollama:
   # Pre-stage model weights into the PVC. No model registry egress is allowed at runtime.
 networkPolicy:
   enabled: true
+  ciliumAPIServer: false
   # Cilium provides exact DNS query allowlists; no unrestricted UDP/53 exception is created.
   ciliumDns: true
   dnsNamespace: kube-system

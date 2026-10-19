@@ -11,6 +11,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ $name }}-native-harness
+  {{- with .Values.nativeHarness.persistenceLabels }}
+  labels: {{ toYaml . | nindent 4 }}
+  {{- end }}
   annotations: {helm.sh/resource-policy: keep}
 spec:
   accessModes: [ReadWriteOnce]

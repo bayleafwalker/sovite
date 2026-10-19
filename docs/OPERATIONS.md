@@ -140,3 +140,33 @@ Model outages leave authorized jobs queued or retrying according to their grant.
 ## Observed distribution validation
 
 `DEPLOYMENT-VALIDATION.json` records the checks actually performed for this delivery. The local installation was bootstrapped, assessed, qualified and exercised through its real API and independent worker, including an MCP request, idempotency, private artifact access, a complete stop/restart, persistence, audit verification and clean shutdown. Helm was used to render and bind the complete reference release and reject invalid configurations. The official Compose CLI parsed and merged the synthetic, native and GPU profiles. Container builds, Docker networking, Helm reconciliation and live Kubernetes network isolation are distinct checks; the report does not claim those took place.
+
+## Site integration and operator-held signing
+
+The chart supports `ollama.runtimeClassName` for an installed GPU runtime and
+`ollama.gpuOverheadBytes` to reserve VRAM on shared devices. Resource requests
+still determine scheduling; a time-sliced GPU allocation does not promise
+exclusive memory or throughput. Measure the loaded model's actual CPU/GPU split.
+
+For Cilium Gateway API, `networkPolicy.controlIngress.ciliumGateway: true`
+permits the `ingress` identity to reach only the control service on TCP 8080.
+`networkPolicy.ciliumAPIServer: true` permits only the worker to reach the
+`kube-apiserver` identity on the configured API port. Keep explicit API addresses
+and run the installer's live endpoint validation. Kubernetes RBAC independently
+restricts the namespace and resource verbs. Test both allowed and denied paths.
+
+`nativeHarness.workspace.configMap` can provide a small approved read-only
+fixture instead of a PVC. The chart rejects simultaneous ConfigMap/PVC sources.
+`persistenceLabels` on `postgres`, `garage`, `nativeHarness` and `ollama` lets a
+site enroll volumes in its existing backup system. Verify the resulting live
+volume membership; cache files and durable execution ledgers have different
+recovery requirements.
+
+`scripts/qualify_kubernetes.py` signs from the operator workstation without
+copying a private key into a workload. Open a loopback PostgreSQL port-forward,
+then supply the explicit context, namespace, bundle, rendered effective values,
+private runtime JSON, signing/public key paths, evidence, and local database
+port. It verifies the live runtime fingerprint and active generation before
+signing. The database connection uses the local tunnel while the signature binds
+the installation's original database address. A qualification's scope must state
+what was actually observed; commissioning evidence is not production evidence.

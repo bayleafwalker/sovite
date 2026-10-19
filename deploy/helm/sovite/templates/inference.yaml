@@ -12,6 +12,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ $name }}-models
+  {{- with .Values.ollama.persistenceLabels }}
+  labels: {{ toYaml . | nindent 4 }}
+  {{- end }}
   annotations: {helm.sh/resource-policy: keep}
 spec:
   accessModes: [ReadWriteOnce]

@@ -1,5 +1,18 @@
 {{- if .Values.networkPolicy.enabled -}}
 {{- $name := include "sovite.fullname" . -}}
+{{- if and .Values.networkPolicy.ciliumAPIServer .Values.kubernetesTools.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: {{ $name }}-kubernetes-api}
+spec:
+  endpointSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: worker}
+  egress:
+    - toEntities: [kube-apiserver]
+      toPorts:
+        - ports: [{port: {{ .Values.kubernetesTools.apiServerPort | quote }}, protocol: TCP}]
+---
+{{- end }}
 {{- if .Values.networkPolicy.controlIngress.ciliumGateway }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

@@ -47,7 +47,11 @@ spec:
         - {name: tmp, emptyDir: {sizeLimit: 128Mi}}
         - {name: run, emptyDir: {sizeLimit: 16Mi}}
   volumeClaimTemplates:
-    - metadata: {name: data}
+    - metadata:
+        name: data
+        {{- with .Values.postgres.persistenceLabels }}
+        labels: {{ toYaml . | nindent 10 }}
+        {{- end }}
       spec:
         accessModes: [ReadWriteOnce]
         {{- if .Values.postgres.storageClass }}
@@ -131,7 +135,11 @@ spec:
         - name: config
           configMap: {name: {{ $name }}-garage}
   volumeClaimTemplates:
-    - metadata: {name: data}
+    - metadata:
+        name: data
+        {{- with .Values.garage.persistenceLabels }}
+        labels: {{ toYaml . | nindent 10 }}
+        {{- end }}
       spec:
         accessModes: [ReadWriteOnce]
         {{- if .Values.garage.storageClass }}
