@@ -1,0 +1,23 @@
+# Full reference installation; pair with config/platform.kubernetes.yaml.
+# Merge a site file supplying actual Kubernetes API CIDRs and published image names.
+fullnameOverride: sovite
+mode: development
+displayName: Sovite Platform
+bundle:
+  configMap: sovite-bundle
+qualification:
+  configMap: sovite-trust
+publicOrigin: https://sovite.example.internal
+secureCookies: true
+nativeHarness:
+  enabled: true
+  agentId: code-review
+kubernetesTools:
+  enabled: true
+  namespace: sovite
+  apiServerCIDRs: []
+networkPolicy:
+  enabled: true
+  ciliumDns: true
+ingress:
+  enabled: false

@@ -1,0 +1,89 @@
+{{- if .Values.nativeHarness.enabled -}}
+{{- $name := include "sovite.fullname" . -}}
+apiVersion: v1
+kind: Service
+metadata: {name: {{ $name }}-native-harness}
+spec:
+  selector: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: native-harness}
+  ports: [{name: http, port: 8090, targetPort: http}]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-native-harness
+  annotations: {helm.sh/resource-policy: keep}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if .Values.nativeHarness.storageClass }}
+  storageClassName: {{ .Values.nativeHarness.storageClass | quote }}
+  {{- end }}
+  resources: {requests: {storage: {{ .Values.nativeHarness.storage }}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-native-harness
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: native-harness}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sovite, app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: native-harness}
+      annotations: {sovite.platform/bundle-revision: {{ .Values.bundle.revision | quote }}}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: native-harness
+          image: {{ include "sovite.image" .Values.nativeHarness.image | quote }}
+          command: [uvicorn]
+          args: [sovite.harness_api:create_app, --factory, --host, 0.0.0.0, --port, "8090"]
+          ports: [{name: http, containerPort: 8090}]
+          env:
+            - {name: SOVITE_BUNDLE_PATH, value: /config/bundle.yaml}
+            - {name: SOVITE_HARNESS_AGENT_ID, value: {{ .Values.nativeHarness.agentId | quote }}}
+            - {name: SOVITE_HARNESS_STATE_PATH, value: /state/harness}
+            {{- if .Values.nativeHarness.workspace.existingClaim }}
+            - {name: SOVITE_NATIVE_WORKSPACE, value: /workspace/input}
+            {{- end }}
+            - name: SOVITE_HARNESS_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_HARNESS_TOKEN}
+          resources: {{ toYaml .Values.nativeHarness.resources | nindent 12 }}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          readinessProbe: {httpGet: {path: /health/ready, port: http}, initialDelaySeconds: 10, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /health/live, port: http}, initialDelaySeconds: 30, periodSeconds: 20}
+          volumeMounts:
+            - {name: bundle, mountPath: /config, readOnly: true}
+            - {name: state, mountPath: /state/harness}
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.nativeHarness.workspace.existingClaim }}
+            - name: approved-workspace
+              mountPath: /workspace/input
+              readOnly: true
+              {{- if .Values.nativeHarness.workspace.subPath }}
+              subPath: {{ .Values.nativeHarness.workspace.subPath | quote }}
+              {{- end }}
+            {{- end }}
+      volumes:
+        - name: bundle
+          configMap:
+            name: {{ .Values.bundle.configMap }}
+            items: [{key: {{ .Values.bundle.key }}, path: bundle.yaml}]
+        - name: state
+          persistentVolumeClaim: {claimName: {{ $name }}-native-harness}
+        - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+        {{- if .Values.nativeHarness.workspace.existingClaim }}
+        - name: approved-workspace
+          persistentVolumeClaim:
+            claimName: {{ .Values.nativeHarness.workspace.existingClaim | quote }}
+            readOnly: true
+        {{- end }}
+{{- end }}

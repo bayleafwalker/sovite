@@ -1,0 +1,389 @@
+{
+  "schema": "sovite.state-integration-report/v1",
+  "completed_at": "2026-10-19T07:39:05Z",
+  "status": "passed",
+  "scope": "Actual PostgreSQL 17.11 and Garage 2.4.1 on one isolated host using the unchanged deterministic synthetic execution adapter, an independent API and workers, signed development-mode admission, real S3 artifacts, process restarts, abrupt worker lease recovery, two-worker dispatch, quiesced pg_dump/pg_restore and S3 archive recovery into fresh destinations with recovery-lock. Does not qualify real model competence, effectful tools, HA/failover, power-loss durability, a live Kubernetes/Compose deployment, production network isolation or hardware attestation.",
+  "execution_adapter": "demo (intentionally synthetic)",
+  "network": {
+    "bind_address": "127.0.0.1",
+    "api": 8084,
+    "postgres": 15432,
+    "garage_s3": 13900,
+    "garage_rpc": 13901,
+    "garage_admin": 13903,
+    "unmodified_existing_services": [
+      8080,
+      8090,
+      11434,
+      8083
+    ],
+    "tls": "Loopback development fixture only; no remote TLS qualification"
+  },
+  "qualification_required": true,
+  "mode": "development",
+  "generation": "sha256:07c468e57ff86ac150d491b2d95ef7152864963413e33f31584226140483ac20",
+  "runtime_binding": "sha256:528fe9cc9506adbba6c5643afd353baadcc611ad1b83ffb10139a4cdba818e6a",
+  "versions": {
+    "SQLAlchemy": "2.1.5",
+    "psycopg": "3.3.6",
+    "boto3": "1.43.114",
+    "botocore": "1.43.114",
+    "fastapi": "0.146.0",
+    "uvicorn": "0.54.0"
+  },
+  "official_binary_provenance": [
+    {
+      "package": "postgresql-17",
+      "version": "17.11-1.pgdg24.04+2",
+      "source": "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/postgresql-17_17.11-1.pgdg24.04+2_amd64.deb",
+      "sha256": "d5b58058a82a3f344f832aea2cc54badc4f6265c25c960752cb1f5df5d2180ee",
+      "bytes": 16949784,
+      "verified_against": "official HTTPS package index SHA256"
+    },
+    {
+      "package": "postgresql-client-17",
+      "version": "17.11-1.pgdg24.04+2",
+      "source": "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/postgresql-client-17_17.11-1.pgdg24.04+2_amd64.deb",
+      "sha256": "b3b071b67a814a382516d6f6241b529c52f909672457e2f48083acce047b634f",
+      "bytes": 2052656,
+      "verified_against": "official HTTPS package index SHA256"
+    },
+    {
+      "package": "libpq5",
+      "version": "18.6-1.pgdg24.04+2",
+      "source": "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-18/libpq5_18.6-1.pgdg24.04+2_amd64.deb",
+      "sha256": "b487c5ed2ceb9244c6a9d6ae65818ed6707c3c44a2e14488394ae4194c52c53b",
+      "bytes": 264072,
+      "verified_against": "official HTTPS package index SHA256"
+    },
+    {
+      "package": "garage",
+      "version": "2.4.1",
+      "source": "https://garagehq.deuxfleurs.fr/_releases/v2.4.1/x86_64-unknown-linux-musl/garage",
+      "sha256": "ae49f8de4aaee6b5ca305f7cbdccc8cd8a29b2804aac074649f18bfb83d0a2b6",
+      "bytes": 71272496,
+      "verified_against": "official HTTPS release download; observed digest"
+    }
+  ],
+  "source_sha256": {
+    "sovite/db.py": "2dc5fd1200146af24825726c8f03a4444683495ddb20b39763040d4fa871d91a",
+    "sovite/storage.py": "51912b897f893e0a73c6838d16d6eb25029ce6ae8c5fb7791a37735c5bda9a6e",
+    "sovite/worker.py": "99cc5172afbbca2623e39b9887fec14df4531d18c7604aeac80c100605872a79",
+    "sovite/service.py": "11657a5c75dfb979396962ab6a4be09abfe9faa244ee5ad36692df7f818441f3",
+    "sovite/api.py": "db897eae364c67b36f4e6cb319a4f73a0b2a647f8c0b753bfb9bfd95def2b2ee",
+    "sovite/qualification.py": "f978edf28cef3590751025aba006cfa4506001948131b8c5bd64f0a4b7dbd317",
+    "sovite/policy.py": "7b079dd01ef84b1b4bd8993324a0dbcb54b40c5f4df47b729374d5c6a764ec87",
+    "sovite/settings.py": "8303846cdf1fca5bceb268b78b74539fdd138208d2d481ca2530cb88f959e436",
+    "scripts/state_archive.py": "ecb205d5ec172901052e5918db7dfd685534f724a7f50fdca5e0a54c71167d33"
+  },
+  "checks": [
+    {
+      "name": "state-engine-connectivity",
+      "status": "passed",
+      "detail": "PostgreSQL accepts SCRAM authentication; Garage created the private default bucket with the supplied official single-node flags.",
+      "postgres": "PostgreSQL 17.11 (Ubuntu 17.11-1.pgdg24.04+2) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit",
+      "durability": {
+        "fsync": "on",
+        "full_page_writes": "on",
+        "synchronous_commit": "on"
+      }
+    },
+    {
+      "name": "qualified-process-installation",
+      "status": "passed",
+      "detail": "Independent API and worker use the actual PostgreSQL schema and Garage artifacts; signed qualification has an explicit development-only bootstrap scope.",
+      "tables": [
+        "audit_events",
+        "auth_sessions",
+        "bundle_revisions",
+        "grant_runtime_state",
+        "jobs",
+        "platform_metadata",
+        "qualifications",
+        "worker_heartbeats"
+      ],
+      "generation": "sha256:07c468e57ff86ac150d491b2d95ef7152864963413e33f31584226140483ac20",
+      "runtime_binding": "sha256:528fe9cc9506adbba6c5643afd353baadcc611ad1b83ffb10139a4cdba818e6a"
+    },
+    {
+      "name": "private-result-and-bounded-receipt",
+      "status": "passed",
+      "detail": "Actual independent worker completed a task; private API and S3 bytes agree with the stored SHA-256; caller sees exactly receipt/status; anonymous S3 and caller artifact access are denied.",
+      "artifact_bytes": 434,
+      "artifact_sha256": "1a0b79f124461eb785326dd5ab2fa36fbba1099007088edec1c1b7b244d2dc9e",
+      "caller_private_http_status": 403,
+      "anonymous_s3_http_status": 403
+    },
+    {
+      "name": "api-worker-restart",
+      "status": "passed",
+      "detail": "Stopped and restarted independent API and worker; completed task, idempotency, private object digest, qualification and receipt survived without replay.",
+      "attempts": 1
+    },
+    {
+      "name": "postgres-lease-recovery",
+      "status": "passed",
+      "detail": "Abruptly killed only the fixture worker while its task was running. A new process reclaimed the expired PostgreSQL lease and safely reran the explicitly synthetic task; exactly one result was released.",
+      "attempts": 2
+    },
+    {
+      "name": "postgres-concurrent-workers",
+      "status": "passed",
+      "detail": "Two independent worker processes completed four queued tasks with one attempt per task. Both acquired work and the shared serialized audit chain verifies.",
+      "tasks": 4,
+      "distinct_workers": 2,
+      "audit_events": 40
+    },
+    {
+      "name": "quiesced-state-backup",
+      "status": "passed",
+      "detail": "Stopped both workers, retained a deliberately queued recovery fixture, stopped the API, then ran actual pg_dump in custom format and the shipped state_archive.py dump command.",
+      "postgres_bytes": 32420,
+      "archived_objects": 6,
+      "database_states": {
+        "queued": 1,
+        "completed": 6
+      }
+    },
+    {
+      "name": "state-engine-restart",
+      "status": "passed",
+      "detail": "Gracefully stopped and restarted PostgreSQL and Garage themselves. All rows, the audit head, queued state and every recorded artifact digest survived.",
+      "artifacts_verified": 6
+    },
+    {
+      "name": "fresh-database-and-bucket-restore",
+      "status": "passed",
+      "detail": "Restored the actual PostgreSQL custom-format dump into a separate fresh database and used the shipped archive script to restore six objects into a separate fresh Garage bucket. Table counts, task states, audit head and all referenced object digests match the quiesced source.",
+      "restored_objects": 6,
+      "restored_tables": 8,
+      "audit_events": 42
+    },
+    {
+      "name": "restored-authority-lock",
+      "status": "passed",
+      "detail": "Applied the real recovery-lock CLI before exposing restored state. Both grants are inhibited; the queued task is blocked without execution; the audit chain extends correctly. Changed database/bucket placement invalidates the old qualification; caller receipts are unavailable while private operator reads still verify.",
+      "inhibited_grants": 2,
+      "queued_attempts": 0,
+      "qualification_valid": false,
+      "restored_audit_events": 46
+    },
+    {
+      "name": "signed-development-state-evidence",
+      "status": "passed",
+      "detail": "Issued an Ed25519 qualification containing the actual successful state-integration checks and explicit development-only limitations, then verified its signature against configured public trust. It binds the original database/bucket placement and fixture generation.",
+      "qualification_id": "9aa5597505814dfd98ae81d5e549e24e",
+      "evidence_kind": "state-integration",
+      "enforced_production_qualification": false
+    },
+    {
+      "name": "isolated-runtime-cleanup",
+      "status": "passed",
+      "detail": "Stopped every task-owned API, worker and state-engine process; all five owned loopback ports are closed. State-engine processes ran as nobody. Fixture credentials, signing key and backups remain private and are excluded from deliverables.",
+      "closed_ports": [
+        8084,
+        15432,
+        13900,
+        13901,
+        13903
+      ],
+      "state_engine_identities": {
+        "postgres": "nobody",
+        "garage": "nobody"
+      }
+    }
+  ],
+  "summary": {
+    "checks_passed": 12,
+    "checks_failed": 0,
+    "database_tables": 8,
+    "completed_tasks_before_backup": 6,
+    "queued_tasks_before_backup": 1,
+    "parallel_tasks": 4,
+    "parallel_workers": 2,
+    "recovered_lease_attempts": 2,
+    "original_private_objects": 6,
+    "archived_private_objects": 6,
+    "restored_private_objects": 6,
+    "restored_inhibited_grants": 2,
+    "restored_queued_task_status": "blocked",
+    "restored_queued_task_attempts": 0,
+    "restored_qualification_valid": false,
+    "private_result_available_to_operator_after_lock": true,
+    "caller_status_after_lock": "unavailable"
+  },
+  "backup": {
+    "postgres_bytes": 32420,
+    "postgres_sha256": "5892c6577ac0afec44be5f73a750871427018484e5eb8c6c7044323fa829904d",
+    "artifact_archive_bytes": 4946,
+    "artifact_archive_sha256": "a7ee3b1ae7e09667087f5bffdca4d0c8097dcc36c255f4ca3b50780c50e83e82",
+    "artifact_count": 6
+  },
+  "source_audit_after_final_qualification": {
+    "valid": true,
+    "events": 43,
+    "head": "c3caf53c8740e31301b969364037510558dfded5340f30df2030862e58c7582c",
+    "limitation": "Local chain integrity; external checkpoints are required to detect full-history replacement."
+  },
+  "restored_audit_after_lock_and_private_read": {
+    "valid": true,
+    "events": 46,
+    "head": "7fe29bd42df230b9561fc65b22515fb09f73fe7dfb1f4f20a57afecdc5fd08a4",
+    "limitation": "Local chain integrity; external checkpoints are required to detect full-history replacement."
+  },
+  "signed_development_qualification": {
+    "id": "9aa5597505814dfd98ae81d5e549e24e",
+    "signature": "oWdq18Hg26+RXaPbDBpTqKnAVse86YXITJYdcnpOxZH+v4N9sHrB+QALZdsHZHtjFe7JAL97lMEmCQ3sX+s5Dw==",
+    "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAVry3jDgEjnyf+N7pZdyuWa8OtsKX30FMQ9zwejdWSmE=\n-----END PUBLIC KEY-----\n",
+    "payload": {
+      "schema": "sovite.qualification/v1",
+      "id": "9aa5597505814dfd98ae81d5e549e24e",
+      "generation": "sha256:07c468e57ff86ac150d491b2d95ef7152864963413e33f31584226140483ac20",
+      "runtime_binding": "sha256:528fe9cc9506adbba6c5643afd353baadcc611ad1b83ffb10139a4cdba818e6a",
+      "profile": "compose",
+      "created_at": 1792395543.3638647,
+      "expires_at": 1792481943.3638647,
+      "passed": true,
+      "issuer": "isolated-state-integration",
+      "evidence": {
+        "schema": "sovite.assessment/v1",
+        "generation": "sha256:07c468e57ff86ac150d491b2d95ef7152864963413e33f31584226140483ac20",
+        "profile": "compose",
+        "runtime_binding": "sha256:528fe9cc9506adbba6c5643afd353baadcc611ad1b83ffb10139a4cdba818e6a",
+        "evidence_kind": "state-integration",
+        "scope": "Actual PostgreSQL 17.11 and Garage 2.4.1 on one isolated host using the unchanged deterministic synthetic execution adapter, an independent API and workers, signed development-mode admission, real S3 artifacts, process restarts, abrupt worker lease recovery, two-worker dispatch, quiesced pg_dump/pg_restore and S3 archive recovery into fresh destinations with recovery-lock. Does not qualify real model competence, effectful tools, HA/failover, power-loss durability, a live Kubernetes/Compose deployment, production network isolation or hardware attestation.",
+        "created_at": 1792395542.8510695,
+        "checks": [
+          {
+            "name": "state-engine-connectivity",
+            "status": "passed",
+            "detail": "PostgreSQL accepts SCRAM authentication; Garage created the private default bucket with the supplied official single-node flags.",
+            "postgres": "PostgreSQL 17.11 (Ubuntu 17.11-1.pgdg24.04+2) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit",
+            "durability": {
+              "fsync": "on",
+              "full_page_writes": "on",
+              "synchronous_commit": "on"
+            }
+          },
+          {
+            "name": "qualified-process-installation",
+            "status": "passed",
+            "detail": "Independent API and worker use the actual PostgreSQL schema and Garage artifacts; signed qualification has an explicit development-only bootstrap scope.",
+            "tables": [
+              "audit_events",
+              "auth_sessions",
+              "bundle_revisions",
+              "grant_runtime_state",
+              "jobs",
+              "platform_metadata",
+              "qualifications",
+              "worker_heartbeats"
+            ],
+            "generation": "sha256:07c468e57ff86ac150d491b2d95ef7152864963413e33f31584226140483ac20",
+            "runtime_binding": "sha256:528fe9cc9506adbba6c5643afd353baadcc611ad1b83ffb10139a4cdba818e6a"
+          },
+          {
+            "name": "private-result-and-bounded-receipt",
+            "status": "passed",
+            "detail": "Actual independent worker completed a task; private API and S3 bytes agree with the stored SHA-256; caller sees exactly receipt/status; anonymous S3 and caller artifact access are denied.",
+            "artifact_bytes": 434,
+            "artifact_sha256": "1a0b79f124461eb785326dd5ab2fa36fbba1099007088edec1c1b7b244d2dc9e",
+            "caller_private_http_status": 403,
+            "anonymous_s3_http_status": 403
+          },
+          {
+            "name": "api-worker-restart",
+            "status": "passed",
+            "detail": "Stopped and restarted independent API and worker; completed task, idempotency, private object digest, qualification and receipt survived without replay.",
+            "attempts": 1
+          },
+          {
+            "name": "postgres-lease-recovery",
+            "status": "passed",
+            "detail": "Abruptly killed only the fixture worker while its task was running. A new process reclaimed the expired PostgreSQL lease and safely reran the explicitly synthetic task; exactly one result was released.",
+            "attempts": 2
+          },
+          {
+            "name": "postgres-concurrent-workers",
+            "status": "passed",
+            "detail": "Two independent worker processes completed four queued tasks with one attempt per task. Both acquired work and the shared serialized audit chain verifies.",
+            "tasks": 4,
+            "distinct_workers": 2,
+            "audit_events": 40
+          },
+          {
+            "name": "quiesced-state-backup",
+            "status": "passed",
+            "detail": "Stopped both workers, retained a deliberately queued recovery fixture, stopped the API, then ran actual pg_dump in custom format and the shipped state_archive.py dump command.",
+            "postgres_bytes": 32420,
+            "archived_objects": 6,
+            "database_states": {
+              "queued": 1,
+              "completed": 6
+            }
+          },
+          {
+            "name": "state-engine-restart",
+            "status": "passed",
+            "detail": "Gracefully stopped and restarted PostgreSQL and Garage themselves. All rows, the audit head, queued state and every recorded artifact digest survived.",
+            "artifacts_verified": 6
+          },
+          {
+            "name": "fresh-database-and-bucket-restore",
+            "status": "passed",
+            "detail": "Restored the actual PostgreSQL custom-format dump into a separate fresh database and used the shipped archive script to restore six objects into a separate fresh Garage bucket. Table counts, task states, audit head and all referenced object digests match the quiesced source.",
+            "restored_objects": 6,
+            "restored_tables": 8,
+            "audit_events": 42
+          },
+          {
+            "name": "restored-authority-lock",
+            "status": "passed",
+            "detail": "Applied the real recovery-lock CLI before exposing restored state. Both grants are inhibited; the queued task is blocked without execution; the audit chain extends correctly. Changed database/bucket placement invalidates the old qualification; caller receipts are unavailable while private operator reads still verify.",
+            "inhibited_grants": 2,
+            "queued_attempts": 0,
+            "qualification_valid": false,
+            "restored_audit_events": 46
+          }
+        ]
+      }
+    },
+    "verified_against_configured_trust": true,
+    "payload_sha256": "80a9e7adfa92835fd910ab0364ec429583ee65fd6f1f929b2a845929169a4b93"
+  },
+  "commands_exercised": [
+    "python -m sovite.cli init",
+    "python -m sovite.cli keys init",
+    "python -m sovite.cli runtime-binding",
+    "python -m sovite.cli qualify --evidence <private-evidence.json> --profile compose --valid-days 1 --issuer isolated-state-integration",
+    "python -m sovite.cli serve --host 127.0.0.1 --port 8084",
+    "python -m sovite.cli worker",
+    "pg_dump --format=custom --dbname=sovite_state",
+    "python scripts/state_archive.py dump <private-artifacts.ndjson>",
+    "pg_restore --exit-on-error --no-owner --no-privileges --dbname=sovite_state_restored <private-postgres.dump>",
+    "python scripts/state_archive.py restore <private-artifacts.ndjson>",
+    "python -m sovite.cli recovery-lock --reason \"Restored integration archive requires explicit operator review\"",
+    "python -m sovite.cli audit verify"
+  ],
+  "platform_compatibility_fixes_required": [],
+  "limitations": [
+    "This is a single-node process installation with actual state engines; Docker Compose and Kubernetes reconciliation were not exercised in this integration.",
+    "Graceful database/object-store restart and logical restore were verified; storage power loss, hardware durability, replication, HA, failover and prolonged load were not tested.",
+    "Two workers and four concurrent tasks exercise real PostgreSQL locking at a bounded scale; they do not establish throughput or saturation limits.",
+    "The synthetic adapter makes lease replay safe by construction. Effectful tools and native request-ledger restore are outside this state-adapter fixture.",
+    "The S3 archive script was exercised for a dedicated private bucket while API and workers were quiesced. Backups remain private because database rows and objects contain task payloads.",
+    "The signature verifies declared runtime placement and collected evidence. It is not hardware attestation or independent production deployment certification.",
+    "Audit continuity was verified against the stored head; full-history replacement still requires external checkpoints to detect."
+  ],
+  "cleanup": {
+    "all_owned_services_stopped": true,
+    "closed_ports": [
+      8084,
+      15432,
+      13900,
+      13901,
+      13903
+    ],
+    "credentials_or_private_artifact_bodies_in_report": false
+  }
+}

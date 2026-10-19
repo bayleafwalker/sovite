@@ -1,0 +1,217 @@
+{{- if .Values.networkPolicy.enabled -}}
+{{- $name := include "sovite.fullname" . -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-default-deny}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-control-ingress}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: control}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {{ toYaml .Values.networkPolicy.controlIngress.namespaceSelector | nindent 12 }}
+          podSelector: {{ toYaml .Values.networkPolicy.controlIngress.podSelector | nindent 12 }}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-state-ingress}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+    matchExpressions:
+      - {key: sovite.component, operator: In, values: [postgres, garage]}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+            matchExpressions:
+              - {key: sovite.component, operator: In, values: [control, worker, maintenance]}
+      ports: [{protocol: TCP, port: 5432}, {protocol: TCP, port: 3900}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-state-egress}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+    matchExpressions:
+      - {key: sovite.component, operator: In, values: [control, worker, maintenance]}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+            matchExpressions:
+              - {key: sovite.component, operator: In, values: [postgres, garage]}
+      ports: [{protocol: TCP, port: 5432}, {protocol: TCP, port: 3900}]
+    {{- range .Values.networkPolicy.stateEgress }}
+    - to:
+        - ipBlock: {cidr: {{ .cidr | quote }}}
+      ports:
+        {{- range .ports }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-worker-execution}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: worker}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: ollama}
+      ports: [{protocol: TCP, port: 11434}]
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: native-harness}
+      ports: [{protocol: TCP, port: 8090}]
+    {{- if .Values.kubernetesTools.enabled }}
+    - to:
+        {{- range .Values.kubernetesTools.apiServerCIDRs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports: [{protocol: TCP, port: {{ .Values.kubernetesTools.apiServerPort }}}]
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-inference-ingress}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: ollama}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+            matchExpressions:
+              - {key: sovite.component, operator: In, values: [worker, native-harness]}
+      ports: [{protocol: TCP, port: 11434}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-native-harness}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: native-harness}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: worker}
+      ports: [{protocol: TCP, port: 8090}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: ollama}
+      ports: [{protocol: TCP, port: 11434}]
+{{- if .Values.networkPolicy.toolPeers }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-tool-egress}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+    matchExpressions:
+      - {key: sovite.component, operator: In, values: [worker, native-harness]}
+  policyTypes: [Egress]
+  egress:
+    {{- range .Values.networkPolicy.toolPeers }}
+    - to:
+        - namespaceSelector: {{ toYaml (required "toolPeers namespaceSelector is required" .namespaceSelector) | nindent 12 }}
+          podSelector: {{ toYaml (required "toolPeers podSelector is required" .podSelector) | nindent 12 }}
+      ports:
+        {{- range .ports }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+    {{- end }}
+{{- end }}
+{{- range $key := list "modelPeers" "harnessPeers" }}
+{{- $peers := index $.Values.networkPolicy $key }}
+{{- if $peers }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-{{ $key | lower }}-egress}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ $.Release.Name }}}
+    matchExpressions:
+      - key: sovite.component
+        operator: In
+        values: {{ if eq $key "modelPeers" }}[worker, native-harness]{{ else }}[worker]{{ end }}
+  policyTypes: [Egress]
+  egress:
+    {{- range $peers }}
+    - to:
+        - namespaceSelector: {{ toYaml (required "External peer namespaceSelector is required" .namespaceSelector) | nindent 12 }}
+          podSelector: {{ toYaml (required "External peer podSelector is required" .podSelector) | nindent 12 }}
+      ports:
+        {{- range .ports }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.networkPolicy.ciliumDns }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: {{ $name }}-private-dns}
+spec:
+  endpointSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
+    matchExpressions:
+      - {key: sovite.component, operator: In, values: [control, worker, native-harness, maintenance]}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicy.dnsNamespace }}
+            {{- range $key, $value := .Values.networkPolicy.dnsPodLabels }}
+            {{ printf "k8s:%s" $key | quote }}: {{ $value | quote }}
+            {{- end }}
+      toPorts:
+        - ports: [{port: "53", protocol: ANY}]
+          rules:
+            dns:
+              {{- range $service := list "postgres" "garage" "ollama" "native-harness" }}
+              - matchName: {{ printf "%s-%s.%s.svc.%s" $name $service $.Release.Namespace $.Values.networkPolicy.clusterDomain | quote }}
+              {{- end }}
+              {{- range .Values.networkPolicy.extraDnsNames }}
+              - matchName: {{ . | quote }}
+              {{- end }}
+              {{- range $key := list "toolPeers" "modelPeers" "harnessPeers" }}
+              {{- range index $.Values.networkPolicy $key }}
+              {{- range .hosts }}
+              - matchName: {{ . | quote }}
+              - matchName: {{ printf "%s.%s.svc.%s" . $.Release.Namespace $.Values.networkPolicy.clusterDomain | quote }}
+              - matchName: {{ printf "%s.svc.%s" . $.Values.networkPolicy.clusterDomain | quote }}
+              - matchName: {{ printf "%s.%s" . $.Values.networkPolicy.clusterDomain | quote }}
+              {{- end }}
+              {{- end }}
+              {{- end }}
+              {{- if .Values.kubernetesTools.enabled }}
+              - matchName: {{ printf "kubernetes.default.svc.%s" .Values.networkPolicy.clusterDomain | quote }}
+              - matchName: {{ printf "kubernetes.default.svc.%s.svc.%s" .Release.Namespace .Values.networkPolicy.clusterDomain | quote }}
+              - matchName: {{ printf "kubernetes.default.svc.svc.%s" .Values.networkPolicy.clusterDomain | quote }}
+              - matchName: kubernetes.default.svc
+              {{- end }}
+{{- end }}
+{{- end }}

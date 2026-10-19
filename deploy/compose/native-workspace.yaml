@@ -1,0 +1,12 @@
+# Optional explicit source. The image and native ledger have no host mount by default.
+services:
+  native-harness:
+    environment:
+      SOVITE_NATIVE_WORKSPACE: /workspace/input
+    volumes:
+      - type: bind
+        source: ${SOVITE_NATIVE_WORKSPACE_SOURCE:?Select an approved task-specific input directory}
+        target: /workspace/input
+        read_only: true
+        bind:
+          create_host_path: false

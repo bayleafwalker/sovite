@@ -1,0 +1,93 @@
+{{- $name := include "sovite.fullname" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-control
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-control
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: control}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-control
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.control.replicas }}
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: control}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sovite, app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: control}
+      annotations: {sovite.platform/bundle-revision: {{ .Values.bundle.revision | quote }}}
+    spec:
+      serviceAccountName: {{ $name }}-control
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: control
+          image: {{ include "sovite.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [serve, --host, 0.0.0.0, --port, "8080"]
+          ports: [{name: http, containerPort: 8080}]
+          env: {{ include "sovite.runtimeEnv" . | nindent 12 }}
+          resources: {{ toYaml .Values.control.resources | nindent 12 }}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          livenessProbe: {httpGet: {path: /health/live, port: http}, initialDelaySeconds: 15, periodSeconds: 20}
+          readinessProbe: {httpGet: {path: /health/ready, port: http}, initialDelaySeconds: 5, periodSeconds: 10}
+          startupProbe: {httpGet: {path: /health/live, port: http}, failureThreshold: 30, periodSeconds: 5}
+          volumeMounts:
+            - {name: bundle, mountPath: /config, readOnly: true}
+            - {name: trust, mountPath: /trust, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: bundle
+          configMap:
+            name: {{ .Values.bundle.configMap }}
+            items: [{key: {{ .Values.bundle.key }}, path: bundle.yaml}]
+        - name: trust
+          configMap: {name: {{ .Values.qualification.configMap }}}
+        - name: tmp
+          emptyDir: {sizeLimit: 128Mi}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: {{ $name }}-control}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: control}
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  annotations: {{ toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- end }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: {{ $name }}-control, port: {number: 8080}}
+{{- end }}

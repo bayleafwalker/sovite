@@ -1,0 +1,278 @@
+{
+  "schema": "sovite.distribution-validation/v1",
+  "observed_at": "2026-10-19T07:35:41.232311+00:00",
+  "status": "passed_with_explicit_scope",
+  "local_lifecycle": {
+    "profile": "local synthetic development",
+    "api_origin": "http://127.0.0.1:8083",
+    "assessment_checks": 6,
+    "qualified": true,
+    "actual_http_dispatch": true,
+    "mcp_idempotent_receipt": true,
+    "public_projection_exact_keys": [
+      "receipt",
+      "status"
+    ],
+    "private_canary_retained": true,
+    "public_canary_absent": true,
+    "restart_preserved_completed_job": true,
+    "restart_preserved_artifact_exactly": true,
+    "restart_preserved_public_projection": true,
+    "audit_valid_before_and_after_restart": true,
+    "audit_events_after_restart": 23,
+    "clean_stop": true,
+    "scope": "Actual console/control API and separate durable worker using SQLite and filesystem state; synthetic model only. No PostgreSQL/S3, Docker, Kubernetes or production network enforcement is claimed."
+  },
+  "compose": {
+    "tool": "Docker Compose v5.6.0",
+    "binary_sha256": "40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a",
+    "scope": "Official CLI interpolation, merge, schema and explicit network/credential structural checks; no containers built or started",
+    "profiles": [
+      {
+        "profile": "synthetic",
+        "passed": true,
+        "services": [
+          "control",
+          "garage",
+          "model-stage",
+          "ollama",
+          "postgres",
+          "worker"
+        ],
+        "networks_internal": [
+          "private",
+          "inference"
+        ]
+      },
+      {
+        "profile": "native",
+        "passed": true,
+        "services": [
+          "control",
+          "garage",
+          "model-stage",
+          "native-harness",
+          "ollama",
+          "postgres",
+          "worker"
+        ],
+        "networks_internal": [
+          "private",
+          "inference"
+        ]
+      },
+      {
+        "profile": "native-gpu",
+        "passed": true,
+        "services": [
+          "control",
+          "garage",
+          "model-stage",
+          "native-harness",
+          "ollama",
+          "postgres",
+          "worker"
+        ],
+        "networks_internal": [
+          "private",
+          "inference"
+        ]
+      }
+    ]
+  },
+  "helm": {
+    "tool": "Helm v4.3.1",
+    "scope": "Actual Helm lint/template, release binding and negative configuration checks only; no Kubernetes API calls, pod execution or network enforcement.",
+    "positive": [
+      {
+        "profile": "complete Kubernetes reference",
+        "resources": 30,
+        "stable_deployment_binding": true,
+        "namespace_bundle_and_public_trust_in_review": true,
+        "credentials_absent_from_review": true,
+        "control_and_worker_binding_identical": true,
+        "services_diagnostic_role_present": true
+      },
+      {
+        "profile": "network policy change",
+        "invalidates_previous_deployment_binding": true
+      },
+      {
+        "profile": "enforced structural fixture",
+        "resources": 30,
+        "digest_fixture_only": true,
+        "production_identity_not_claimed": true
+      }
+    ],
+    "negative": [
+      {
+        "case": "mode disagreement",
+        "rejected": true
+      },
+      {
+        "case": "worker pool missing",
+        "rejected": true
+      },
+      {
+        "case": "native service disabled",
+        "rejected": true
+      },
+      {
+        "case": "native agent mismatch",
+        "rejected": true
+      },
+      {
+        "case": "model service disabled",
+        "rejected": true
+      },
+      {
+        "case": "tool Role namespace mismatch",
+        "rejected": true
+      },
+      {
+        "case": "missing API addresses",
+        "rejected": true
+      },
+      {
+        "case": "broad API network",
+        "rejected": true
+      },
+      {
+        "case": "artifact endpoint mismatch",
+        "rejected": true
+      },
+      {
+        "case": "observed API endpoint mismatch",
+        "rejected": true
+      },
+      {
+        "case": "insecure origin",
+        "rejected": true
+      },
+      {
+        "case": "insecure cookies",
+        "rejected": true
+      },
+      {
+        "case": "qualification disabled",
+        "rejected": true
+      },
+      {
+        "case": "Cilium disabled",
+        "rejected": true
+      },
+      {
+        "case": "mutable runtime image",
+        "rejected": true
+      },
+      {
+        "case": "missing deployment binding",
+        "rejected": true
+      },
+      {
+        "case": "unrestricted state egress",
+        "rejected": true
+      }
+    ]
+  },
+  "final_provisioning_checks": {
+    "positive": [
+      {
+        "profile": "Compose persisted full Ollama profile and approved input",
+        "saved_native_overlay": true,
+        "saved_workspace_overlay": true,
+        "helper_reloads_saved_selection": true,
+        "explicit_environment_override_obeyed": true,
+        "official_compose_render_passed": true,
+        "workspace_read_only": true,
+        "input_separate_from_ledger": true
+      },
+      {
+        "profile": "complete Kubernetes reference with approved PVC input",
+        "resources": 30,
+        "workspace_and_pvc_read_only": true,
+        "host_path_absent": true,
+        "input_separate_from_ledger": true,
+        "public_prerequisites_emitted": true,
+        "effective_values_integrity_bound": true
+      },
+      {
+        "profile": "custom release with empty fullname override",
+        "actual_helm_service_prefix": "review-sovite",
+        "bundle_endpoint_binding_passed": true
+      },
+      {
+        "profile": "final enforced fixture including approved PVC",
+        "resources": 30,
+        "only_structural_identity_fixtures_used": true
+      }
+    ],
+    "negative": [
+      {
+        "case": "local compute in Kubernetes release",
+        "rejected": true
+      },
+      {
+        "case": "custom release endpoint mismatch",
+        "rejected": true
+      },
+      {
+        "case": "workspace path without claim",
+        "rejected": true
+      },
+      {
+        "case": "workspace parent traversal",
+        "rejected": true
+      },
+      {
+        "case": "workspace with disabled native service",
+        "rejected": true
+      }
+    ],
+    "scope": "Focused provision binding verification; approved input and digest values are temporary structural fixtures, not live cluster identities."
+  },
+  "validation_tools": {
+    "helm": {
+      "version": "v4.3.1",
+      "official_linux_amd64_archive_sha256": "0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b",
+      "executable_sha256": "b66cb19f2b31f9d427632ea6c4b4a1ff89b74ecaeaee323cd166da41a7af53bd",
+      "primary_source": "https://github.com/helm/helm/releases/tag/v4.3.1"
+    },
+    "compose": {
+      "version": "v5.6.0",
+      "official_linux_x86_64_binary_sha256": "40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a",
+      "observed_binary_sha256": "40343e21ca777173e69cff5dbafeb37c6f81f3b0d57d9e597f036e95eb63e76a",
+      "primary_source": "https://github.com/docker/compose/releases/tag/v5.6.0"
+    }
+  },
+  "python_scripts_compile": {
+    "passed": true,
+    "files": [
+      "installation.py",
+      "local_platform.py",
+      "install_kubernetes.py",
+      "deployment_contract.py",
+      "validate_deployment.py",
+      "lock_images.py",
+      "state_archive.py"
+    ]
+  },
+  "not_executed_by_this_verification": [
+    "Docker image builds or container execution",
+    "Docker network isolation",
+    "Kubernetes API apply or Helm reconciliation",
+    "Kubernetes PVC provisioning or live CNI/DNS enforcement",
+    "Production image/model identity verification",
+    "Compose archive backup/restore with a Docker daemon"
+  ],
+  "secret_handling": "No runtime credentials, signing private key, private canary content or private artifacts are included in this report. Temporary cluster addresses and digest fixtures were used only for structural checks and were removed.",
+  "shutdown": "The managed local API and worker on port 8083 were stopped cleanly; durable local state was retained outside the deliverable.",
+  "summary": {
+    "local_assessment_checks_passed": 6,
+    "compose_profiles_parsed": 4,
+    "full_reference_reviewed_resources": 30,
+    "invalid_configurations_rejected": 22,
+    "local_restart_persistence_passed": true,
+    "deployment_fingerprint_stability_and_mutation_verified": true
+  }
+}

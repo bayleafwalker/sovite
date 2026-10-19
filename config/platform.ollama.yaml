@@ -1,0 +1,122 @@
+apiVersion: sovite.platform/v1alpha1
+kind: PlatformBundle
+metadata:
+  name: sovite-private
+  display_name: Sovite
+  description: Private Ollama serving with independently packaged analysis and native Codex harnesses.
+  version: 0.1.0
+mode: development
+default_profile: private
+data_classes:
+  - {id: C0, name: Public, rank: 0}
+  - {id: C1, name: Operational metadata, rank: 1}
+  - {id: C2, name: Confidential, rank: 2}
+  - {id: C3, name: Restricted production data, rank: 3}
+destinations:
+  - id: private-runtime
+    name: Private execution
+    kind: private
+    clearance: C3
+    allowed_hosts: [ollama, native-harness, localhost, 127.0.0.1]
+  - {id: private-state, name: Private state and artifacts, kind: private, clearance: C3}
+  - {id: operations, name: Bounded operational events, kind: private, clearance: C1}
+models:
+  - id: local-reasoner
+    name: Local Qwen 3
+    adapter: ollama
+    endpoint: http://ollama:11434
+    model: qwen3:4b
+    destination: private-runtime
+    parameters: {temperature: 0.2, think: false, num_predict: 2048, num_ctx: 8192}
+  - id: native-reasoner
+    name: Local Qwen 3 through the Responses API
+    description: Independently configured wire protocol for the native harness; qualify tool and continuation behavior with this exact model.
+    adapter: openai-compatible
+    wire_api: responses
+    endpoint: http://ollama:11434/v1
+    identity_protocol: ollama
+    identity_endpoint: http://ollama:11434
+    model: qwen3:4b
+    destination: private-runtime
+    parameters: {reasoning_effort: none}
+harnesses:
+  - id: private-analysis
+    name: Bounded diagnostic harness
+    kind: tool-agent
+    version: 0.1.0
+    capabilities: [private-result, allowlisted-tools, bounded-steps]
+  - id: native-codex
+    name: Isolated native Codex service
+    description: Preserves the native CLI in a separate container without control-plane database or artifact credentials.
+    kind: agent-http
+    endpoint: http://native-harness:8090/run
+    cancel_endpoint: http://native-harness:8090/cancel
+    api_key_env: SOVITE_HARNESS_TOKEN
+    version: 0.1.0
+    capabilities: [native-codex, private-result, workspace-sandbox]
+tools: []
+agents:
+  - id: incident-review
+    name: Private incident review
+    description: Real local inference over supplied private material; no undeclared production tools.
+    harness: private-analysis
+    model: local-reasoner
+    tools: []
+    instructions: Analyze the supplied incident material. Distinguish observations, hypotheses, evidence gaps, and recommended actions. Do not invent telemetry or executed actions.
+    max_steps: 8
+    version: 1.0.0
+  - id: code-review
+    name: Native code review
+    description: The native Codex harness accepts a bounded task inside its independently isolated service.
+    harness: native-codex
+    model: native-reasoner
+    tools: []
+    instructions: Review the task and available workspace read-only. Explain findings with concrete evidence. Do not claim changes were applied.
+    max_steps: 8
+    version: 1.0.0
+compute:
+  - id: local
+    name: Private worker pool
+    kind: local
+    destination: private-runtime
+    profile: {replicas: 1, cpu: '2', memory: 1Gi}
+grants:
+  - id: incident-forensics
+    name: Private incident forensics
+    agent: incident-review
+    callers: [cloud-codex, operations]
+    input_class: C3
+    output_class: C3
+    compute: local
+    state_destination: private-state
+    telemetry_destination: operations
+    telemetry_class: C1
+    receipt_class: C1
+    caller_clearance: C1
+    return_contract: reference
+    enabled: true
+    on_outage: queue
+    max_attempts: 3
+    timeout_seconds: 600
+  - id: native-code-review
+    name: Native private code review
+    agent: code-review
+    callers: [cloud-codex, operations]
+    input_class: C2
+    output_class: C2
+    compute: local
+    state_destination: private-state
+    telemetry_destination: operations
+    telemetry_class: C1
+    receipt_class: C1
+    caller_clearance: C1
+    return_contract: reference
+    enabled: true
+    on_outage: queue
+    max_attempts: 3
+    timeout_seconds: 900
+profiles:
+  - id: private
+    name: Private model and native harness installation
+    description: Model serving, native harness, control, worker and durable state are independently provisioned components.
+    components: [control, console, worker, postgres, garage, ollama, native-harness, qualification, audit]

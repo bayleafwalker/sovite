@@ -1,0 +1,320 @@
+{
+  "schema": "sovite.real-integration/v1",
+  "observed_at_utc": "2026-10-19T07:31:30.735270+00:00",
+  "scope": "Actual separately running control API, durable worker, isolated-service native harness, and self-hosted Ollama using synthetic inputs and a numeric source fixture. This development assessment is not a production security qualification or model-competence benchmark.",
+  "display_name": "Sovite \u2014 live local models",
+  "mode": "development",
+  "generation": "sha256:f1d6301f3359cdd2f32b5082ebafea0c696d9afb75b174b55ce8fb5a96a37f1e",
+  "runtime": {
+    "state": "SQLite file",
+    "artifacts": "Private filesystem store",
+    "compute_pool": "local",
+    "api": "http://127.0.0.1:8080",
+    "native_harness": "http://127.0.0.1:8090",
+    "model_serving": "http://127.0.0.1:11434",
+    "separate_processes": true,
+    "mcp_client": "Actual HTTP JSON-RPC integration client with a scoped synthetic caller token; no OpenAI cloud-account caller was exercised",
+    "native_environment": "Explicit allowlist; no platform DB, object-store, operator, caller or qualification signing credentials forwarded",
+    "native_workspace": "Synthetic read-only filesystem fixture",
+    "native_sandbox": "Maintained Codex CLI read-only sandbox; no bypass flag",
+    "ollama_version": "0.40.6",
+    "native_codex_version": "codex-cli 0.163.0",
+    "model": "qwen3:4b",
+    "model_digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7",
+    "runtime_digest_matches_both_declared_model_pins": true,
+    "ollama_cloud_disabled": true,
+    "serving_context_length": 8192,
+    "health_http_statuses": {
+      "api": 200,
+      "harness": 200
+    },
+    "healthy_workers": 2,
+    "qualification_gate_satisfied": true
+  },
+  "development_qualification": {
+    "id": "9601af05aedc4da6b9cd7127fdd87fe1",
+    "generation": "sha256:f1d6301f3359cdd2f32b5082ebafea0c696d9afb75b174b55ce8fb5a96a37f1e",
+    "profile": "private",
+    "created_at": 1792394338.8990314,
+    "expires_at": 1792480738.8990314,
+    "passed": true,
+    "issuer": "development-integration-operator",
+    "payload": {
+      "schema": "sovite.qualification/v1",
+      "id": "9601af05aedc4da6b9cd7127fdd87fe1",
+      "generation": "sha256:f1d6301f3359cdd2f32b5082ebafea0c696d9afb75b174b55ce8fb5a96a37f1e",
+      "runtime_binding": "sha256:71d24e9f4a0d5afea1c7bddb88e0ad1015feef4c22a1d6eef8b1eec880be33d8",
+      "profile": "private",
+      "created_at": 1792394338.8990314,
+      "expires_at": 1792480738.8990314,
+      "passed": true,
+      "issuer": "development-integration-operator",
+      "evidence": {
+        "generation": "sha256:f1d6301f3359cdd2f32b5082ebafea0c696d9afb75b174b55ce8fb5a96a37f1e",
+        "runtime_binding": "sha256:71d24e9f4a0d5afea1c7bddb88e0ad1015feef4c22a1d6eef8b1eec880be33d8",
+        "profile": "private",
+        "evidence_kind": "development-integration-authorization",
+        "scope": "Development-only permission to assess corrected real inference on synthetic fixtures. Empty-result and thinking-control regression passed; earlier native task cancelled through the real platform. No production network, PostgreSQL, S3, Kubernetes, or model-quality qualification is claimed.",
+        "checks": [
+          {
+            "name": "configuration-validation",
+            "status": "passed"
+          },
+          {
+            "name": "empty-result-regression",
+            "status": "passed"
+          },
+          {
+            "name": "actual-native-cancellation",
+            "status": "passed",
+            "detail": "Observed terminal cancelled state in 9.064 seconds"
+          }
+        ]
+      }
+    },
+    "signature": "UdlSrXbYEvatiC0wh1oJw1+j55iLsrie67NLjL1qHAAfQ54itZ2w6fIFzPo2BLGNePNEiT/bMfZkvD3gt6XMDg==",
+    "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA80SbfKVCqWOnoUm4Bi+XYa9fDrS6fOP9oy4/hOOH/wA=\n-----END PUBLIC KEY-----\n",
+    "valid": true
+  },
+  "actual_jobs": {
+    "analysis": {
+      "id": "0fb9cc3116a74150a968a8a0089c54c1",
+      "grant_id": "incident-forensics",
+      "generation": "sha256:f1d6301f3359cdd2f32b5082ebafea0c696d9afb75b174b55ce8fb5a96a37f1e",
+      "status": "completed",
+      "attempts": 1,
+      "error_code": null,
+      "artifact_available": true,
+      "created_at": 1792394375.4716094,
+      "started_at": 1792394376.236017,
+      "finished_at": 1792394419.6536899,
+      "elapsed_seconds": 43.418,
+      "public_projection_fields": [
+        "receipt",
+        "status"
+      ],
+      "public_status": "available",
+      "private_fixture_value_in_public_response": false,
+      "artifact": {
+        "http_status": 200,
+        "kind": "agent-result",
+        "answer_characters": 2142,
+        "response_bytes": 2383,
+        "response_sha256": "7840053cad2748ac34c2aac8eab68e592a49abcddf3b703f290eaadb4dc8d732",
+        "cache_control": "no-store",
+        "nonempty_answer": true,
+        "incident_marker_present": true,
+        "thinking_delimiter_present_in_final_text": false
+      }
+    },
+    "native": {
+      "id": "9621e4c0fbe1494dbfa0f419e2bb2fbd",
+      "grant_id": "native-code-review",
+      "generation": "sha256:f1d6301f3359cdd2f32b5082ebafea0c696d9afb75b174b55ce8fb5a96a37f1e",
+      "status": "completed",
+      "attempts": 1,
+      "error_code": null,
+      "artifact_available": true,
+      "created_at": 1792394375.4853988,
+      "started_at": 1792394419.6778545,
+      "finished_at": 1792394931.1593792,
+      "elapsed_seconds": 511.482,
+      "public_projection_fields": [
+        "receipt",
+        "status"
+      ],
+      "public_status": "available",
+      "private_fixture_value_in_public_response": false,
+      "artifact": {
+        "http_status": 200,
+        "kind": "external-agent-result",
+        "answer_characters": 2263,
+        "response_bytes": 2712,
+        "response_sha256": "e5d6ca805334d9c653035d31385594189a80af0da7830af0c22fc36b7aafc660",
+        "cache_control": "no-store",
+        "nonempty_answer": true,
+        "incident_marker_present": false,
+        "thinking_delimiter_present_in_final_text": true,
+        "fixture_values_present": {
+          "timeout": true,
+          "retry_delay": true,
+          "retries": true,
+          "case_number": true,
+          "computed_budget": true,
+          "file_reference": true
+        }
+      }
+    }
+  },
+  "native_observations": {
+    "latest_safe_transcript_summary": [
+      {
+        "record_types": {
+          "session_meta": 1,
+          "event_msg": 7,
+          "response_item": 8,
+          "world_state": 1,
+          "turn_context": 1,
+          "token_usage_record": 1
+        },
+        "tool_names": [
+          "exec_command",
+          "exec_command"
+        ],
+        "executions": [
+          {
+            "tool": "exec_command",
+            "command_matches_read_only_fixture_inspection": true,
+            "exit_zero_observed": true,
+            "fixture_case_observed_in_tool_output": true,
+            "line_numbered_file_observed": true
+          },
+          {
+            "tool": "exec_command",
+            "command_matches_read_only_fixture_inspection": true,
+            "exit_zero_observed": true,
+            "fixture_case_observed_in_tool_output": true,
+            "line_numbered_file_observed": true
+          }
+        ],
+        "event_types": [
+          "task_started",
+          "thread_settings_applied",
+          "item_completed",
+          "item_completed",
+          "item_completed",
+          "item_completed",
+          "token_count"
+        ],
+        "final_answer_file_present": false,
+        "observed_at": 1792394897.5601177
+      }
+    ],
+    "ledger_state": "completed",
+    "ledger_code": null,
+    "initial_prompt_tokens_from_serving_log": 3955,
+    "tool_continuation_prompt_tokens_from_serving_log": 5945,
+    "first_native_response_seconds_from_serving_log": 330.491,
+    "first_native_response_generated_tokens_from_serving_log": 1885,
+    "second_native_response_seconds_from_serving_log": 175.106,
+    "second_native_response_generated_tokens_from_serving_log": 650,
+    "context_truncation_observed": false,
+    "output_throughput_tokens_per_second_observed": "approximately 5 to 7; CPU serving during this run",
+    "numeric_fixture_task_completed": true,
+    "real_native_tool_execution_and_continuation_observed": true,
+    "general_native_model_competence_assessed": false
+  },
+  "observed_caller_boundary_checks": {
+    "mcp_tool_inventory": [
+      "begin_task",
+      "task_status"
+    ],
+    "caller_operator_job_listing_http_status": 403,
+    "caller_operator_artifact_http_status": 403,
+    "raw_task_api_jsonrpc_error": -32601,
+    "unrecognized_tool_jsonrpc_error": {
+      "jsonrpc": "2.0",
+      "id": 23,
+      "error": {
+        "code": -32602,
+        "message": "Tool not supported"
+      }
+    },
+    "foreign_origin_http_status": 403,
+    "replayed_submission_same_receipt": true,
+    "replayed_submission_job_count_unchanged": true
+  },
+  "audit": {
+    "verification": {
+      "valid": true,
+      "events": 55,
+      "head": "35efd16dc006564f8697d8f50d86102b7aea2d0a60341936610b47b614c11c1b",
+      "limitation": "Local chain integrity; external checkpoints are required to detect full-history replacement."
+    },
+    "inspected_events": 55,
+    "incident_marker_present": false,
+    "numeric_fixture_case_present": false
+  },
+  "routine_log_marker_checks": {
+    "api": {
+      "inspected_bytes": 544,
+      "incident_marker_present": false,
+      "numeric_fixture_case_present": false
+    },
+    "worker": {
+      "inspected_bytes": 469,
+      "incident_marker_present": false,
+      "numeric_fixture_case_present": false
+    },
+    "harness": {
+      "inspected_bytes": 544,
+      "incident_marker_present": false,
+      "numeric_fixture_case_present": false
+    }
+  },
+  "initial_run_findings": {
+    "generation": "sha256:78a8a6490890d77d6d6ff366887ba5111354994c041155319a75deb226258d32",
+    "analysis": {
+      "job_id": "df50d1751b024a4c99cc0999bf4b7e9e",
+      "status": "completed",
+      "seconds": 78.137,
+      "answer_characters": 0,
+      "defect": "Empty content was incorrectly accepted before adapter correction; not a successful useful result."
+    },
+    "native": {
+      "job_id": "daa7ef629d9b4caeb51efd5d6c74dd7e",
+      "status_before_cancel": "running",
+      "status_after_cancel": "cancelled",
+      "error_code": "cancelled",
+      "seconds_running_before_cancel": 307.708,
+      "cancellation_observed_seconds": 9.064,
+      "native_transcript_summary": [
+        {
+          "record_types": {
+            "session_meta": 1,
+            "event_msg": 3,
+            "response_item": 3,
+            "world_state": 1,
+            "turn_context": 1
+          },
+          "tool_calls": []
+        }
+      ]
+    }
+  },
+  "corrections": [
+    {
+      "problem": "An actual Ollama reasoning-only response had empty final content and was incorrectly released.",
+      "change": "Empty model and native final answers now fail closed before artifact publication.",
+      "focused_regression": "tests/test_backend.py::test_empty_model_answer_fails_and_thinking_control_is_top_level passed."
+    },
+    {
+      "problem": "Qwen thinking could consume the explicit response budget before producing an answer.",
+      "change": "Ollama think is a validated explicit model parameter forwarded at the protocol top level. Corrected direct run used think:false."
+    },
+    {
+      "problem": "Native provider reasoning settings were implicit.",
+      "change": "Explicit validated reasoning_effort is forwarded to Codex model_reasoning_effort. The bounded corrected native attempt used none."
+    }
+  ],
+  "not_run": [
+    "Live PostgreSQL control-store integration",
+    "Live S3-compatible object-store integration",
+    "Live Kubernetes provisioning, scheduling, admission or network-policy enforcement",
+    "Live Kubernetes-trained agent or production tool integration",
+    "An OpenAI cloud-account Codex caller connected to the MCP endpoint",
+    "Production data access or actual confidential production data",
+    "Production workload identity, egress isolation, image identity and backup/restore qualification",
+    "General model competence, task-quality benchmark, or native harness/model compatibility beyond the recorded fixture",
+    "Universal prompt-injection, side-channel, timing-channel or confidentiality proof"
+  ],
+  "limitations": [
+    "Readiness checks show component liveness/configuration scope; they do not assert a model is competent with a native harness.",
+    "The direct model result reached its configured 512-token output budget; this assessment checks nonempty private flow and fixture identification, not answer completeness.",
+    "The native fixture completed in about 8.5 minutes on this CPU runtime, issued two identical file-read commands, and included surplus reasoning text plus a stray thinking delimiter in its final artifact. Correct fixture values do not establish reliable or efficient general task performance.",
+    "Tag/digest verification observes model identity immediately before execution; immutable serving and network placement require deployment controls and production evidence.",
+    "The numeric fixture and marker checks cover explicitly observed responses, audit records and routine logs; they do not prove all possible leakage is absent.",
+    "An Ed25519 signature authenticates an issuer assertion over the configuration and runtime binding. This record explicitly authorizes development integration only.",
+    "Running distinct local processes and a read-only fixture is not the same as a validated production container or host isolation boundary."
+  ]
+}

@@ -1,0 +1,102 @@
+apiVersion: sovite.platform/v1alpha1
+kind: PlatformBundle
+metadata:
+  name: sovite-local
+  display_name: Sovite
+  description: Complete local assessment installation with explicitly synthetic inference.
+  version: 0.1.0
+mode: development
+default_profile: local
+data_classes:
+  - {id: C0, name: Public, rank: 0}
+  - {id: C1, name: Operational metadata, rank: 1}
+  - {id: C2, name: Confidential, rank: 2}
+  - {id: C3, name: Restricted production data, rank: 3}
+destinations:
+  - {id: private-runtime, name: Private execution, kind: local, clearance: C3, allowed_hosts: [localhost, 127.0.0.1]}
+  - {id: private-state, name: Private state and artifacts, kind: local, clearance: C3}
+  - {id: operations, name: Bounded operational events, kind: local, clearance: C1}
+models:
+  - id: assessment-model
+    name: Synthetic assessment executor
+    description: Deterministic synthetic output; never represented as real model inference.
+    adapter: demo
+    model: synthetic-assessment-v1
+    destination: private-runtime
+    parameters: {}
+harnesses:
+  - id: assessment-harness
+    name: Synthetic lifecycle harness
+    kind: demo
+    version: 0.1.0
+    capabilities: [bounded-result, cancellation, durable-receipt]
+tools: []
+agents:
+  - id: incident-review
+    name: Incident review
+    description: Assess the complete dispatch, private-result and receipt workflow using synthetic fixtures.
+    harness: assessment-harness
+    model: assessment-model
+    tools: []
+    instructions: Produce a clearly identified synthetic incident assessment. Do not claim production access.
+    max_steps: 4
+    version: 1.0.0
+  - id: change-review
+    name: Change review
+    description: A second independently configured agent package on the shared serving and compute layers.
+    harness: assessment-harness
+    model: assessment-model
+    tools: []
+    instructions: Produce a clearly identified synthetic change assessment with a private result.
+    max_steps: 4
+    version: 1.0.0
+compute:
+  - id: local
+    name: Local assessment pool
+    kind: local
+    destination: private-runtime
+    profile: {replicas: 1, cpu: '1', memory: 512Mi}
+grants:
+  - id: incident-forensics
+    name: Private incident forensics
+    agent: incident-review
+    callers: [cloud-codex, operations]
+    input_class: C3
+    output_class: C3
+    compute: local
+    state_destination: private-state
+    telemetry_destination: operations
+    telemetry_class: C1
+    receipt_class: C1
+    caller_clearance: C1
+    return_contract: reference
+    enabled: true
+    on_outage: queue
+    max_attempts: 3
+    timeout_seconds: 300
+  - id: change-assessment
+    name: Private change assessment
+    agent: change-review
+    callers: [operations]
+    input_class: C2
+    output_class: C2
+    compute: local
+    state_destination: private-state
+    telemetry_destination: operations
+    telemetry_class: C1
+    receipt_class: C1
+    caller_clearance: C1
+    return_contract: reference
+    enabled: true
+    on_outage: queue
+    max_attempts: 3
+    timeout_seconds: 300
+profiles:
+  - id: local
+    name: Local assessment
+    description: API, operator console, durable SQLite queue, filesystem artifacts and an independent worker process.
+    components: [control, console, worker, database, artifacts, qualification, audit]
+  - id: compose
+    name: Provisioned private installation
+    description: The same control plane with PostgreSQL and S3-compatible object storage.
+    components: [control, console, worker, postgres, garage, qualification, audit]

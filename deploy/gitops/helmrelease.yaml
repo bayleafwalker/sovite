@@ -1,0 +1,23 @@
+# Apply only after supplying an existing authenticated GitRepository source and
+# matching runtime/trust/bundle resources through your GitOps repository.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: sovite
+  namespace: sovite
+spec:
+  interval: 10m
+  timeout: 10m
+  releaseName: sovite
+  chart:
+    spec:
+      chart: ./vendor/sovite/deploy/helm/sovite
+      reconcileStrategy: Revision
+      sourceRef:
+        kind: GitRepository
+        name: platform-config
+        namespace: flux-system
+  valuesFrom:
+    - kind: ConfigMap
+      name: sovite-effective-values
+      valuesKey: values.yaml

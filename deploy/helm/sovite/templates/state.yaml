@@ -1,0 +1,141 @@
+{{- $name := include "sovite.fullname" . -}}
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: Service
+metadata: {name: {{ $name }}-postgres}
+spec:
+  selector: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: postgres}
+  ports: [{name: postgres, port: 5432, targetPort: postgres}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}-postgres
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $name }}-postgres
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: postgres}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sovite, app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: postgres}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 70, runAsGroup: 70, fsGroup: 70, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image | quote }}
+          ports: [{name: postgres, containerPort: 5432}]
+          env:
+            - {name: POSTGRES_DB, value: sovite}
+            - {name: POSTGRES_USER, value: sovite}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - {name: POSTGRES_INITDB_ARGS, value: "--auth-host=scram-sha-256 --data-checksums"}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: POSTGRES_PASSWORD}
+          resources: {{ toYaml .Values.postgres.resources | nindent 12 }}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          readinessProbe: {exec: {command: [pg_isready, -U, sovite, -d, sovite]}, initialDelaySeconds: 10, periodSeconds: 10}
+          livenessProbe: {exec: {command: [pg_isready, -U, sovite, -d, sovite]}, initialDelaySeconds: 30, periodSeconds: 20}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: tmp, mountPath: /tmp}
+            - {name: run, mountPath: /var/run/postgresql}
+      volumes:
+        - {name: tmp, emptyDir: {sizeLimit: 128Mi}}
+        - {name: run, emptyDir: {sizeLimit: 16Mi}}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.postgres.storageClass }}
+        storageClassName: {{ .Values.postgres.storageClass | quote }}
+        {{- end }}
+        resources: {requests: {storage: {{ .Values.postgres.storage }}}}
+---
+{{- end }}
+{{- if .Values.garage.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: {{ $name }}-garage}
+data:
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "sqlite"
+    replication_factor = 1
+    consistency_mode = "consistent"
+    metadata_fsync = true
+    data_fsync = true
+    rpc_bind_addr = "0.0.0.0:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+    [s3_api]
+    s3_region = {{ .Values.artifacts.region | quote }}
+    api_bind_addr = "0.0.0.0:3900"
+    root_domain = ".s3.garage.internal"
+    [admin]
+    api_bind_addr = "127.0.0.1:3903"
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ $name }}-garage}
+spec:
+  selector: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: garage}
+  ports: [{name: s3, port: 3900, targetPort: s3}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}-garage
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $name }}-garage
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: garage}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sovite, app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: garage}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: garage
+          image: {{ .Values.garage.image | quote }}
+          command: [/garage, server, --single-node, --default-bucket]
+          ports: [{name: s3, containerPort: 3900}]
+          env:
+            - {name: GARAGE_DEFAULT_BUCKET, value: {{ .Values.artifacts.bucket | quote }}}
+            - name: GARAGE_DEFAULT_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: AWS_ACCESS_KEY_ID}
+            - name: GARAGE_DEFAULT_SECRET_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: AWS_SECRET_ACCESS_KEY}
+            - name: GARAGE_RPC_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: GARAGE_RPC_SECRET}
+            - name: GARAGE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: GARAGE_ADMIN_TOKEN}
+          resources: {{ toYaml .Values.garage.resources | nindent 12 }}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          readinessProbe: {tcpSocket: {port: s3}, initialDelaySeconds: 10, periodSeconds: 10}
+          livenessProbe: {exec: {command: [/garage, status]}, initialDelaySeconds: 30, periodSeconds: 30, timeoutSeconds: 5}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/garage}
+            - {name: config, mountPath: /etc/garage.toml, subPath: garage.toml, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: {{ $name }}-garage}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.garage.storageClass }}
+        storageClassName: {{ .Values.garage.storageClass | quote }}
+        {{- end }}
+        resources: {requests: {storage: {{ .Values.garage.storage }}}}
+{{- end }}

@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Source file SHA-256 in supplied state-integration evidence"
+paths = ['''^docs/STATE-INTEGRATION\.json$''']
+regexes = ['''"sovite/api\.py": "[a-f0-9]{64}"''']
+regexTarget = "line"
+condition = "AND"

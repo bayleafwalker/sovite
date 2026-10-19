@@ -1,0 +1,444 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "mode",
+    "image",
+    "runtimeSecret",
+    "bundle",
+    "qualification",
+    "networkPolicy",
+    "publicOrigin"
+  ],
+  "properties": {
+    "mode": {
+      "enum": [
+        "development",
+        "enforced"
+      ]
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+      "maxLength": 50
+    },
+    "image": {
+      "$ref": "#/definitions/image"
+    },
+    "runtimeSecret": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundle": {
+      "type": "object",
+      "required": [
+        "configMap",
+        "key",
+        "revision"
+      ],
+      "properties": {
+        "configMap": {
+          "type": "string",
+          "minLength": 1
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "publicOrigin": {
+      "type": "string",
+      "pattern": "^https?://[^/?#@]+$"
+    },
+    "secureCookies": {
+      "type": "boolean"
+    },
+    "qualification": {
+      "type": "object",
+      "required": [
+        "required",
+        "configMap",
+        "publicKeyFiles"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "configMap": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publicKeyFiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_.-]+$"
+          }
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "computeId": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "nativeHarness": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "agentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workspace": {
+          "type": "object",
+          "required": [
+            "existingClaim",
+            "subPath"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "existingClaim": {
+              "type": "string",
+              "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+            },
+            "subPath": {
+              "type": "string",
+              "pattern": "^$|^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$",
+              "not": {
+                "pattern": "(^|/)\\.\\.(/|$)"
+              }
+            }
+          }
+        }
+      }
+    },
+    "postgres": {
+      "$ref": "#/definitions/upstream"
+    },
+    "garage": {
+      "$ref": "#/definitions/upstream"
+    },
+    "ollama": {
+      "$ref": "#/definitions/upstream"
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "ciliumDns"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ciliumDns": {
+          "type": "boolean"
+        },
+        "clusterDomain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "extraDnsNames": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_.-]+$"
+          }
+        },
+        "stateEgress": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "cidr",
+              "ports"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "cidr": {
+                "type": "string",
+                "minLength": 3,
+                "not": {
+                  "enum": [
+                    "0.0.0.0/0",
+                    "::/0"
+                  ]
+                }
+              },
+              "ports": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                }
+              }
+            }
+          }
+        },
+        "toolPeers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/networkPeer"
+          }
+        },
+        "modelPeers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/networkPeer"
+          }
+        },
+        "harnessPeers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/networkPeer"
+          }
+        }
+      }
+    },
+    "kubernetesTools": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "apiServerPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "apiServerCIDRs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "not": {
+              "enum": [
+                "0.0.0.0/0",
+                "::/0"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "deploymentBinding": {
+      "type": "string",
+      "pattern": "^(sha256:[a-f0-9]{64})?$"
+    }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "required": [
+        "repository",
+        "tag",
+        "digest"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9._:/-]*$"
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[a-f0-9]{64})?$"
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "image"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "networkPeer": {
+      "type": "object",
+      "required": [
+        "hosts",
+        "namespaceSelector",
+        "podSelector",
+        "ports"
+      ],
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_.-]+$"
+          }
+        },
+        "namespaceSelector": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "podSelector": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "ports": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "enforced"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "image": {
+            "properties": {
+              "repository": {
+                "pattern": "^[^/]+/.+$"
+              },
+              "digest": {
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            }
+          },
+          "bundle": {
+            "properties": {
+              "revision": {
+                "pattern": "^(sha256:)?[a-f0-9]{64}$"
+              }
+            }
+          },
+          "publicOrigin": {
+            "pattern": "^https://[^/?#@]+$"
+          },
+          "secureCookies": {
+            "const": true
+          },
+          "qualification": {
+            "properties": {
+              "required": {
+                "const": true
+              }
+            }
+          },
+          "networkPolicy": {
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "ciliumDns": {
+                "const": true
+              }
+            }
+          },
+          "deploymentBinding": {
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "nativeHarness": {
+                  "properties": {
+                    "enabled": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "nativeHarness": {
+                  "properties": {
+                    "image": {
+                      "properties": {
+                        "repository": {
+                          "pattern": "^[^/]+/.+$"
+                        },
+                        "digest": {
+                          "pattern": "^sha256:[a-f0-9]{64}$"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

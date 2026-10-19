@@ -1,0 +1,8 @@
+# Merge this stanza into the native caller's Codex configuration.
+# Set SOVITE_CALLER_TOKEN in that caller's environment using your secret manager.
+# Use the public receipt facade URL, never an internal harness/task endpoint.
+[mcp_servers.sovite]
+url = "http://localhost:8080/mcp"
+bearer_token_env_var = "SOVITE_CALLER_TOKEN"
+startup_timeout_sec = 15
+tool_timeout_sec = 30
