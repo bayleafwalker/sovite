@@ -47,3 +47,14 @@ def test_cilium_paths_have_exact_roles_and_ports_and_api_needs_binding(tmp_path)
     assert gateway['ingress'] == [{'fromEntities': ['ingress'], 'toPorts': [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]}]
     values['kubernetesTools']['apiServerCIDRs'] = []
     assert render(tmp_path, values).returncode != 0
+
+
+def test_worker_job_timeout_is_explicit_and_configurable(tmp_path):
+    def worker_env(values):
+        result = render(tmp_path, values)
+        assert result.returncode == 0, result.stderr
+        rows = list(yaml.safe_load_all(result.stdout))
+        pod = next(r for r in rows if r and r['kind'] == 'Deployment' and r['metadata']['name'] == 'sovite-worker')['spec']['template']['spec']
+        return {e['name']: e.get('value') for e in pod['containers'][0]['env']}
+    assert worker_env({})['SOVITE_JOB_TIMEOUT_SECONDS'] == '300'
+    assert worker_env({'worker': {'jobTimeoutSeconds': 900}})['SOVITE_JOB_TIMEOUT_SECONDS'] == '900'

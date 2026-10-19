@@ -29,6 +29,8 @@ control:
 worker:
   replicas: 1
   computeId: local
+  # Upper bound on one job attempt; a grant's timeout_seconds applies only below it.
+  jobTimeoutSeconds: 300
   resources:
     requests: {cpu: 250m, memory: 256Mi}
     limits: {cpu: "2", memory: 1Gi}
