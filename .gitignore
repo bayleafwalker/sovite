@@ -14,3 +14,11 @@ deliverables/
 *.rendered.yaml
 *.runtime.json
 *.private.pem
+
+# auditctl NDJSON shards written by hooks into this checkout. Since 2026-09-30
+# they are no longer committed: audit-shards-collect copies them out of every
+# checkout (by file glob, independent of Git) and audit-shards-publish replicates
+# them to the private bayleaf/audit-archive repository, the successor evidence
+# home (gitops-nixos docs/runbooks/audit-persistence.md). Shards committed before that stay
+# tracked as append-only history; this rule only hides new, untracked shards.
+_artifacts/*/audit*/
