@@ -218,7 +218,7 @@ class LocalSoviteApplication:
                 **view,
                 "task_binding": self.seal(binding, arguments, view["receipt"]),
             }
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as error:
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             raise SoviteInvocationRefused("Sovite request unavailable") from None
 
 

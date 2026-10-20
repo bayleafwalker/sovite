@@ -1,7 +1,6 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone, timedelta
-from types import SimpleNamespace
 import json
 import pytest
 import httpx

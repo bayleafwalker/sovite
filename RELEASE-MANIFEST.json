@@ -1,7 +1,7 @@
 {
   "format": "sovite-source-release/v1",
   "version": "0.1.16",
-  "created_at": "2026-10-20T17:55:04.234460+00:00",
+  "created_at": "2026-10-20T17:57:37.807496+00:00",
   "contents": "Application, configuration, deployment, tests and operating evidence",
   "excluded": [
     "runtime state",
@@ -384,8 +384,8 @@
       "bytes": 2602
     },
     "sovite/vuoro_adapter.py": {
-      "sha256": "a0d8a8cb98a2c9ad2b89b84576c02c90baae1e8428d931cb7f938ce886436e6b",
-      "bytes": 11422
+      "sha256": "a037b47dfcb087732fbd046d2267083d75f9e49f73a4333469c8ed5abf68e2df",
+      "bytes": 11413
     },
     "sovite/worker.py": {
       "sha256": "0faf746c6c13c0f244da85a28174635a4c1e1f59812703fad7bbb08b94057d22",
@@ -424,8 +424,8 @@
       "bytes": 39776
     },
     "tests/test_local_evaluation.py": {
-      "sha256": "72ed32758342d323f330ed41c510ed1925be34973a9084d3950f1f7846042a33",
-      "bytes": 3372
+      "sha256": "92258591494af8af90deaa836f1d9493622fdb011d432d0f1ff5d2546782d9b8",
+      "bytes": 3347
     },
     "tests/test_migrations.py": {
       "sha256": "7dfecd856f445a2b3591b9918fd112f96012a99f072e252883d5ba4d0ee1225f",
@@ -456,8 +456,8 @@
       "bytes": 14194
     },
     "tests/test_vuoro_adapter.py": {
-      "sha256": "82a1103d15669f74b89bf39932c1313383e4521f06163fe86472ccbf4dac2345",
-      "bytes": 6690
+      "sha256": "30a78f4056d0b705d4598407172040fb979a6f5779f8930d8e127d5029f83cbf",
+      "bytes": 6656
     },
     "tests/vectors/connector-v1.json": {
       "sha256": "11a06932cde91adb45b5f40a019f4d4fcfca8604328fbd2b74af5c87ccd46e54",

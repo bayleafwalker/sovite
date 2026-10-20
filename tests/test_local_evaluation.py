@@ -1,4 +1,3 @@
-from pathlib import Path
 import httpx
 import pytest
 from sovite.local_evaluation import evaluation_bundle, local_model
