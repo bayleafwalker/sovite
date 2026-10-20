@@ -525,3 +525,45 @@ def test_model_concurrency_limit_lets_other_models_overtake(tmp_path):
     assert c.claim() is None
     a.finish(first.id, error=RuntimeFailure("upstream_unavailable"))
     assert c.claim().id == second.id
+
+
+class _SlowRunner:
+    authorization_check = None
+
+    async def run(self, resolved, task, job_id):
+        await asyncio.sleep(60)
+
+
+def _interrupted_by_shutdown(platform, job_id):
+    async def scenario():
+        worker = Worker(platform, _SlowRunner())
+        job = worker.claim()
+        assert job.id == job_id
+        execution = asyncio.create_task(worker.execute(job))
+        await asyncio.sleep(0.3)
+        started = time.monotonic()
+        worker.stop.set()
+        await asyncio.wait_for(execution, 5)
+        return time.monotonic() - started
+    return asyncio.run(scenario())
+
+
+def test_worker_shutdown_hands_replay_safe_job_back_without_charging_an_attempt(setup):
+    _, platform, _ = setup
+    job = platform.submit("incident-forensics", "task", "cloud-codex", "shutdown")
+    assert _interrupted_by_shutdown(platform, job.id) < 2
+    row = platform.get_job(job.id)
+    assert (row.status, row.error_code, row.attempts) == ("retry_wait", "worker_shutdown", 0)
+    assert not row.released_at and row.lease_owner is None
+    assert Worker(platform).claim().id == job.id
+
+
+def test_worker_shutdown_blocks_non_replayable_job_as_uncertain(setup):
+    _, platform, _ = setup
+    job = platform.submit("incident-forensics", "task", "cloud-codex", "shutdown-native")
+    with platform.db.sessions.begin() as session:
+        row = session.get(Job, job.id)
+        row.resolved = {**row.resolved, "harness": {**row.resolved["harness"], "kind": "native-codex"}}
+    _interrupted_by_shutdown(platform, job.id)
+    row = platform.get_job(job.id)
+    assert (row.status, row.error_code) == ("blocked", "execution_uncertain")

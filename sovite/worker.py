@@ -21,6 +21,11 @@ log = logging.getLogger("sovite.worker")
 CLAIM_LOCK = 0x50617669746531
 
 
+def replay_safe(resolved: dict) -> bool:
+    harness = resolved["harness"]
+    return harness["kind"] in {"demo", "tool-agent"} and all(t.get("read_only", t["kind"] == "kubernetes-read") for t in resolved.get("tools", [])) or harness.get("idempotent", False)
+
+
 def worker_scope(platform: Platform, hostname: str | None = None) -> str:
     pool, host = platform.settings.compute_id, hostname or socket.gethostname()
     pool_part = pool[:12] + "-" + hashlib.sha256(pool.encode()).hexdigest()[:12]
@@ -55,11 +60,9 @@ class Worker:
             for row in rows:
                 if row.resolved.get("compute", {}).get("id") != self.platform.settings.compute_id:
                     continue
-                harness = row.resolved["harness"]
-                replay_safe = harness["kind"] in {"demo", "tool-agent"} and all(t.get("read_only", t["kind"] == "kubernetes-read") for t in row.resolved.get("tools", [])) or harness.get("idempotent", False)
                 if row.cancel_requested:
                     row.status, row.error_code = "cancelled", "cancelled"
-                elif not replay_safe:
+                elif not replay_safe(row.resolved):
                     row.status, row.error_code = "blocked", "execution_uncertain"
                 elif row.attempts >= int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts)):
                     row.status, row.error_code = "failed", "lease_recovery_exhausted"
@@ -112,6 +115,26 @@ class Worker:
             row.lease_until, row.updated_at = time.time() + self.platform.settings.lease_seconds, time.time()
             return True
 
+    def hand_back(self, job_id: str):
+        """Return a running job on worker shutdown, as lease recovery would but at once."""
+        with self.platform.db.sessions.begin() as session:
+            row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one()
+            if row.status != "running" or row.lease_owner != self.id:
+                return
+            now = time.time()
+            if row.cancel_requested:
+                row.status, row.error_code = "cancelled", "cancelled"
+            elif not replay_safe(row.resolved):
+                row.status, row.error_code = "blocked", "execution_uncertain"
+            else:
+                # The interrupted attempt was the worker's, not the task's; do not charge it.
+                row.status, row.error_code, row.next_attempt_at = "retry_wait", "worker_shutdown", now
+                row.attempts = max(0, row.attempts - 1)
+            row.lease_owner, row.lease_until, row.updated_at = None, None, now
+            if row.status in TERMINAL:
+                row.finished_at = now
+            self.platform.db.audit(session, self.id, "task.handed_back", row.id, {"status": row.status, "error_code": row.error_code})
+
     def finish(self, job_id: str, artifact: tuple[str, str] | None = None, error: RuntimeFailure | None = None, cancelled: bool = False):
         with self.platform.db.sessions.begin() as session:
             row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one()
@@ -158,13 +181,20 @@ class Worker:
         operation = asyncio.create_task(self.runner.run(job.resolved, job.task, job.id))
         timeout = min(int(job.resolved["grant"].get("timeout_seconds", self.platform.settings.job_timeout_seconds)), self.platform.settings.job_timeout_seconds)
         deadline = time.monotonic() + timeout
+        stopping = asyncio.ensure_future(self.stop.wait())
         try:
             while not operation.done():
-                await asyncio.wait({operation}, timeout=min(max(0.2, self.platform.settings.lease_seconds / 3), max(0.01, deadline - time.monotonic())))
+                await asyncio.wait({operation, stopping}, timeout=min(max(0.2, self.platform.settings.lease_seconds / 3), max(0.01, deadline - time.monotonic())), return_when=asyncio.FIRST_COMPLETED)
                 if operation.done():
                     break
+                if self.stop.is_set():
+                    # Shutdown (rollout, drain, eviction) is not a cancellation: hand the job back.
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    self.hand_back(job.id)
+                    return
                 self.heartbeat(job.id)
-                if self.stop.is_set() or not self.renew(job.id):
+                if not self.renew(job.id):
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
                     self.finish(job.id, cancelled=True)
@@ -191,6 +221,7 @@ class Worker:
             log.error("Task %s failed with an internal adapter/storage error", job.id)
             self.finish(job.id, error=RuntimeFailure("internal_execution_error"))
         finally:
+            stopping.cancel()
             self.runner.authorization_check = None
             self.heartbeat()
 

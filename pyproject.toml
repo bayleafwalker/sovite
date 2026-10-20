@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sovite-platform"
-version = "0.1.6"
+version = "0.1.7"
 description = "A provisioned platform for mixed agent estates with explicit flow contracts"
 requires-python = ">=3.11"
 dependencies = [

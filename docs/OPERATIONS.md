@@ -133,7 +133,7 @@ For Kubernetes, use the database/object-store recovery systems and CSI snapshots
 
 ## Failure handling and removal
 
-Model outages leave authorized jobs queued or retrying according to their grant. They do not invoke an undeclared cloud fallback. Durable leases let a worker recover abandoned work; non-idempotent or uncertain execution requires intervention instead of blindly repeating an action. The native service stores request identity separately from the worker queue and returns a cached completed result for a repeat of the same request.
+Model outages leave authorized jobs queued or retrying according to their grant. They do not invoke an undeclared cloud fallback. Durable leases let a worker recover abandoned work; non-idempotent or uncertain execution requires intervention instead of blindly repeating an action. A worker that is stopped mid-task (rollout, node drain, eviction) hands the task back at once instead of leaving its lease to expire: a replay-safe task returns to the queue as `worker_shutdown` without being charged the interrupted attempt, and a task that is not replay-safe, such as native Codex, is blocked as `execution_uncertain`. Before 0.1.7 a stopped worker recorded its running task as cancelled. The native service stores request identity separately from the worker queue and returns a cached completed result for a repeat of the same request.
 
 `health/live` checks the API process; `health/ready` checks database and artifact access. Neither endpoint certifies model quality, GPU placement or information-flow policy. Use the console's worker, queue, inhibit, qualification and audit views to distinguish readiness from authorization.
 
