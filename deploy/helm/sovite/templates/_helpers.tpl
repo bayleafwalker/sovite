@@ -56,3 +56,11 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 - name: SOVITE_DEPLOYMENT_BINDING
   value: {{ .Values.deploymentBinding | quote }}
 {{- end -}}
+
+{{- define "sovite.modelCredentialEnv" -}}
+{{- range .Values.modelCredentials }}
+- name: {{ .env }}
+  valueFrom:
+    secretKeyRef: {name: {{ $.Values.runtimeSecret }}, key: {{ .key | default .env }}}
+{{- end }}
+{{- end -}}

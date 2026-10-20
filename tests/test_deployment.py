@@ -58,3 +58,45 @@ def test_worker_job_timeout_is_explicit_and_configurable(tmp_path):
         return {e['name']: e.get('value') for e in pod['containers'][0]['env']}
     assert worker_env({})['SOVITE_JOB_TIMEOUT_SECONDS'] == '300'
     assert worker_env({'worker': {'jobTimeoutSeconds': 900}})['SOVITE_JOB_TIMEOUT_SECONDS'] == '900'
+
+
+def test_external_model_hosts_need_exact_cidrs_and_provisioned_credentials(tmp_path):
+    peer = {'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}
+    values = {'networkPolicy': {'modelPeers': [peer]}, 'modelCredentials': [{'env': 'MODEL_HOST_TOKEN'}], 'nativeHarness': {'enabled': True}}
+    result = render(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    rows = [r for r in yaml.safe_load_all(result.stdout) if r]
+    policy = next(r for r in rows if r['metadata']['name'] == 'sovite-modelpeers-egress')['spec']
+    assert policy['egress'] == [{'to': [{'ipBlock': {'cidr': '192.0.2.20/32'}}], 'ports': [{'protocol': 'TCP', 'port': 8021}]}]
+    dns = next(r for r in rows if r['metadata']['name'] == 'sovite-private-dns')
+    assert '192.0.2.20' not in yaml.safe_dump(dns)
+    for name in ('sovite-worker', 'sovite-native-harness'):
+        pod = next(r for r in rows if r['kind'] == 'Deployment' and r['metadata']['name'] == name)['spec']['template']['spec']
+        env = {e['name']: e for e in pod['containers'][0]['env']}
+        assert env['MODEL_HOST_TOKEN']['valueFrom']['secretKeyRef']['key'] == 'MODEL_HOST_TOKEN'
+    for bad in ({'cidrs': ['192.0.2.0/24']}, {'cidrs': ['0.0.0.0/0']}, {'hosts': []},
+                {'namespaceSelector': {'matchLabels': {'a': 'b'}}, 'podSelector': {'matchLabels': {'a': 'b'}}}):
+        assert render(tmp_path, {'networkPolicy': {'modelPeers': [{**peer, **bad}]}}).returncode != 0
+    for env in ('SOVITE_DATABASE_URL', 'AWS_SECRET_ACCESS_KEY', 'lower'):
+        assert render(tmp_path, {'modelCredentials': [{'env': env}]}).returncode != 0
+
+
+def test_contract_binds_external_model_to_its_cidr_and_credential():
+    import sys
+    sys.path.insert(0, str(CHART.parents[2] / 'scripts'))
+    from deployment_contract import load_values, peer_allows, validate_bindings
+    from sovite.policy import load_bundle
+    assert peer_allows([{'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}], '192.0.2.20', 8021)
+    assert not peer_allows([{'hosts': ['models.example'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}], 'models.example', 8021)
+    assert not peer_allows([{'hosts': ['192.0.2.21'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}], '192.0.2.21', 8021)
+    assert not peer_allows([{'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.0/24'], 'ports': [8021]}], '192.0.2.20', 8021)
+    bundle, _ = load_bundle(CHART.parents[2] / 'config/platform.kubernetes.yaml')
+    native = next(m for m in bundle['models'] if m['id'] == 'native-reasoner')
+    native.update(endpoint='http://192.0.2.20:8021/v1', identity_endpoint='http://192.0.2.20:8021', api_key_env='MODEL_HOST_TOKEN')
+    values = load_values(CHART, [CHART.parents[2] / 'deploy/examples/reference-values.yaml'])
+    values['kubernetesTools']['apiServerCIDRs'] = ['192.0.2.10/32']
+    values['networkPolicy']['modelPeers'] = [{'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}]
+    with pytest.raises(ValueError, match='credential'):
+        validate_bindings(bundle, values, 'sovite')
+    values['modelCredentials'] = [{'env': 'MODEL_HOST_TOKEN'}]
+    assert 'native-reasoner' in validate_bindings(bundle, values, 'sovite')['model_bindings']

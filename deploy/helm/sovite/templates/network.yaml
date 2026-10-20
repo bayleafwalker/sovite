@@ -187,8 +187,14 @@ spec:
   egress:
     {{- range $peers }}
     - to:
+        {{- if .cidrs }}
+        {{- range .cidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+        {{- else }}
         - namespaceSelector: {{ toYaml (required "External peer namespaceSelector is required" .namespaceSelector) | nindent 12 }}
           podSelector: {{ toYaml (required "External peer podSelector is required" .podSelector) | nindent 12 }}
+        {{- end }}
       ports:
         {{- range .ports }}
         - {protocol: TCP, port: {{ . }}}
@@ -225,11 +231,13 @@ spec:
               {{- end }}
               {{- range $key := list "toolPeers" "modelPeers" "harnessPeers" }}
               {{- range index $.Values.networkPolicy $key }}
+              {{- if not .cidrs }}
               {{- range .hosts }}
               - matchName: {{ . | quote }}
               - matchName: {{ printf "%s.%s.svc.%s" . $.Release.Namespace $.Values.networkPolicy.clusterDomain | quote }}
               - matchName: {{ printf "%s.svc.%s" . $.Values.networkPolicy.clusterDomain | quote }}
               - matchName: {{ printf "%s.%s" . $.Values.networkPolicy.clusterDomain | quote }}
+              {{- end }}
               {{- end }}
               {{- end }}
               {{- end }}

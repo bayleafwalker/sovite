@@ -225,13 +225,47 @@
         "modelPeers": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/networkPeer"
+            "oneOf": [
+              {
+                "$ref": "#/definitions/networkPeer"
+              },
+              {
+                "$ref": "#/definitions/externalHostPeer"
+              }
+            ]
           }
         },
         "harnessPeers": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/networkPeer"
+            "oneOf": [
+              {
+                "$ref": "#/definitions/networkPeer"
+              },
+              {
+                "$ref": "#/definitions/externalHostPeer"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "modelCredentials": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "env"
+        ],
+        "properties": {
+          "env": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          },
+          "key": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
@@ -341,6 +375,42 @@
         "podSelector": {
           "type": "object",
           "minProperties": 1
+        },
+        "ports": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        }
+      }
+    },
+    "externalHostPeer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hosts",
+        "cidrs",
+        "ports"
+      ],
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F.:]+$"
+          }
+        },
+        "cidrs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F.:]+/(32|128)$"
+          }
         },
         "ports": {
           "type": "array",

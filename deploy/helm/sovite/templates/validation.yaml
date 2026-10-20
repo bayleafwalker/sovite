@@ -39,3 +39,18 @@
 {{- range .Values.networkPolicy.stateEgress -}}
 {{- if or (eq .cidr "0.0.0.0/0") (eq .cidr "::/0") -}}{{ fail "Unrestricted state egress is forbidden" }}{{- end -}}
 {{- end -}}
+{{- range $key := list "modelPeers" "harnessPeers" -}}
+{{- range index $.Values.networkPolicy $key -}}
+{{- if .cidrs -}}
+{{- if or .namespaceSelector .podSelector -}}{{ fail (printf "%s: a peer selects either exact host CIDRs or in-cluster pods, not both" $key) }}{{- end -}}
+{{- if not .hosts -}}{{ fail (printf "%s: CIDR peers require the exact endpoint hosts they serve" $key) }}{{- end -}}
+{{- range .cidrs -}}
+{{- if not (or (hasSuffix "/32" .) (hasSuffix "/128" .)) -}}{{ fail (printf "%s: CIDR peers must be exact hosts (/32 or /128)" $key) }}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.modelCredentials -}}
+{{- if not (regexMatch "^[A-Z][A-Z0-9_]*$" (default "" .env)) -}}{{ fail "modelCredentials env names must be upper-case environment variable names" }}{{- end -}}
+{{- if or (hasPrefix "SOVITE_" .env) (hasPrefix "AWS_" .env) -}}{{ fail "modelCredentials cannot override reserved SOVITE_ or AWS_ runtime variables" }}{{- end -}}
+{{- end -}}

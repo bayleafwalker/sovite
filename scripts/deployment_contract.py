@@ -33,8 +33,21 @@ def endpoint(value):
     return (parsed.hostname or "").rstrip("."), parsed.port or (443 if parsed.scheme == "https" else 80)
 
 
+def peer_scoped(peer, host):
+    if not peer.get("cidrs"):
+        return bool(peer.get("namespaceSelector") and peer.get("podSelector"))
+    if peer.get("namespaceSelector") or peer.get("podSelector"):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # A name could resolve outside the allowed CIDRs.
+    networks = [ipaddress.ip_network(cidr, strict=True) for cidr in peer["cidrs"]]
+    return all(network.prefixlen == network.max_prefixlen for network in networks) and any(address in network for network in networks)
+
+
 def peer_allows(peers, host, port):
-    return any(host in peer.get("hosts", []) and port in peer.get("ports", []) and peer.get("namespaceSelector") and peer.get("podSelector") for peer in peers)
+    return any(host in peer.get("hosts", []) and port in peer.get("ports", []) and peer_scoped(peer, host) for peer in peers)
 
 
 def validate_bindings(bundle, values, namespace, *, release="sovite", live_api_addresses=None, credentials=None):
@@ -77,6 +90,8 @@ def validate_bindings(bundle, values, namespace, *, release="sovite", live_api_a
                         raise ValueError("A model references the bundled Ollama service but that endpoint is not provisioned")
                 elif not peer_allows(values["networkPolicy"].get("modelPeers", []), host, port):
                     raise ValueError("An external model endpoint lacks a matching explicit model network peer")
+            if model.get("api_key_env") and model["api_key_env"] not in {row.get("env") for row in values.get("modelCredentials", [])}:
+                raise ValueError("A model credential is not provisioned by modelCredentials")
             checked_models.add(model["id"])
         if harness["kind"] == "native-codex":
             raise ValueError("Kubernetes native execution requires the isolated agent-http service")

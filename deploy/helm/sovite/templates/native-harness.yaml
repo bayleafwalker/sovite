@@ -59,6 +59,7 @@ spec:
             - name: SOVITE_HARNESS_TOKEN
               valueFrom:
                 secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_HARNESS_TOKEN}
+            {{- with include "sovite.modelCredentialEnv" . }}{{ . | nindent 12 }}{{- end }}
           resources: {{ toYaml .Values.nativeHarness.resources | nindent 12 }}
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           readinessProbe: {httpGet: {path: /health/ready, port: http}, initialDelaySeconds: 10, periodSeconds: 10}

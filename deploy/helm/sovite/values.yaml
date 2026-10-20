@@ -6,7 +6,7 @@ mode: development
 deploymentBinding: ""
 image:
   repository: sovite-platform
-  tag: "0.1.1"
+  tag: "0.1.2"
   digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -42,7 +42,7 @@ nativeHarness:
   agentId: code-review
   image:
     repository: sovite-platform-codex
-    tag: "0.1.1"
+    tag: "0.1.2"
     digest: ""
   storage: 10Gi
   storageClass: ""
@@ -102,6 +102,9 @@ networkPolicy:
   stateEgress: []
   # Allowed tool service pods. Both selectors are required to avoid broad namespace access.
   toolPeers: []
+  # Model and harness peers are either in-cluster pods (exact hosts plus both selectors) or
+  # hosts outside the cluster: exact host CIDRs (/32 or /128) with the IP literals they serve.
+  # Reachability is all the chart grants; an external host needs its own controls.
   modelPeers: []
   harnessPeers: []
   # Only these gateway pods can reach the private operator/API service.
@@ -111,6 +114,9 @@ networkPolicy:
       matchLabels: {kubernetes.io/metadata.name: gateway-system}
     podSelector:
       matchLabels: {app.kubernetes.io/name: envoy}
+# Provider credentials named by bundle models' api_key_env, injected from runtimeSecret into
+# the worker and native harness. key defaults to env.
+modelCredentials: []
 kubernetesTools:
   enabled: false
   namespace: production

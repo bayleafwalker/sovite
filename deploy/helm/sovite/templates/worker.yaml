@@ -39,6 +39,7 @@ spec:
               value: {{ .Values.worker.computeId | quote }}
             - name: SOVITE_JOB_TIMEOUT_SECONDS
               value: {{ int .Values.worker.jobTimeoutSeconds | quote }}
+            {{- with include "sovite.modelCredentialEnv" . }}{{ . | nindent 12 }}{{- end }}
           resources: {{ toYaml .Values.worker.resources | nindent 12 }}
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           readinessProbe: {exec: {command: [sovite, worker-health]}, initialDelaySeconds: 15, periodSeconds: 30, timeoutSeconds: 8}
