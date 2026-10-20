@@ -264,3 +264,13 @@ def test_setup_enablement_and_installation_are_qualification_bound(setup):
     assert enabled != runtime_settings_fingerprint(replace(settings, setup_installation_id="other-installation"))
     assert runtime_settings_fingerprint(replace(settings, setup_api_enabled=False)) == runtime_settings_fingerprint(
         replace(settings, setup_api_enabled=False, setup_installation_id="unused"))
+
+
+def test_local_setup_cannot_enable_in_hosted_mode(setup):
+    settings, _, _ = setup
+    with pytest.raises(ValueError, match="local-only"):
+        replace(settings, hosting_envelope_path="host-controlled-envelope.json")
+    # Even mutation of an already constructed settings object cannot install routes.
+    settings.hosting_envelope_path = "host-controlled-envelope.json"
+    app = create_app(settings, Platform(settings))
+    assert not any(route.path.startswith('/api/setup/') for route in app.routes)

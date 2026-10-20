@@ -104,3 +104,14 @@ scripted text, silently switching models, or treating artifact availability as s
 Remaining gates: released owner adapter, durable work/run/receipt correlation,
 independent semantic verification/acceptance, distinct-session interrupted recovery,
 and hosted qualification. This source assessment closes none of those gates.
+
+
+## Integration with Sovite 0.1.15
+
+The branch integrates the concurrently released S2 hosted policy/dual qualification
+contract (`cdcaa12`). The bounded setup API explicitly refuses enablement with
+`SOVITE_HOSTING_ENVELOPE`; its routes remain absent in hosted mode. Existing hosted
+author/activator scopes and platform/tenant qualification checks stay in force.
+Shared activation preserves role checks and recompiles against the current envelope.
+The actual model records above predate this integration and are not fresh qualification
+of the combined composition. Combined source verification is recorded separately.
