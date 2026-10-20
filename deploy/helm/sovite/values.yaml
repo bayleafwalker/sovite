@@ -6,7 +6,7 @@ mode: development
 deploymentBinding: ""
 image:
   repository: sovite-platform
-  tag: "0.1.2"
+  tag: "0.1.3"
   digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -42,7 +42,7 @@ nativeHarness:
   agentId: code-review
   image:
     repository: sovite-platform-codex
-    tag: "0.1.2"
+    tag: "0.1.3"
     digest: ""
   storage: 10Gi
   storageClass: ""
@@ -117,6 +117,9 @@ networkPolicy:
 # Provider credentials named by bundle models' api_key_env, injected from runtimeSecret into
 # the worker and native harness. key defaults to env.
 modelCredentials: []
+# Pinned TLS trust anchors for model hosts, by name -> PEM certificate. A model selects one
+# with tls_trust; it then trusts that certificate only, not the system roots.
+modelTrust: {}
 kubernetesTools:
   enabled: false
   namespace: production

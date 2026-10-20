@@ -65,6 +65,7 @@ DEFINITIONS = {
         "identity_protocol": {"enum": ["ollama"]},
         "identity_endpoint": {"type": "string", "maxLength": 2048},
         "api_key_env": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,95}$"},
+        "tls_trust": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
         "parameters": obj([], {
             "temperature": {"type": "number", "minimum": 0, "maximum": 2},
             "think": {"type": "boolean"},
@@ -195,6 +196,8 @@ def validate_bundle(bundle: dict) -> dict:
             hosts = dest.get("allowed_hosts", [])
             if hosts and urlsplit(model["endpoint"]).hostname not in hosts:
                 _fail(f"{model['id']}: endpoint is outside its declared destination hosts")
+            if model.get("tls_trust") and any(urlsplit(url).scheme != "https" for url in (model["endpoint"], model.get("identity_endpoint", model["endpoint"]))):
+                _fail(f"{model['id']}: a pinned TLS trust anchor requires HTTPS endpoints")
         if bundle["mode"] == "enforced" and (model["adapter"] == "demo" or not model.get("digest")):
             _fail(f"{model['id']}: enforced installations require a real model with a content digest")
         if model.get("identity_endpoint"):

@@ -90,8 +90,13 @@ def validate_bindings(bundle, values, namespace, *, release="sovite", live_api_a
                         raise ValueError("A model references the bundled Ollama service but that endpoint is not provisioned")
                 elif not peer_allows(values["networkPolicy"].get("modelPeers", []), host, port):
                     raise ValueError("An external model endpoint lacks a matching explicit model network peer")
+                elif urlsplit(url).scheme != "https" and any(peer.get("cidrs") and host in peer.get("hosts", []) for peer in values["networkPolicy"].get("modelPeers", [])):
+                    # Outside the cluster, prompts and credentials cross networks Sovite does not control.
+                    raise ValueError("A model host outside the cluster must be reached over HTTPS")
             if model.get("api_key_env") and model["api_key_env"] not in {row.get("env") for row in values.get("modelCredentials", [])}:
                 raise ValueError("A model credential is not provisioned by modelCredentials")
+            if model.get("tls_trust") and model["tls_trust"] not in values.get("modelTrust", {}):
+                raise ValueError("A model's pinned TLS trust anchor is not provisioned by modelTrust")
             checked_models.add(model["id"])
         if harness["kind"] == "native-codex":
             raise ValueError("Kubernetes native execution requires the isolated agent-http service")

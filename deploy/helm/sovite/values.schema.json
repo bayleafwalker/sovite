@@ -270,6 +270,16 @@
         }
       }
     },
+    "modelTrust": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "kubernetesTools": {
       "type": "object",
       "properties": {

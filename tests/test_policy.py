@@ -93,6 +93,17 @@ def test_host_binding_cannot_hide_credentials_or_change_destination(bundle):
         validate_bundle(bundle)
 
 
+def test_pinned_model_trust_requires_https(bundle):
+    model = bundle["models"][0]
+    host = bundle["destinations"][[d["id"] for d in bundle["destinations"]].index(model["destination"])].get("allowed_hosts", ["localhost"])[0]
+    model.update(adapter="openai-compatible", endpoint=f"http://{host}:8021/v1", tls_trust="model-host")
+    bundle["harnesses"][0]["kind"] = "tool-agent"
+    with pytest.raises(PolicyError, match="requires HTTPS"):
+        validate_bundle(bundle)
+    model["endpoint"] = f"https://{host}:8021/v1"
+    validate_bundle(bundle)
+
+
 def test_generation_covers_binding_and_tools_not_only_model(bundle):
     original = bundle_generation(bundle)
     bundle["agents"][0]["instructions"] = "Changed agent package"

@@ -2,6 +2,6 @@ apiVersion: v2
 name: sovite
 description: Sovite Platform control, execution, private state and inference distribution
 type: application
-version: 0.1.2
-appVersion: "0.1.2"
+version: 0.1.3
+appVersion: "0.1.3"
 kubeVersion: ">=1.30.0-0"

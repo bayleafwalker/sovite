@@ -60,6 +60,7 @@ spec:
               valueFrom:
                 secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_HARNESS_TOKEN}
             {{- with include "sovite.modelCredentialEnv" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "sovite.modelTrustEnv" . }}{{ . | nindent 12 }}{{- end }}
           resources: {{ toYaml .Values.nativeHarness.resources | nindent 12 }}
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           readinessProbe: {httpGet: {path: /health/ready, port: http}, initialDelaySeconds: 10, periodSeconds: 10}
@@ -68,6 +69,9 @@ spec:
             - {name: bundle, mountPath: /config, readOnly: true}
             - {name: state, mountPath: /state/harness}
             - {name: tmp, mountPath: /tmp}
+            {{- if .Values.modelTrust }}
+            - {name: model-trust, mountPath: /model-trust, readOnly: true}
+            {{- end }}
             {{- if or .Values.nativeHarness.workspace.existingClaim .Values.nativeHarness.workspace.configMap }}
             - name: approved-workspace
               mountPath: /workspace/input
@@ -84,6 +88,10 @@ spec:
         - name: state
           persistentVolumeClaim: {claimName: {{ $name }}-native-harness}
         - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+        {{- if .Values.modelTrust }}
+        - name: model-trust
+          configMap: {name: {{ $name }}-model-trust}
+        {{- end }}
         {{- if or .Values.nativeHarness.workspace.existingClaim .Values.nativeHarness.workspace.configMap }}
         - name: approved-workspace
           {{- if .Values.nativeHarness.workspace.configMap }}

@@ -1,0 +1,12 @@
+{{- if .Values.modelTrust }}
+{{- $name := include "sovite.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-model-trust
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+data:
+  {{- range $key, $pem := .Values.modelTrust }}
+  {{ $key }}.pem: {{ $pem | quote }}
+  {{- end }}
+{{- end }}

@@ -92,7 +92,7 @@ def test_contract_binds_external_model_to_its_cidr_and_credential():
     assert not peer_allows([{'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.0/24'], 'ports': [8021]}], '192.0.2.20', 8021)
     bundle, _ = load_bundle(CHART.parents[2] / 'config/platform.kubernetes.yaml')
     native = next(m for m in bundle['models'] if m['id'] == 'native-reasoner')
-    native.update(endpoint='http://192.0.2.20:8021/v1', identity_endpoint='http://192.0.2.20:8021', api_key_env='MODEL_HOST_TOKEN')
+    native.update(endpoint='https://192.0.2.20:8021/v1', identity_endpoint='https://192.0.2.20:8021', api_key_env='MODEL_HOST_TOKEN')
     values = load_values(CHART, [CHART.parents[2] / 'deploy/examples/reference-values.yaml'])
     values['kubernetesTools']['apiServerCIDRs'] = ['192.0.2.10/32']
     values['networkPolicy']['modelPeers'] = [{'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}]
@@ -100,3 +100,29 @@ def test_contract_binds_external_model_to_its_cidr_and_credential():
         validate_bindings(bundle, values, 'sovite')
     values['modelCredentials'] = [{'env': 'MODEL_HOST_TOKEN'}]
     assert 'native-reasoner' in validate_bindings(bundle, values, 'sovite')['model_bindings']
+    native['tls_trust'] = 'model-host'
+    with pytest.raises(ValueError, match='trust anchor'):
+        validate_bindings(bundle, values, 'sovite')
+    values['modelTrust'] = {'model-host': '-----BEGIN CERTIFICATE-----\n'}
+    assert 'native-reasoner' in validate_bindings(bundle, values, 'sovite')['model_bindings']
+    native.update(endpoint='http://192.0.2.20:8021/v1', identity_endpoint='http://192.0.2.20:8021')
+    with pytest.raises(ValueError, match='HTTPS'):
+        validate_bindings(bundle, values, 'sovite')
+
+
+def test_model_trust_is_mounted_where_models_are_called(tmp_path):
+    pem = '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n'
+    result = render(tmp_path, {'modelTrust': {'model-host': pem}, 'nativeHarness': {'enabled': True}})
+    assert result.returncode == 0, result.stderr
+    rows = [r for r in yaml.safe_load_all(result.stdout) if r]
+    trust = next(r for r in rows if r['kind'] == 'ConfigMap' and r['metadata']['name'] == 'sovite-model-trust')
+    assert trust['data'] == {'model-host.pem': pem}
+    for name in ('sovite-worker', 'sovite-native-harness'):
+        pod = next(r for r in rows if r['kind'] == 'Deployment' and r['metadata']['name'] == name)['spec']['template']['spec']
+        container = pod['containers'][0]
+        assert {'name': 'SOVITE_MODEL_TRUST_DIR', 'value': '/model-trust'} in container['env']
+        assert {'name': 'model-trust', 'mountPath': '/model-trust', 'readOnly': True} in container['volumeMounts']
+        assert next(v for v in pod['volumes'] if v['name'] == 'model-trust')['configMap']['name'] == 'sovite-model-trust'
+    assert 'SOVITE_MODEL_TRUST_DIR' not in render(tmp_path, {}).stdout
+    assert render(tmp_path, {'modelTrust': {'Bad_Name': pem}}).returncode != 0
+    assert render(tmp_path, {'modelTrust': {'model-host': 'not a certificate'}}).returncode != 0

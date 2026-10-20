@@ -40,6 +40,7 @@ spec:
             - name: SOVITE_JOB_TIMEOUT_SECONDS
               value: {{ int .Values.worker.jobTimeoutSeconds | quote }}
             {{- with include "sovite.modelCredentialEnv" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "sovite.modelTrustEnv" . }}{{ . | nindent 12 }}{{- end }}
           resources: {{ toYaml .Values.worker.resources | nindent 12 }}
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           readinessProbe: {exec: {command: [sovite, worker-health]}, initialDelaySeconds: 15, periodSeconds: 30, timeoutSeconds: 8}
@@ -49,6 +50,9 @@ spec:
             - {name: trust, mountPath: /trust, readOnly: true}
             - {name: tmp, mountPath: /tmp}
             - {name: workspaces, mountPath: /workspaces}
+            {{- if .Values.modelTrust }}
+            - {name: model-trust, mountPath: /model-trust, readOnly: true}
+            {{- end }}
       volumes:
         - name: bundle
           configMap:
@@ -60,6 +64,10 @@ spec:
           emptyDir: {sizeLimit: 128Mi}
         - name: workspaces
           emptyDir: {sizeLimit: {{ .Values.worker.workspaceSize }}}
+        {{- if .Values.modelTrust }}
+        - name: model-trust
+          configMap: {name: {{ $name }}-model-trust}
+        {{- end }}
 {{- if .Values.kubernetesTools.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

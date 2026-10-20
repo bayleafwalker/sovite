@@ -22,6 +22,27 @@ def endpoint_url(endpoint: str, suffix: str) -> str:
     return endpoint.rstrip("/") if endpoint.rstrip("/").endswith(suffix) else endpoint.rstrip("/") + suffix
 
 
+def model_trust_path(model: dict) -> Path | None:
+    name = model.get("tls_trust")
+    if not name:
+        return None
+    path = Path(os.environ.get("SOVITE_MODEL_TRUST_DIR", "/model-trust")) / f"{name}.pem"
+    if not path.is_file():
+        raise RuntimeFailure("model_trust_missing")
+    return path
+
+
+def model_verify(model: dict) -> ssl.SSLContext | bool:
+    # A pinned anchor replaces, not extends, the system roots for this model.
+    path = model_trust_path(model)
+    if path is None:
+        return True
+    try:
+        return ssl.create_default_context(cafile=str(path))
+    except (OSError, ssl.SSLError):
+        raise RuntimeFailure("model_trust_missing") from None
+
+
 def token_headers(config: dict) -> dict[str, str]:
     env_name = config.get("api_key_env")
     if not env_name:
@@ -93,7 +114,7 @@ class AdapterRunner:
         if protocol != "ollama":
             raise RuntimeFailure("model_identity_protocol_unsupported")
         base = model.get("identity_endpoint", model.get("endpoint", "").removesuffix("/v1"))
-        result = await self.request_json("GET", endpoint_url(base, "/api/tags"), headers=token_headers(model), timeout=15)
+        result = await self.request_json("GET", endpoint_url(base, "/api/tags"), headers=token_headers(model), timeout=15, verify=model_verify(model))
         models = result.get("models", [])
         for candidate in models if isinstance(models, list) else []:
             if candidate.get("name") in {model["model"], model["model"] + ":latest"}:
@@ -146,13 +167,13 @@ class AdapterRunner:
                 payload["options"] = {k: v for k, v in parameters.items() if k in {"temperature", "num_ctx", "num_predict", "seed", "top_p", "top_k"}}
                 if "think" in parameters:
                     payload["think"] = parameters["think"]
-                result = await self.request_json("POST", endpoint_url(model["endpoint"], "/api/chat"), payload=payload, headers=token_headers(model), timeout=int(model.get("timeout_seconds", 120)))
+                result = await self.request_json("POST", endpoint_url(model["endpoint"], "/api/chat"), payload=payload, headers=token_headers(model), timeout=int(model.get("timeout_seconds", 120)), verify=model_verify(model))
                 message = result.get("message")
             elif model["adapter"] == "openai-compatible":
                 if model.get("wire_api", "chat") != "chat":
                     raise RuntimeFailure("tool_agent_requires_chat_api")
                 payload.update({k: v for k, v in parameters.items() if k in {"temperature", "max_tokens", "top_p", "seed", "reasoning_effort"}})
-                result = await self.request_json("POST", endpoint_url(model["endpoint"], "/chat/completions"), payload=payload, headers=token_headers(model), timeout=int(model.get("timeout_seconds", 120)))
+                result = await self.request_json("POST", endpoint_url(model["endpoint"], "/chat/completions"), payload=payload, headers=token_headers(model), timeout=int(model.get("timeout_seconds", 120)), verify=model_verify(model))
                 choices = result.get("choices", [])
                 message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
             else:
@@ -241,6 +262,9 @@ class AdapterRunner:
             if auth_env:
                 token_headers(model)  # Validate presence before launching.
                 env[auth_env] = os.environ[auth_env]
+            trust = model_trust_path(model)
+            if trust:
+                env["CODEX_CA_CERTIFICATE"] = str(trust)
             command = [harness.get("executable", "codex"), "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", result_path,
                 "-c", 'model_provider="sovite"', "-c", "model=" + json.dumps(model["model"]),
                 "-c", 'model_providers.sovite.name="Sovite configured provider"',

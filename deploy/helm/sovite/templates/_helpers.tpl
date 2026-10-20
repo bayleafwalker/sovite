@@ -64,3 +64,9 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
     secretKeyRef: {name: {{ $.Values.runtimeSecret }}, key: {{ .key | default .env }}}
 {{- end }}
 {{- end -}}
+
+{{- define "sovite.modelTrustEnv" -}}
+{{- if .Values.modelTrust }}
+- {name: SOVITE_MODEL_TRUST_DIR, value: /model-trust}
+{{- end }}
+{{- end -}}

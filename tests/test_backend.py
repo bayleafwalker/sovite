@@ -275,6 +275,32 @@ def test_model_digest_mismatch_prevents_inference():
     assert seen == ["http://localhost:11434/api/tags"]
 
 
+def test_pinned_model_trust_replaces_system_roots_in_both_adapters(monkeypatch, tmp_path):
+    import ssl
+    import subprocess
+    from sovite import adapters
+    model = {"id": "remote", "adapter": "openai-compatible", "wire_api": "responses", "model": "m",
+             "endpoint": "https://192.0.2.20:8021/v1", "tls_trust": "model-host"}
+    monkeypatch.setenv("SOVITE_MODEL_TRUST_DIR", str(tmp_path))
+    with pytest.raises(RuntimeFailure) as failure:
+        adapters.model_verify(model)
+    assert failure.value.code == "model_trust_missing"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1",
+                    "-subj", "/CN=t", "-keyout", str(tmp_path / "k.pem"), "-out", str(tmp_path / "model-host.pem")], check=True, capture_output=True)
+    context = adapters.model_verify(model)
+    assert isinstance(context, ssl.SSLContext) and len(context.get_ca_certs()) == 1
+    assert adapters.model_verify({"id": "plain"}) is True
+    seen = {}
+    async def fake_exec(*command, env, **kwargs):
+        seen.update(env)
+        raise FileNotFoundError
+    monkeypatch.setattr(adapters.asyncio, "create_subprocess_exec", fake_exec)
+    recipe = {"harness": {}, "model": model, "agent": {"id": "a"}, "generation": "g", "mode": "development"}
+    with pytest.raises(RuntimeFailure, match="native_runtime_unavailable"):
+        asyncio.run(AdapterRunner().native_codex(recipe, "task", "job"))
+    assert seen["CODEX_CA_CERTIFICATE"] == str(tmp_path / "model-host.pem")
+
+
 def test_audit_and_artifact_tampering_are_detected(setup):
     _, platform, _ = setup
     job = platform.submit("incident-forensics", "task", "cloud-codex", "r")
