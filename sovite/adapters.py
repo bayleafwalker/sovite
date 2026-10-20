@@ -23,6 +23,12 @@ def endpoint_url(endpoint: str, suffix: str) -> str:
     return endpoint.rstrip("/") if endpoint.rstrip("/").endswith(suffix) else endpoint.rstrip("/") + suffix
 
 
+def require_model_adapter(model: dict) -> None:
+    # EXACT_BINDING, PIN_BEFORE_PROMPT: no direct fallback while the gateway is unavailable.
+    if model.get("connection", {}).get("kind") == "model-gateway":
+        raise RuntimeFailure("model_gateway_adapter_unavailable")
+
+
 def model_trust_path(model: dict) -> Path | None:
     name = model.get("tls_trust")
     if not name:
@@ -90,6 +96,7 @@ class AdapterRunner:
 
     async def run(self, recipe: dict, task: str, job_id: str) -> dict:
         harness, model = recipe["harness"], recipe["model"]
+        require_model_adapter(model)
         kind = harness["kind"]
         if kind == "demo":
             if model["adapter"] != "demo":
@@ -108,6 +115,7 @@ class AdapterRunner:
         return await self.tool_agent(recipe, task, job_id)
 
     async def verify_model_identity(self, model: dict, enforced: bool = False) -> dict:
+        require_model_adapter(model)
         expected = model.get("digest")
         if not expected:
             if enforced:
@@ -129,6 +137,7 @@ class AdapterRunner:
         raise RuntimeFailure("model_identity_missing")
 
     async def agent_http(self, recipe: dict, task: str, job_id: str) -> dict:
+        require_model_adapter(recipe.get("model", {}))
         harness = recipe["harness"]
         endpoint = harness.get("endpoint")
         if not endpoint:
@@ -161,6 +170,7 @@ class AdapterRunner:
 
     async def tool_agent(self, recipe: dict, task: str, job_id: str) -> dict:
         agent, model = recipe["agent"], recipe["model"]
+        require_model_adapter(model)
         tools = {tool["id"]: tool for tool in recipe.get("tools", [])}
         messages: list[dict] = [{"role": "system", "content": agent.get("instructions", "Complete the task using only approved tools. Report uncertainty and cite observed evidence.")}, {"role": "user", "content": task}]
         trace: list[dict] = []
@@ -251,6 +261,7 @@ class AdapterRunner:
 
     async def native_codex(self, recipe: dict, task: str, job_id: str, *, isolated: bool = False) -> dict:
         harness, model = recipe["harness"], recipe["model"]
+        require_model_adapter(model)
         if model["adapter"] != "openai-compatible" or model.get("wire_api") != "responses":
             raise RuntimeFailure("codex_requires_responses_provider")
         # Inline native execution is supported only in the explicit development

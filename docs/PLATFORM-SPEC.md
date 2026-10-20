@@ -93,7 +93,7 @@ Desired configuration is changed through a validated bundle and deployment tooli
 
 ## Configuration contract
 
-The release uses one strict `PlatformBundle` with arrays of identified objects. The schema rejects unknown fields, duplicate identifiers, unresolved references and unsupported return or outage modes. YAML duplicate keys are also rejected.
+The release accepts strict `PlatformBundle` schemas `sovite.platform/v1alpha1` and `sovite.platform/v1alpha2`, with arrays of identified objects. Both reject unknown fields, duplicate identifiers, unresolved references and unsupported return or outage modes. YAML duplicate keys are also rejected. Existing v1alpha1 bundles retain their original contents and generation hashes; no placement, retention or identity defaults are inserted.
 
 | Object | Responsibility |
 | --- | --- |
@@ -135,6 +135,45 @@ grants:
 ```
 
 The actual examples are complete validated files: `platform.local.yaml`, `platform.ollama.yaml` and `platform.kubernetes.yaml`.
+
+### v1alpha2 model binding declarations
+
+The JSON schemas are [`platform.schema.json`](../config/platform.schema.json) (v1alpha1) and [`platform.v1alpha2.schema.json`](../config/platform.v1alpha2.schema.json). The compiler selects by `apiVersion`; schema validation is followed by reference, placement and protocol checks.
+
+Gateway bindings are **not yet executable: requires the model gateway (Phase 1 PR 2-5)**. An enforced v1alpha2 gateway bundle can compile for validation. Every runtime adapter entry point refuses these bindings with `model_gateway_adapter_unavailable` before sending context, contacting an external harness or starting a native process. No direct endpoint substitution occurs (`EXACT_BINDING`, `PIN_BEFORE_PROMPT`). Compilation does not establish runtime identity, cancellation, availability, retention enforcement or qualification.
+
+| Area | v1alpha2 declaration |
+| --- | --- |
+| Root | Required `restricted_class` references the data-class threshold by rank, normally `C3`; required `connector_roles` array |
+| Every destination | Required `trust_tier`: `operator-owned`, `rented` or `provider`; required `retention` object |
+| Retention | Required booleans `prompt_logging`, `response_logging`, `persistent_context`; all three must be false at every inference destination |
+| Memory cache | Required `retention.in_memory_cache` with `scope: job`, positive integer `max_seconds`, and explicit boolean `clear_on_cancel` and `clear_on_session_close`; only the specified job scope is accepted initially |
+| Restricted rented destination | `restricted_clearance` with a nonempty, unique `classes` array and nonblank `rationale` and `authorization_ref`; classes must resolve, meet the restricted threshold and fit ordinary destination clearance |
+| Connector role | Unique `id`, `destination`, SHA-256 `helper_image_digest` and `engine_image_digest` |
+| Model binding | Required `enabled`; gateway bindings also require `connection`, `identity`, `wire_api`, `max_concurrency`, `timeout_seconds`, `first_token_timeout_seconds` and `cancel_bound_seconds` |
+| Connection | `kind: model-gateway` and `enrollment_role` referencing a connector role at exactly the binding's destination |
+| Identity | `protocol: helper-signed-v1`; `pinning: required` requires nonblank `engine_version` and SHA-256 `weights_manifest_digest`; enforced mode requires this pinning policy |
+| Development identity | `pinning: unpinned-development` permits absent engine/weight pins only in development mode; the declaration remains visible in recipes and flow projections |
+| Operational bounds | Concurrency retains the existing 1–64 range. All three model deadlines are explicit positive integers, at most 600 seconds; first-token timeout and cancellation bound cannot exceed the inference timeout (`BOUNDED_STOP`) |
+| Grant availability | Positive integer `availability_wait_seconds`, separate from attempt timeout and `max_attempts`; no infinite wait (`AVAILABILITY_NOT_COMPETENCE`) |
+
+Effective context is the maximum rank of the grant input, declared output and **every permitted tool result**. The declared output must still dominate input and tool results. Ordinary clearance checks remain mandatory. At or above `restricted_class`, a rented receiving destination additionally needs the exact effective class named in `restricted_clearance.classes`; a high ordinary clearance alone is insufficient. This applies to inference, execution, private state, tool arguments/results and declared telemetry. Higher classes require their own explicit authorization. Tool declarations are checked even when unreferenced.
+
+Retention is required on every declared destination, including unreferenced destinations. For provider inference, the declaration covers both helper and upstream provider. Cache scope, lifetime and cleanup flags are qualified operational declarations, not evidence that cleanup occurs; accepting YAML does not implement or qualify a cache. No persistent context or prompt/response logging is permitted for inference.
+
+Gateway models cannot carry worker-selectable `endpoint`, `base_url`, `api_key_env`, `credential` or worker `tls_trust` configuration. Legacy `digest`, `identity_protocol` and `identity_endpoint` cannot coexist with the new gateway identity. An Ollama manifest digest is not a weight-file hash. Tool-agent bindings require Chat; native Codex requires an OpenAI-compatible Responses binding, including `agent-http` harnesses declaring the `native-codex` capability. No protocol translation is implied. Connector roles pin helper and engine images in both modes.
+
+The migration reader accepts direct Ollama/OpenAI-compatible endpoints in v1alpha2 **development mode only**, using the legacy identity fields. New gateway identity/deadline fields without a connection are rejected. Enforced v1alpha2 requires gateway connections on every binding, including disabled or unused bindings. v1alpha1 behavior is preserved.
+
+Availability waiting uses the strict bundle-wide rule: when any v1alpha2 model declares a gateway connection, **every** grant must provide `availability_wait_seconds`, including disabled grants and grants targeting a development legacy binding. Omitted `on_outage` is treated as queue for this validation requirement, without inserting a value. There is no fallback or provisioning action.
+
+The generation hashes the complete declared bundle. v1alpha2 flow projections include full destination, model, connector-role and grant declarations plus `restricted_class`, so placement, retention, identity, clearance and all deadlines remain inspectable. Resolved job recipes also retain the selected connector role and restricted threshold. These additions do not change v1alpha1 projections or recipe contents.
+
+### Binding inhibit storage and database upgrade
+
+Database initialization upgrades schema version 1 to 2 using the existing `platform_metadata.schema_version` mechanism. It creates `binding_runtime_state` with binding `id` as primary key, boolean `inhibited`, reason and update timestamp. Fresh databases initialize at version 2; repeat initialization preserves existing inhibits. Unknown schema versions are rejected before migration. Existing jobs, bundle revisions, grant inhibits, sessions, qualifications and audit history are preserved; bundle generations are unchanged.
+
+Binding state is separate from bundle `models[].enabled` and observed availability. This release provides ORM storage/readback only: it creates no automatic binding-state rows, operator endpoint, scheduler behavior or inference authority checks for this state. Those behaviors belong to later gateway/lifecycle PRs. SQLite upgrade tests run by default; PostgreSQL upgrade tests use isolated temporary schemas when `SOVITE_TEST_POSTGRES_URL` is set (otherwise skipped).
 
 ## Information and authority boundaries
 

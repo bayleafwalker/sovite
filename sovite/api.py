@@ -72,7 +72,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             worker_task.cancel()
             await asyncio.gather(worker_task, return_exceptions=True)
 
-    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.9", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.10", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.platform = platform
 
     @app.middleware("http")
@@ -306,7 +306,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         if method == "initialize":
             requested = params.get("protocolVersion")
             version = requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-11-25"
-            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.9"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
+            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.10"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
         if method == "ping":
             return reply({})
         if method == "tools/list":

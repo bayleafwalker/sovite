@@ -35,6 +35,14 @@ class GrantState(Base):
     updated_at: Mapped[float] = mapped_column(Float, default=time.time)
 
 
+class BindingState(Base):
+    __tablename__ = "binding_runtime_state"
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    inhibited: Mapped[bool] = mapped_column(Boolean, default=False)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    updated_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -132,10 +140,18 @@ class Database:
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def initialize(self):
-        Base.metadata.create_all(self.engine)
         with self.sessions.begin() as session:
-            if session.get(MetadataRow, "schema_version") is None:
-                session.add(MetadataRow(key="schema_version", value={"version": 1}))
+            MetadataRow.__table__.create(session.connection(), checkfirst=True)
+            version = session.get(MetadataRow, "schema_version")
+            if version is not None and version.value not in ({"version": 1}, {"version": 2}):
+                raise ValueError("Unsupported database schema_version; expected version 1 or 2")
+            # Version 2 adds binding_runtime_state: binding inhibits are operational state,
+            # independent of the bundle's enabled flag, and survive bundle revisions.
+            Base.metadata.create_all(session.connection())
+            if version is None:
+                session.add(MetadataRow(key="schema_version", value={"version": 2}))
+            else:
+                version.value = {"version": 2}
             if session.get(MetadataRow, "audit_head") is None:
                 session.add(MetadataRow(key="audit_head", value={"sequence": 0, "hash": "0" * 64}))
 
