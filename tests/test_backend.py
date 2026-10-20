@@ -567,3 +567,20 @@ def test_worker_shutdown_blocks_non_replayable_job_as_uncertain(setup):
     _interrupted_by_shutdown(platform, job.id)
     row = platform.get_job(job.id)
     assert (row.status, row.error_code) == ("blocked", "execution_uncertain")
+
+
+def _disconnecting(request):
+    raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
+
+
+def test_harness_disconnect_mid_request_is_uncertain_not_internal_error():
+    recipe = {"harness": {"kind": "agent-http", "endpoint": "http://harness:8090/run"}, "agent": {"id": "code-review"}, "generation": "sha256:x", "grant": {"timeout_seconds": 30}}
+    with pytest.raises(RuntimeFailure) as caught:
+        asyncio.run(AdapterRunner(httpx.MockTransport(_disconnecting)).agent_http(recipe, "task", "job"))
+    assert (caught.value.code, caught.value.retryable) == ("external_execution_uncertain", False)
+
+
+def test_model_disconnect_mid_request_is_a_retryable_outage():
+    with pytest.raises(RuntimeFailure) as caught:
+        asyncio.run(AdapterRunner(httpx.MockTransport(_disconnecting)).request_json("POST", "http://model:11434/api/chat", payload={}, timeout=5))
+    assert (caught.value.code, caught.value.retryable) == ("upstream_unavailable", True)

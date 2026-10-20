@@ -81,7 +81,9 @@ class AdapterRunner:
                     if not isinstance(result, dict):
                         raise RuntimeFailure("upstream_protocol_error")
                     return result
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError):
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError):
+            # A peer that disconnects mid-response (a crashed or killed service) is an outage too;
+            # callers with external effects turn it into execution_uncertain.
             raise RuntimeFailure("upstream_unavailable", True) from None
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise RuntimeFailure("upstream_protocol_error") from None
