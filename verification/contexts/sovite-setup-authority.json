@@ -5,7 +5,7 @@
   "subject": "Bounded setup identity, proposals and operator activation",
   "contract_ref": {
     "doc_id": "docs/AGENTIC-SETUP-PLAN.md",
-    "revision": "d1b356b15f54420286b4d837b232b5ab0488030c"
+    "revision": "b00f8bd2eb380378d7ea6526304d153b5a679631"
   },
   "source_of_truth": "SetupPrincipal, SetupDraft, bundle revision and active_generation rows; AuditEvent is hash-chained history committed in the same transaction, not a separate decision authority.",
   "depth": 2,
@@ -92,7 +92,8 @@
     "Only operator can activate; author must remain current and active base must match",
     "Activation replay cannot reactivate a superseded revision",
     "Setup enablement and installation identity change qualification binding",
-    "Raw setup credentials are neither stored nor audited"
+    "Raw setup credentials are neither stored nor audited",
+    "Local setup cannot be enabled or expose routes under a hosted envelope"
   ],
   "faults": [
     "Forced-past expiry",

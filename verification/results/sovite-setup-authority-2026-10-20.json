@@ -3,9 +3,9 @@
   "context_id": "sovite-setup-authority-v1",
   "contract_ref": {
     "doc_id": "docs/AGENTIC-SETUP-PLAN.md",
-    "revision": "d1b356b15f54420286b4d837b232b5ab0488030c"
+    "revision": "b00f8bd2eb380378d7ea6526304d153b5a679631"
   },
-  "implementation_sha": "d1b356b15f54420286b4d837b232b5ab0488030c",
+  "implementation_sha": "b00f8bd2eb380378d7ea6526304d153b5a679631",
   "depth": 2,
   "environment": {
     "backend": "SQLite and isolated disposable PostgreSQL 18.6 schemas",
@@ -48,7 +48,8 @@
       "result": "example-tested",
       "evidence": [
         "tests/test_setup_api.py",
-        "tests/test_migrations.py"
+        "tests/test_migrations.py",
+        "tests/test_setup_api.py:test_local_setup_cannot_enable_in_hosted_mode"
       ]
     },
     {
@@ -61,9 +62,10 @@
   ],
   "counterexamples": [],
   "notes": [
-    "Full regression run: 745 passed, zero skips/failures, before the final setup qualification-binding addition. Final changed-surface run: 126 passed, zero skips/failures, including both backends and the qualification-binding addition.",
-    "Full: python -m pytest -x -q --tb=short with SOVITE_TEST_POSTGRES_URL targeting an owned PostgreSQL 18.6 Unix socket. Final: python -m pytest tests/test_setup_api.py tests/test_migrations.py -x -q --tb=short with that disposable PostgreSQL setting.",
+    "Combined source after integration with Sovite 0.1.15: 880 passed, zero skips, failures or errors; SQLite and disposable PostgreSQL 18.6. Includes hosted policy/dual qualification and local-setup exclusion tests.",
+    "Command: python -m pytest -x -q --tb=short with SOVITE_TEST_POSTGRES_URL targeting an owned PostgreSQL 18.6 Unix socket. Separate targeted setup/hosting checks passed before this full run.",
     "Observed races are bounded examples, not a formal proof or distributed network-fault test.",
-    "Two actual model runs produced private artifacts but both failed manual content review; source-ID mentions are not semantic verification. Four assessment invocations total: two failed before inference, two rejected model outputs. Neither is accepted Vuoro work."
+    "Two actual model runs produced private artifacts but both failed manual content review; source-ID mentions are not semantic verification. Four assessment invocations total: two failed before inference, two rejected model outputs. Neither is accepted Vuoro work.",
+    "Real model assessment records predate the 0.1.15 rebase and are not fresh runtime qualification of the combined composition."
   ]
 }
