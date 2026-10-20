@@ -85,11 +85,21 @@ The development operator assertion authorizes only this assessment and is explic
 not production deployment evidence. Serving used a cached CPU image with 4 CPUs and
 6 GiB memory limits; no production network isolation is asserted.
 
-Attempt denominator: three assessment-script invocations. The first refused a
+Attempt denominator: four assessment-script invocations. The first refused a
 non-canonical model digest before inference; the second correctly blocked dispatch
 but exposed a wrong test expectation that the bounded caller error would disclose
-qualification details. The corrected third invocation completed real inference.
-The failed invocations were not successes and are not model-quality failures.
+qualification details. The corrected third invocation completed real inference but content review rejected
+its planning narrative and incomplete handover. A fourth invocation used only the
+source snippets, a shorter explicit final-answer contract and a larger output budget;
+it completed one worker attempt in 121.167 seconds but again failed content review.
+The [retry record](AGENTIC-REAL-RETRY-ASSESSMENT.json) preserves its separate hash.
+Thus two invocations failed before inference and two produced real outputs that were
+not acceptable task outcomes. The first two are not model-quality failures.
+
+The observed Qwen/runtime/instruction tuple is not qualified for this handover task.
+A supported model/prompt-template contract and fresh task-competence evidence are
+required before proceeding to accepted WF-01. Do not repair output by substituting
+scripted text, silently switching models, or treating artifact availability as success.
 
 Remaining gates: released owner adapter, durable work/run/receipt correlation,
 independent semantic verification/acceptance, distinct-session interrupted recovery,

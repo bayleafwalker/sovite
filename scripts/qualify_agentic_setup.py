@@ -103,21 +103,21 @@ def main():
                         return client.post(path, json=body, headers=headers(token))
                     model = {'id': 'maintenance-model', 'name': 'Maintenance Qwen', 'adapter': 'ollama',
                         'endpoint': args.model_endpoint, 'model': observed['name'], 'destination': 'private-runtime',
-                        'digest': 'sha256:' + observed['digest'], 'parameters': {'temperature': 0, 'think': False, 'num_predict': 768, 'num_ctx': 4096}}
+                        'digest': 'sha256:' + observed['digest'], 'timeout_seconds': 600, 'parameters': {'temperature': 0, 'think': False, 'num_predict': 1024, 'num_ctx': 4096}}
                     principal = post('/api/setup/principals', {'name': 'bayleaf setup agent', 'ttl_seconds': 3600,
                         'envelope': {'models': [model], 'harnesses': ['private-analysis'], 'grants': ['incident-forensics'], 'max_steps': 2}}).raise_for_status().json()
                     agent_token = principal.pop('token')
                     context = client.get('/api/setup/context', headers=headers(agent_token)).raise_for_status().json()
                     draft = post('/api/setup/drafts', {'idempotency_key': 'wf01-setup', 'base_generation': context['generation'],
                         'model': model, 'agent_id': 'maintenance-helper', 'agent_name': 'Maintenance handover helper',
-                        'harness': 'private-analysis', 'instructions': 'Prepare a concise maintenance handover using only supplied observations. Cite M1, M2 and M3. Separate facts, hypotheses and proposed checks. Owners remain unassigned. State no repair or outcome was verified. Do not invent causes, people, costs or deadlines.',
+                        'harness': 'private-analysis', 'instructions': 'Return only the final maintenance handover, under 250 words. Do not explain your reasoning, plan, or instructions. Use exactly three entries headed M1, M2, and M3. For each entry write: Fact; Unknown; Suggested check; Action owner: unassigned. Preserve exact observations and counts. Do not diagnose causes, invent people, costs, deadlines, or claim repairs. End with: No repairs or outcomes have been verified.',
                         'max_steps': 2, 'grant': 'incident-forensics'}, agent_token).raise_for_status().json()
                     activation_path = '/api/setup/drafts/' + draft['id'] + '/activate'
                     assert post(activation_path, {'generation': draft['generation']}, agent_token).status_code == 401
                     inspected = client.get('/api/setup/drafts/' + draft['id'], headers=headers(operator)).raise_for_status().json()
                     assert inspected['generation'] == draft['generation']
                     post(activation_path, {'generation': draft['generation']}).raise_for_status()
-                    task = json.dumps(fixture, ensure_ascii=False)
+                    task = json.dumps({'objective': fixture['objective'], 'sources': fixture['snippets']}, ensure_ascii=False)
                     rpc = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'begin_task', 'arguments': {
                         'grant_id': 'incident-forensics', 'task': task, 'idempotency_key': 'wf01-task'}}}
                     blocked = post('/mcp', rpc, caller).raise_for_status().json()
@@ -165,7 +165,7 @@ def main():
                         'source_sha256': hashlib.sha256(raw).hexdigest(), 'generation': draft['generation'],
                         'setup_principal': principal['id'], 'setup_draft': draft['id'], 'qualification_id': qualification.id,
                         'qualification_kind': evidence['evidence_kind'], 'receipt': accepted['receipt'], 'status': status['status'],
-                        'artifact_sha256': result_hash, 'artifact_bytes': len(exact), 'answer_characters': len(answer),
+                        'artifact_sha256': result_hash, 'artifact_bytes': len(exact), 'answer_characters': len(answer), 'worker_attempts': job['attempts'],
                         'checks': {'agent_activation_refused': True, 'unqualified_task_blocked': True, 'qualified_retry_available': True,
                             'submission_retry_same_receipt': True, 'caller_artifact_refused': True, 'fresh_client_exact_hash_match': True,
                             'M1_M2_M3_references_present': True, 'audit_chain_valid': platform.db.verify_audit()['valid']},
@@ -173,7 +173,8 @@ def main():
                         'remaining': ['Independent semantic verification and Vuoro work acceptance', 'Released owner-adapter composition',
                             'Two-session recovery and stale settlement refusal', 'Hosted qualification and rollout']}
                     args.output.parent.mkdir(parents=True, exist_ok=True)
-                    with args.output.open('x') as output:
+                    output_descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(output_descriptor, 'w') as output:
                         json.dump(summary, output, indent=2)
                         output.write('\n')
                     os.chmod(args.output, 0o600)

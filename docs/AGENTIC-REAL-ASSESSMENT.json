@@ -34,5 +34,14 @@
     "Released owner-adapter composition",
     "Two-session recovery and stale settlement refusal",
     "Hosted qualification and rollout"
-  ]
+  ],
+  "content_review": {
+    "status": "rejected",
+    "basis": "Coordinator inspection of exact privately retained artifact; not Vuoro work acceptance",
+    "findings": [
+      "Output is planning narrative, not the requested final handover",
+      "Output stops while discussing M2 and does not cover M3 facts",
+      "Mentioning source IDs alone does not establish source coverage"
+    ]
+  }
 }

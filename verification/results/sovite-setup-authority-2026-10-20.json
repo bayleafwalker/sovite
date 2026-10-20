@@ -1,0 +1,69 @@
+{
+  "schema_version": "verification-result/v1",
+  "context_id": "sovite-setup-authority-v1",
+  "contract_ref": {
+    "doc_id": "docs/AGENTIC-SETUP-PLAN.md",
+    "revision": "d1b356b15f54420286b4d837b232b5ab0488030c"
+  },
+  "implementation_sha": "d1b356b15f54420286b4d837b232b5ab0488030c",
+  "depth": 2,
+  "environment": {
+    "backend": "SQLite and isolated disposable PostgreSQL 18.6 schemas",
+    "isolation": "SQLite writer serialization; PostgreSQL READ COMMITTED with shared authority metadata lock",
+    "tool_versions": {
+      "python": "3.12.14",
+      "sqlite": "3.53.1",
+      "pytest": "9.1.1",
+      "SQLAlchemy": "2.1.5",
+      "psycopg": "3.3.6"
+    }
+  },
+  "execution": {
+    "histories": 2,
+    "bounds": {
+      "race_histories_per_backend": 1,
+      "concurrent_clients": 2
+    },
+    "faults_exercised": [
+      "Forced-past expiry",
+      "Revocation before activation and proposal",
+      "Concurrent revocation/activation",
+      "Restart",
+      "Different installation/principal",
+      "Changed active revision",
+      "Invalid non-finite model JSON",
+      "Blocked dispatch then retry"
+    ]
+  },
+  "claims": [
+    {
+      "property": "Currentness and activation share the authority lock; observed race never activates after committed revocation",
+      "result": "concurrency-tested",
+      "evidence": [
+        "tests/test_setup_api.py:test_revoke_and_activation_share_the_authority_boundary"
+      ]
+    },
+    {
+      "property": "Setup authority stays bounded and separate from execution; migration and qualification settings preserve refusal behavior",
+      "result": "example-tested",
+      "evidence": [
+        "tests/test_setup_api.py",
+        "tests/test_migrations.py"
+      ]
+    },
+    {
+      "property": "Full real-model WF-01 with independent Vuoro verification and acceptance",
+      "result": "unknown",
+      "evidence": [
+        "docs/AGENTIC-REAL-ASSESSMENT.json"
+      ]
+    }
+  ],
+  "counterexamples": [],
+  "notes": [
+    "Full regression run: 745 passed, zero skips/failures, before the final setup qualification-binding addition. Final changed-surface run: 126 passed, zero skips/failures, including both backends and the qualification-binding addition.",
+    "Full: python -m pytest -x -q --tb=short with SOVITE_TEST_POSTGRES_URL targeting an owned PostgreSQL 18.6 Unix socket. Final: python -m pytest tests/test_setup_api.py tests/test_migrations.py -x -q --tb=short with that disposable PostgreSQL setting.",
+    "Observed races are bounded examples, not a formal proof or distributed network-fault test.",
+    "Two actual model runs produced private artifacts but both failed manual content review; source-ID mentions are not semantic verification. Four assessment invocations total: two failed before inference, two rejected model outputs. Neither is accepted Vuoro work."
+  ]
+}
