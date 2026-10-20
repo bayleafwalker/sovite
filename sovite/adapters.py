@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import ssl
@@ -258,10 +259,14 @@ class AdapterRunner:
         source_workspace = os.environ.get("SOVITE_NATIVE_WORKSPACE") if isolated else None
         if source_workspace and not Path(source_workspace).is_dir():
             raise RuntimeFailure("native_workspace_missing")
-        with tempfile.TemporaryDirectory(prefix="sovite-native-") as work:
+        # Codex refuses to install its sandbox helpers under the temporary directory, so
+        # its home can live under a separate root; without one, its sandbox cannot start.
+        home_root = os.environ.get("SOVITE_NATIVE_HOME_ROOT")
+        with tempfile.TemporaryDirectory(prefix="sovite-native-") as work, \
+                tempfile.TemporaryDirectory(prefix="sovite-native-home-", dir=home_root) if home_root else contextlib.nullcontext(None) as separate_home:
             result_path = str(Path(work) / "result.txt")
-            native_home = Path(work) / "home"
-            native_home.mkdir()
+            native_home = Path(separate_home) if separate_home else Path(work) / "home"
+            native_home.mkdir(exist_ok=True)
             env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": str(native_home), "LANG": "C.UTF-8", "TMPDIR": work}
             auth_env = model.get("api_key_env")
             if auth_env:

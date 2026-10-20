@@ -58,3 +58,6 @@
 {{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,62}$" $key) -}}{{ fail "modelTrust names must be lower-case DNS labels" }}{{- end -}}
 {{- if not (contains "-----BEGIN CERTIFICATE-----" (toString $pem)) -}}{{ fail (printf "modelTrust %s must be a PEM certificate" $key) }}{{- end -}}
 {{- end -}}
+{{- if and .Values.nativeHarness.sandbox.seccompLocalhostProfile (not .Values.nativeHarness.sandbox.userNamespace) -}}
+{{- fail "nativeHarness.sandbox.seccompLocalhostProfile widens namespace syscalls and requires nativeHarness.sandbox.userNamespace" -}}
+{{- end -}}

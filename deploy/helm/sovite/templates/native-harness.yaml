@@ -39,7 +39,21 @@ spec:
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
-      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      {{- if .Values.nativeHarness.sandbox.userNamespace }}
+      # Codex's own read-only sandbox (bubblewrap) needs namespace syscalls. A user
+      # namespace confines them to namespaces this pod owns.
+      hostUsers: false
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        {{- with .Values.nativeHarness.sandbox.seccompLocalhostProfile }}
+        seccompProfile: {type: Localhost, localhostProfile: {{ . | quote }}}
+        {{- else }}
+        seccompProfile: {type: RuntimeDefault}
+        {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
@@ -61,6 +75,7 @@ spec:
                 secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_HARNESS_TOKEN}
             {{- with include "sovite.modelCredentialEnv" . }}{{ . | nindent 12 }}{{- end }}
             {{- with include "sovite.modelTrustEnv" . }}{{ . | nindent 12 }}{{- end }}
+            - {name: SOVITE_NATIVE_HOME_ROOT, value: /native-home}
           resources: {{ toYaml .Values.nativeHarness.resources | nindent 12 }}
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           readinessProbe: {httpGet: {path: /health/ready, port: http}, initialDelaySeconds: 10, periodSeconds: 10}
@@ -69,6 +84,7 @@ spec:
             - {name: bundle, mountPath: /config, readOnly: true}
             - {name: state, mountPath: /state/harness}
             - {name: tmp, mountPath: /tmp}
+            - {name: native-home, mountPath: /native-home}
             {{- if .Values.modelTrust }}
             - {name: model-trust, mountPath: /model-trust, readOnly: true}
             {{- end }}
@@ -88,6 +104,7 @@ spec:
         - name: state
           persistentVolumeClaim: {claimName: {{ $name }}-native-harness}
         - {name: tmp, emptyDir: {sizeLimit: 256Mi}}
+        - {name: native-home, emptyDir: {sizeLimit: 256Mi}}
         {{- if .Values.modelTrust }}
         - name: model-trust
           configMap: {name: {{ $name }}-model-trust}

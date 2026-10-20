@@ -148,6 +148,19 @@
               "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
             }
           }
+        },
+        "sandbox": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "userNamespace": {
+              "type": "boolean"
+            },
+            "seccompLocalhostProfile": {
+              "type": "string",
+              "pattern": "^$|^[A-Za-z0-9._/-]+\\.json$"
+            }
+          }
         }
       }
     },

@@ -1,6 +1,6 @@
 services:
   native-harness:
-    image: ${SOVITE_CODEX_IMAGE:-sovite-platform-codex:0.1.4}
+    image: ${SOVITE_CODEX_IMAGE:-sovite-platform-codex:0.1.5}
     build:
       context: .
       target: native-codex

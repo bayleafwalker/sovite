@@ -126,3 +126,32 @@ def test_model_trust_is_mounted_where_models_are_called(tmp_path):
     assert 'SOVITE_MODEL_TRUST_DIR' not in render(tmp_path, {}).stdout
     assert render(tmp_path, {'modelTrust': {'Bad_Name': pem}}).returncode != 0
     assert render(tmp_path, {'modelTrust': {'model-host': 'not a certificate'}}).returncode != 0
+
+
+def test_native_sandbox_needs_user_namespace_with_localhost_profile(tmp_path):
+    def pod(values):
+        result = render(tmp_path, values)
+        assert result.returncode == 0, result.stderr
+        rows = [r for r in yaml.safe_load_all(result.stdout) if r]
+        return next(r for r in rows if r['kind'] == 'Deployment' and r['metadata']['name'] == 'sovite-native-harness')['spec']['template']['spec']
+    default = pod({'nativeHarness': {'enabled': True}})
+    assert 'hostUsers' not in default and default['securityContext']['seccompProfile'] == {'type': 'RuntimeDefault'}
+    env = {e['name']: e.get('value') for e in default['containers'][0]['env']}
+    assert env['SOVITE_NATIVE_HOME_ROOT'] == '/native-home'
+    assert {'name': 'native-home', 'mountPath': '/native-home'} in default['containers'][0]['volumeMounts']
+    sandbox = {'userNamespace': True, 'seccompLocalhostProfile': 'profiles/sovite-codex-sandbox.json'}
+    enabled = pod({'nativeHarness': {'enabled': True, 'sandbox': sandbox}})
+    assert enabled['hostUsers'] is False
+    assert enabled['securityContext']['seccompProfile'] == {'type': 'Localhost', 'localhostProfile': 'profiles/sovite-codex-sandbox.json'}
+    assert render(tmp_path, {'nativeHarness': {'enabled': True, 'sandbox': {'seccompLocalhostProfile': 'profiles/x.json'}}}).returncode != 0
+
+
+def test_shipped_seccomp_profile_only_widens_namespace_syscalls():
+    import json
+    profile = json.loads((CHART.parents[2] / 'deploy/seccomp/sovite-codex-sandbox.json').read_text())
+    assert profile['defaultAction'] == 'SCMP_ACT_ERRNO'
+    assert not any('includes' in r or 'excludes' in r for r in profile['syscalls'])
+    widened = profile['syscalls'][-1]
+    assert widened == {'names': ['unshare', 'clone', 'setns', 'mount', 'umount2', 'pivot_root'], 'action': 'SCMP_ACT_ALLOW'}
+    allowed = {n for r in profile['syscalls'][:-1] if r['action'] == 'SCMP_ACT_ALLOW' and not r.get('args') for n in r['names']}
+    assert not allowed & {'unshare', 'setns', 'mount', 'umount2', 'pivot_root', 'bpf', 'init_module', 'kexec_load'}

@@ -328,6 +328,13 @@ def test_pinned_model_trust_replaces_system_roots_in_both_adapters(monkeypatch, 
     with pytest.raises(RuntimeFailure, match="native_runtime_unavailable"):
         asyncio.run(AdapterRunner().native_codex(recipe, "task", "job"))
     assert seen["CODEX_CA_CERTIFICATE"] == str(tmp_path / "model-host.pem")
+    # Codex will not install its sandbox helpers under TMPDIR, so a home root keeps HOME outside it.
+    (tmp_path / "homes").mkdir()
+    monkeypatch.setenv("SOVITE_NATIVE_HOME_ROOT", str(tmp_path / "homes"))
+    with pytest.raises(RuntimeFailure, match="native_runtime_unavailable"):
+        asyncio.run(AdapterRunner().native_codex(recipe, "task", "job"))
+    assert seen["HOME"].startswith(str(tmp_path / "homes")) and not seen["HOME"].startswith(seen["TMPDIR"])
+    assert list((tmp_path / "homes").iterdir()) == []
 
 
 def test_audit_and_artifact_tampering_are_detected(setup):

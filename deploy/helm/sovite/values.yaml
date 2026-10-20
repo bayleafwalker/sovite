@@ -6,7 +6,7 @@ mode: development
 deploymentBinding: ""
 image:
   repository: sovite-platform
-  tag: "0.1.4"
+  tag: "0.1.5"
   digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -42,7 +42,7 @@ nativeHarness:
   agentId: code-review
   image:
     repository: sovite-platform-codex
-    tag: "0.1.4"
+    tag: "0.1.5"
     digest: ""
   storage: 10Gi
   storageClass: ""
@@ -54,6 +54,12 @@ nativeHarness:
   resources:
     requests: {cpu: 250m, memory: 512Mi}
     limits: {cpu: "2", memory: 2Gi}
+  # Codex's read-only sandbox (bubblewrap) cannot start under the runtime's default
+  # seccomp profile. Enable both together: a user-namespaced pod and a node-installed
+  # Localhost profile such as deploy/seccomp/sovite-codex-sandbox.json.
+  sandbox:
+    userNamespace: false
+    seccompLocalhostProfile: ""
 postgres:
   enabled: true
   image: postgres:17.11-alpine
