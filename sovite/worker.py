@@ -7,14 +7,18 @@ import os
 import socket
 import time
 import uuid
+from collections import Counter
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
 
 from .adapters import AdapterRunner, RuntimeFailure
 from .db import Job, WorkerHeartbeat
 from .service import Platform, PlatformError, TERMINAL
 
 log = logging.getLogger("sovite.worker")
+
+# Arbitrary constant naming the PostgreSQL advisory lock that serializes claims.
+CLAIM_LOCK = 0x50617669746531
 
 
 def worker_scope(platform: Platform, hostname: str | None = None) -> str:
@@ -71,10 +75,17 @@ class Worker:
         self.recover_expired()
         now = time.time()
         with self.platform.db.sessions.begin() as session:
+            if self.platform.db.engine.dialect.name == "postgresql":
+                # Per-model limits count running jobs, so concurrent claims must not both see a free slot.
+                session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CLAIM_LOCK})
             rows = session.scalars(select(Job).where(Job.status.in_(["queued", "retry_wait"]), Job.next_attempt_at <= now, Job.cancel_requested == False).order_by(Job.created_at).limit(100).with_for_update(skip_locked=True)).all()
+            running = Counter(job.resolved.get("model", {}).get("id") for job in session.scalars(select(Job).where(Job.status == "running")))
             for row in rows:
                 if row.resolved.get("compute", {}).get("id") != self.platform.settings.compute_id:
                     continue
+                model = row.resolved.get("model", {})
+                if model.get("max_concurrency") and running[model.get("id")] >= model["max_concurrency"]:
+                    continue  # Leave it queued; a slow model must not hold workers other models could use.
                 try:
                     self.platform.authorize(session, row.grant_id, row.caller, generation=row.generation, is_operator=row.resolved.get("submission_role") == "operator")
                 except PlatformError as exc:

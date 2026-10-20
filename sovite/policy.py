@@ -66,6 +66,7 @@ DEFINITIONS = {
         "identity_endpoint": {"type": "string", "maxLength": 2048},
         "api_key_env": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,95}$"},
         "tls_trust": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+        "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 64},
         "parameters": obj([], {
             "temperature": {"type": "number", "minimum": 0, "maximum": 2},
             "think": {"type": "boolean"},

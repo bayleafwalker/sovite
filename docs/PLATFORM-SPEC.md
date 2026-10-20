@@ -71,7 +71,7 @@ The control API imports a validated `PlatformBundle` into durable revision stora
 
 The resolved job snapshot includes its grant, agent, model, harness, tools, compute and destinations. A canonical generation digest covers the declared bundle. Signed qualifications also bind nonsecret runtime settings, including the actual database target, artifact placement, public origin and security settings. Moving those services invalidates an existing qualification. Credential rotation does not require recording secrets in the evidence.
 
-The implementation uses a shared database-backed job queue and transactional state transitions. Workers claim only their configured compute pool. A lease prevents a late or duplicate worker from publishing a result after ownership has moved.
+The implementation uses a shared database-backed job queue and transactional state transitions. Workers claim only their configured compute pool. A lease prevents a late or duplicate worker from publishing a result after ownership has moved. Jobs are claimed oldest first, but a model's `max_concurrency` caps how many of its jobs run at once; a worker passes over a job whose model is at its limit and takes the next job for another model. With more than one worker, a slow model therefore cannot hold every worker while jobs for a faster model wait. On PostgreSQL, claims serialize on an advisory lock so concurrent workers cannot both see the same free slot.
 
 ### Execution plane
 

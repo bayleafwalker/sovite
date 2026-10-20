@@ -503,3 +503,25 @@ def test_empty_model_answer_fails_and_thinking_control_is_top_level(setup):
     assert row.status == "failed" and row.error_code == "model_empty_result"
     assert row.public_projection is None and row.artifact_key is None
     assert platform.public_status(row.receipt, row.caller)["status"] == "unavailable"
+
+
+def test_model_concurrency_limit_lets_other_models_overtake(tmp_path):
+    bundle, _ = policy.load_bundle(ROOT / "config/platform.local.yaml")
+    slow = next(m for m in bundle["models"] if m["id"] == "assessment-model")
+    slow["max_concurrency"] = 1
+    bundle["models"].append({**copy.deepcopy(slow), "id": "fast-model", "max_concurrency": 2})
+    next(a for a in bundle["agents"] if a["id"] == "change-review")["model"] = "fast-model"
+    config_path = tmp_path / "bundle.yaml"
+    config_path.write_text(yaml.safe_dump(bundle))
+    settings = Settings(database_url=f"sqlite:///{tmp_path}/control.db", bundle_path=str(config_path), artifact_path=str(tmp_path / "artifacts"), operator_token=OPERATOR, caller_tokens={"cloud-codex": CALLER, "operations": OTHER}, public_origin="http://testserver", secure_cookies=False, require_qualification=False, qualification_private_key=str(tmp_path / "private.pem"), qualification_public_keys=[str(tmp_path / "public.pem")])
+    platform = Platform(settings)
+    platform.initialize()
+    first = platform.submit("incident-forensics", "task", "cloud-codex", "a")
+    second = platform.submit("incident-forensics", "task", "cloud-codex", "b")
+    other = platform.submit("change-assessment", "task", "operations", "c")
+    a, b, c = Worker(platform), Worker(platform), Worker(platform)
+    assert a.claim().id == first.id
+    assert b.claim().id == other.id  # The queued slow-model job waits; it does not block the fast lane.
+    assert c.claim() is None
+    a.finish(first.id, error=RuntimeFailure("upstream_unavailable"))
+    assert c.claim().id == second.id
