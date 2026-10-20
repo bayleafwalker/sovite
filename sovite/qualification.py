@@ -28,6 +28,8 @@ def runtime_settings_fingerprint(settings: Settings) -> str:
         "public_origin": settings.public_origin, "secure_cookies": settings.secure_cookies,
         "require_qualification": settings.require_qualification, "deployment_binding": settings.deployment_binding,
     }
+    if settings.database_schema is not None:
+        binding["database"]["schema"] = settings.database_schema
     return "sha256:" + digest(binding)
 
 

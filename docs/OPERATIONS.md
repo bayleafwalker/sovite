@@ -131,7 +131,65 @@ Backups contain private data and belong in approved encrypted backup storage. Th
 
 For Kubernetes, use the database/object-store recovery systems and CSI snapshots selected by the site. Quiesce the control/worker/native deployments for a coordinated snapshot, include native state and configuration revisions, and run `sovite recovery-lock --reason ...` before allowing a restored installation to dispatch. The Compose archive script is not represented as a general cross-provider Kubernetes backup controller.
 
-Database schema versions move forward on startup. 0.1.10 upgrades schema version 1 to 2, adding `binding_runtime_state` for model-binding inhibits; 0.1.9 and earlier ignore that table, so rolling an upgraded database back to 0.1.9 is safe. A release refuses to start on a schema version it does not know. A backup restored into an older release must not be newer than that release's schema.
+Database schema versions move forward through ordered migrations. Schema version 2 adds `binding_runtime_state` for model-binding inhibits; 0.1.9 and earlier ignore that table, so rolling an upgraded database back to 0.1.9 is safe. A release refuses to start on a schema version it does not know. A backup restored into an older release must not be newer than that release's schema.
+
+## Database migrations and hosted startup
+
+Stage the database explicitly before starting a hosted instance. Set `SOVITE_DATABASE_URL` to the migration role's connection URL and, for PostgreSQL isolation, set `SOVITE_DATABASE_SCHEMA` to its pre-provisioned schema. Run:
+
+```sh
+sovite db migrate
+sovite db check
+```
+
+These commands use only database settings; they need no operator token, bundle, artifact credentials or signing keys and do not activate a generation. `migrate` creates a fresh schema's tables at version 1 and applies the version 2 binding-state step, recording each version in `platform_metadata`. Existing version 1 data and audit history survive the upgrade; version 2 migration is an idempotent compatibility check. SQLite DDL and version writes share an explicit transaction; PostgreSQL uses transactional DDL. Run one migration process at a time with runtime processes stopped, after a verified backup. There is no automatic downgrade.
+
+Switch the runtime URL to the runtime role, keep the same schema, and set `SOVITE_DATABASE_MIGRATE=never`. Run `sovite db check` as that role, then start the API and workers. `Platform.initialize()` checks compatibility before bundle activation or work; it issues no DDL in this mode. Existing first-bundle activation and operational DML still occur after a successful check. The separate native harness receives no platform database credentials and owns an independent local SQLite execution ledger; these settings govern the platform database only.
+
+`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":2}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
+
+| Code | Meaning |
+| --- | --- |
+| `database_schema_missing` | No Sovite schema has been migrated, or the configured PostgreSQL namespace is absent. |
+| `database_schema_older` | A supported older version needs `db migrate`. |
+| `database_schema_newer` | The stored version is newer than this release supports. Use a compatible release. |
+| `database_schema_unknown` | The version marker is malformed or unsupported. |
+| `database_schema_incomplete` | Required tables, columns, types, nullability, primary/unique keys, indexes or version/audit-head metadata are missing or incompatible. Restore a supported schema and investigate. |
+
+Migration also refuses unknown/newer versions and incomplete existing schemas before issuing DDL. It does not infer a version from partial tables or recreate missing audit metadata. `db check` does not create a missing SQLite database file or change its journal mode. Compatibility checks validate storage structure and required metadata; use `sovite audit verify` separately to verify audit history.
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `SOVITE_DATABASE_URL` | `sqlite:///.state/control.db` | Migration or runtime connection URL, selected for the command/process. |
+| `SOVITE_DATABASE_SCHEMA` | Unset (empty environment value also means unset) | PostgreSQL schema for every Sovite table; unset preserves the connection's existing default schema behavior. SQLite rejects an explicitly configured schema. |
+| `SOVITE_DATABASE_MIGRATE` | `startup` | `startup` runs migrations during initialization for existing deployments; `never` performs compatibility checking only. Explicit `db migrate` still migrates when this is `never`. Other values are rejected. |
+
+Helm values `database.schema: ""` and `database.migrate: startup` map to the schema/migration settings on control and worker pods. Compose accepts the same environment variables with those defaults. For hosted operation set `database.schema` and `database.migrate: never`, and deliver only runtime credentials to workloads. Run migration with a separately supplied migration URL before reconciling workloads. This lifecycle does not provision roles or add a chart migration Job.
+
+Configured schema names must match `[a-z][a-z0-9_]{0,62}`; `public`, `information_schema` and `pg_*` names are refused. Provision the schema before migration. SQLAlchemy's `schema_translate_map` qualifies every ORM and migration table reference with that schema, and inspection specifies it explicitly. This avoids `search_path` fallback to `public` or another schema when the configured namespace/table is absent. Database grants enforce access boundaries independently; schema qualification alone cannot constrain a role with broad grants. The explicit schema also participates in the runtime qualification fingerprint; changing it invalidates existing evidence. Unset schemas retain the existing fingerprint.
+
+Provision dedicated roles inside the workspace database. The migration role owns only the Sovite schema and tables; the runtime role has `CONNECT`, schema `USAGE`, and table `SELECT`, `INSERT`, `UPDATE`, `DELETE`, with no ownership, schema `CREATE`, database `CREATE`, role inheritance or membership in the migration role. Neither role may access work/audit schemas. For example, as the database administrator (substitute database/schema/role names):
+
+```sql
+CREATE ROLE sovite_migration LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+CREATE ROLE sovite_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+GRANT CONNECT ON DATABASE workspace_database TO sovite_migration, sovite_runtime;
+CREATE SCHEMA workspace_sovite AUTHORIZATION sovite_migration;
+REVOKE ALL ON SCHEMA workspace_sovite FROM PUBLIC;
+GRANT USAGE ON SCHEMA workspace_sovite TO sovite_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE sovite_migration IN SCHEMA workspace_sovite
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO sovite_runtime;
+```
+
+After migration, apply the equivalent grant to any previously created tables:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA workspace_sovite TO sovite_runtime;
+```
+
+No sequence grants are currently needed: Sovite assigns audit sequence numbers itself. Remove inherited `PUBLIC` access to other workspace schemas and any `PUBLIC` schema/database `CREATE` grants through the workspace database's provisioning policy. A direct role revoke cannot cancel a grant inherited from `PUBLIC` or another role. Verify effective privileges, denied table creation and denied reads of other schemas before enabling dispatch. Supply authentication through the deployment's secret system; do not reuse an owner/superuser URL at runtime.
+
+PostgreSQL migration/isolation tests use `SOVITE_TEST_POSTGRES_URL` pointing to a disposable superuser-accessible database. They create uniquely named schemas and non-login migration/runtime roles, use `SET ROLE` for each role's connections, and drop the fixtures afterward. SQLite tests run without that variable; PostgreSQL tests skip explicitly when it is unset.
 
 ## Failure handling and removal
 

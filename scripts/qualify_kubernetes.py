@@ -34,6 +34,7 @@ def main():
     credentials = json.loads(args.runtime_env.read_text())
     bundle, generation = load_bundle(args.bundle)
     settings = Settings(database_url=credentials['SOVITE_DATABASE_URL'],
+        database_schema=values['database']['schema'] or None, database_migrate=values['database']['migrate'],
         artifact_backend='s3', s3_endpoint=values['artifacts']['endpoint'] or f"http://{values['fullnameOverride']}-garage:3900",
         s3_bucket=values['artifacts']['bucket'], s3_region=values['artifacts']['region'],
         public_origin=values['publicOrigin'], secure_cookies=values['secureCookies'],
@@ -46,7 +47,8 @@ def main():
     if remote != runtime_settings_fingerprint(settings):
         raise ValueError('Live runtime differs from the reviewed settings; refusing to sign')
     url = make_url(settings.database_url).set(host='127.0.0.1', port=args.database_port)
-    db = Database(url.render_as_string(hide_password=False))
+    db = Database(url.render_as_string(hide_password=False), schema=settings.database_schema)
+    db.check()
     with db.sessions() as session:
         active = session.get(MetadataRow, 'active_generation')
         if not active or active.value['generation'] != generation:

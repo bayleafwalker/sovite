@@ -60,6 +60,24 @@ def test_worker_job_timeout_is_explicit_and_configurable(tmp_path):
     assert worker_env({'worker': {'jobTimeoutSeconds': 900}})['SOVITE_JOB_TIMEOUT_SECONDS'] == '900'
 
 
+def test_database_lifecycle_settings_reach_control_and_worker(tmp_path):
+    for values, schema, migrate in (({}, '', 'startup'), ({'database': {'schema': 'workspace_sovite', 'migrate': 'never'}}, 'workspace_sovite', 'never')):
+        result = render(tmp_path, {**values, 'nativeHarness': {'enabled': True}})
+        assert result.returncode == 0, result.stderr
+        rows = [row for row in yaml.safe_load_all(result.stdout) if row]
+        for name in ('sovite-control', 'sovite-worker', 'sovite-native-harness'):
+            pod = next(row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == name)['spec']['template']['spec']
+            env = {entry['name']: entry.get('value') for entry in pod['containers'][0]['env']}
+            if name == 'sovite-native-harness':
+                assert not any(key.startswith('SOVITE_DATABASE_') for key in env)
+            else:
+                assert env['SOVITE_DATABASE_SCHEMA'] == schema
+                assert env['SOVITE_DATABASE_MIGRATE'] == migrate
+    for database in ({'migrate': 'sometimes'}, {'schema': 'has.dot'}, {'schema': 'UPPER'}, {'schema': 'a' * 64},
+                     {'schema': 'public'}, {'schema': 'pg_temp'}, {'schema': 'information_schema'}):
+        assert render(tmp_path, {'database': database}).returncode != 0
+
+
 def test_external_model_hosts_need_exact_cidrs_and_provisioned_credentials(tmp_path):
     peer = {'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}
     values = {'networkPolicy': {'modelPeers': [peer]}, 'modelCredentials': [{'env': 'MODEL_HOST_TOKEN'}], 'nativeHarness': {'enabled': True}}

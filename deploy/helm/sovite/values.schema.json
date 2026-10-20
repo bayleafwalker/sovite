@@ -325,6 +325,27 @@
     "deploymentBinding": {
       "type": "string",
       "pattern": "^(sha256:[a-f0-9]{64})?$"
+    },
+    "database": {
+      "type": "object",
+      "required": [
+        "schema",
+        "migrate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "type": "string",
+          "pattern": "^$|^[a-z][a-z0-9_]{0,62}$",
+          "maxLength": 63
+        },
+        "migrate": {
+          "enum": [
+            "startup",
+            "never"
+          ]
+        }
+      }
     }
   },
   "definitions": {

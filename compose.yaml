@@ -3,6 +3,8 @@ name: sovite
 x-runtime-env: &runtime-env
   SOVITE_DISPLAY_NAME: ${SOVITE_DISPLAY_NAME:-Sovite Platform}
   SOVITE_DATABASE_URL: postgresql+psycopg://sovite:${POSTGRES_PASSWORD:?Run scripts/installation.py compose-init}@postgres:5432/sovite
+  SOVITE_DATABASE_SCHEMA: ${SOVITE_DATABASE_SCHEMA:-}
+  SOVITE_DATABASE_MIGRATE: ${SOVITE_DATABASE_MIGRATE:-startup}
   SOVITE_BUNDLE_PATH: /config/bundle.yaml
   SOVITE_ARTIFACT_BACKEND: s3
   SOVITE_S3_ENDPOINT: http://garage:3900
@@ -22,7 +24,7 @@ x-runtime-env: &runtime-env
   SOVITE_HARNESS_TOKEN: ${SOVITE_HARNESS_TOKEN:-}
 
 x-runtime: &runtime
-  image: ${SOVITE_IMAGE:-sovite-platform:0.1.11}
+  image: ${SOVITE_IMAGE:-sovite-platform:0.1.12}
   build:
     context: .
     target: runtime

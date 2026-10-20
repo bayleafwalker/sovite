@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def validate_database_schema(schema: str | None):
+    if schema is not None and (not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema) or schema == "public" or schema == "information_schema" or schema.startswith("pg_")):
+        raise ValueError("SOVITE_DATABASE_SCHEMA must be a non-public, non-system lower-case PostgreSQL identifier (1-63 characters)")
 
 
 @dataclass
 class Settings:
     database_url: str = "sqlite:///.state/control.db"
+    database_schema: str | None = None
+    database_migrate: str = "startup"
     bundle_path: str = "config/platform.local.yaml"
     artifact_path: str = ".state/artifacts"
     artifact_backend: str = "filesystem"
@@ -33,6 +41,17 @@ class Settings:
     compute_id: str = "local"
     deployment_binding: str = ""
 
+    def __post_init__(self):
+        validate_database_schema(self.database_schema)
+        if self.database_migrate not in {"startup", "never"}:
+            raise ValueError("SOVITE_DATABASE_MIGRATE must be startup or never")
+
+    @classmethod
+    def from_database_env(cls) -> "Settings":
+        return cls(database_url=os.environ.get("SOVITE_DATABASE_URL", cls.database_url),
+                   database_schema=os.environ.get("SOVITE_DATABASE_SCHEMA") or None,
+                   database_migrate=os.environ.get("SOVITE_DATABASE_MIGRATE", "startup"))
+
     @classmethod
     def from_env(cls) -> "Settings":
         env = os.environ
@@ -41,9 +60,11 @@ class Settings:
         caller_tokens = json.loads(env.get("SOVITE_CALLER_TOKENS", "{}"))
         if not isinstance(caller_tokens, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in caller_tokens.items()):
             raise ValueError("SOVITE_CALLER_TOKENS must be a JSON object mapping caller identities to tokens")
-        defaults = cls()
+        defaults = cls.from_database_env()
         result = cls(
-            database_url=env.get("SOVITE_DATABASE_URL", defaults.database_url),
+            database_url=defaults.database_url,
+            database_schema=defaults.database_schema,
+            database_migrate=defaults.database_migrate,
             bundle_path=env.get("SOVITE_BUNDLE_PATH", defaults.bundle_path),
             artifact_path=env.get("SOVITE_ARTIFACT_PATH", defaults.artifact_path),
             artifact_backend=env.get("SOVITE_ARTIFACT_BACKEND", defaults.artifact_backend),

@@ -497,6 +497,9 @@ def test_qualification_runtime_binding_detects_placement_changes_but_not_secret_
     assert runtime_settings_fingerprint(postgres) == runtime_settings_fingerprint(rotated)
     changed_host = replace(postgres, database_url="postgresql+psycopg://worker:password-a@other:5432/control")
     assert runtime_settings_fingerprint(postgres) != runtime_settings_fingerprint(changed_host)
+    isolated = replace(postgres, database_schema="workspace_sovite")
+    assert runtime_settings_fingerprint(postgres) != runtime_settings_fingerprint(isolated)
+    assert runtime_settings_fingerprint(isolated) != runtime_settings_fingerprint(replace(isolated, database_schema="other_sovite"))
 
 
 def test_worker_health_requires_this_compute_pool_and_host(setup):

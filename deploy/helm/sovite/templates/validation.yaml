@@ -1,3 +1,6 @@
+{{- if or (eq .Values.database.schema "public") (eq .Values.database.schema "information_schema") (hasPrefix "pg_" .Values.database.schema) -}}
+{{- fail "database.schema must be a non-public, non-system PostgreSQL schema" -}}
+{{- end -}}
 {{- if eq .Values.mode "enforced" -}}
 {{- if not (regexMatch "^sha256:[a-f0-9]{64}$" .Values.deploymentBinding) -}}
 {{- fail "enforced mode requires a reviewed deploymentBinding; use install_kubernetes.py to compute it" -}}

@@ -16,6 +16,10 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 - name: SOVITE_DATABASE_URL
   valueFrom:
     secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_DATABASE_URL}
+- name: SOVITE_DATABASE_SCHEMA
+  value: {{ .Values.database.schema | quote }}
+- name: SOVITE_DATABASE_MIGRATE
+  value: {{ .Values.database.migrate | quote }}
 - name: SOVITE_OPERATOR_TOKEN
   valueFrom:
     secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_OPERATOR_TOKEN}

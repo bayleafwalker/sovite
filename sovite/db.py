@@ -6,8 +6,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, create_engine, event, select
+from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstraint, create_engine, event, inspect, select
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+from .settings import validate_database_schema
 
 
 class Base(DeclarativeBase):
@@ -112,6 +115,18 @@ class WorkerHeartbeat(Base):
     job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+MIGRATIONS = (
+    (1, tuple(table for table in Base.metadata.sorted_tables if table is not BindingState.__table__)),
+    (2, (BindingState.__table__,)),
+)
+
+
+class DatabaseSchemaError(ValueError):
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
 def canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
@@ -121,9 +136,15 @@ def digest(value: Any) -> str:
 
 
 class Database:
-    def __init__(self, url: str):
-        if url.startswith("sqlite:///") and ":memory:" not in url:
-            Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
+    schema_version = MIGRATIONS[-1][0]
+
+    def __init__(self, url: str, schema: str | None = None):
+        validate_database_schema(schema)
+        parsed = make_url(url)
+        if schema is not None and parsed.get_backend_name() != "postgresql":
+            raise ValueError("SOVITE_DATABASE_SCHEMA is supported only on PostgreSQL")
+        self.schema = schema
+        self.path = Path(parsed.database) if parsed.get_backend_name() == "sqlite" and parsed.database not in {None, "", ":memory:"} else None
         kwargs: dict[str, Any] = {"pool_pre_ping": True}
         if url.startswith("sqlite"):
             kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
@@ -131,29 +152,106 @@ class Database:
                 from sqlalchemy.pool import StaticPool
                 kwargs["poolclass"] = StaticPool
         self.engine = create_engine(url, **kwargs)
+        if schema is not None:
+            self.engine = self.engine.execution_options(schema_translate_map={None: schema})
         if self.engine.dialect.name == "sqlite":
             @event.listens_for(self.engine, "connect")
             def setup_sqlite(dbapi_connection, connection_record):
                 dbapi_connection.execute("PRAGMA foreign_keys=ON")
                 dbapi_connection.execute("PRAGMA busy_timeout=30000")
-                dbapi_connection.execute("PRAGMA journal_mode=WAL")
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
-    def initialize(self):
-        with self.sessions.begin() as session:
-            MetadataRow.__table__.create(session.connection(), checkfirst=True)
-            version = session.get(MetadataRow, "schema_version")
-            if version is not None and version.value not in ({"version": 1}, {"version": 2}):
-                raise ValueError("Unsupported database schema_version; expected version 1 or 2")
-            # Version 2 adds binding_runtime_state: binding inhibits are operational state,
-            # independent of the bundle's enabled flag, and survive bundle revisions.
-            Base.metadata.create_all(session.connection())
-            if version is None:
-                session.add(MetadataRow(key="schema_version", value={"version": 2}))
-            else:
-                version.value = {"version": 2}
-            if session.get(MetadataRow, "audit_head") is None:
-                session.add(MetadataRow(key="audit_head", value={"sequence": 0, "hash": "0" * 64}))
+    def initialize(self, migrate: str = "startup"):
+        if migrate == "startup":
+            self.migrate()
+        elif migrate == "never":
+            self.check()
+        else:
+            raise ValueError("SOVITE_DATABASE_MIGRATE must be startup or never")
+
+    def _structure(self, connection, tables):
+        inspector = inspect(connection)
+        names = set(inspector.get_table_names(schema=self.schema))
+        for table in tables:
+            if table.name not in names:
+                raise DatabaseSchemaError("database_schema_incomplete", f"Missing table {table.name}; restore or migrate a supported schema")
+            columns = {column["name"]: column for column in inspector.get_columns(table.name, schema=self.schema)}
+            for column in table.columns:
+                actual = columns.get(column.name)
+                if actual is None or actual["type"]._type_affinity is not column.type._type_affinity or actual["nullable"] != column.nullable or getattr(actual["type"], "length", None) != getattr(column.type, "length", None):
+                    raise DatabaseSchemaError("database_schema_incomplete", f"Incompatible column {table.name}.{column.name}")
+            primary = inspector.get_pk_constraint(table.name, schema=self.schema)["constrained_columns"]
+            if primary != [column.name for column in table.primary_key]:
+                raise DatabaseSchemaError("database_schema_incomplete", f"Incompatible primary key on {table.name}")
+            indexes = inspector.get_indexes(table.name, schema=self.schema)
+            for index in table.indexes:
+                if not any(row["column_names"] == [column.name for column in index.columns] and bool(row["unique"]) == bool(index.unique) for row in indexes):
+                    raise DatabaseSchemaError("database_schema_incomplete", f"Missing index on {table.name}")
+            unique = inspector.get_unique_constraints(table.name, schema=self.schema)
+            for constraint in table.constraints:
+                if isinstance(constraint, UniqueConstraint) and not any(row["column_names"] == [column.name for column in constraint.columns] for row in unique):
+                    raise DatabaseSchemaError("database_schema_incomplete", f"Missing unique constraint on {table.name}")
+
+    def _version(self, connection) -> int:
+        names = set(inspect(connection).get_table_names(schema=self.schema))
+        if MetadataRow.__tablename__ not in names:
+            if names.intersection(Base.metadata.tables):
+                raise DatabaseSchemaError("database_schema_incomplete", "Sovite tables exist without platform_metadata")
+            return 0
+        self._structure(connection, [MetadataRow.__table__])
+        value = connection.execute(select(MetadataRow.value).where(MetadataRow.key == "schema_version")).scalar_one_or_none()
+        if value is None:
+            raise DatabaseSchemaError("database_schema_incomplete", "Missing schema_version metadata")
+        if not isinstance(value, dict) or set(value) != {"version"} or type(value["version"]) is not int or value["version"] < 1:
+            raise DatabaseSchemaError("database_schema_unknown", "Unsupported database schema_version")
+        if value["version"] > self.schema_version:
+            raise DatabaseSchemaError("database_schema_newer", "Unsupported database schema_version; use a compatible release")
+        return value["version"]
+
+    def _audit_head(self, connection):
+        value = connection.execute(select(MetadataRow.value).where(MetadataRow.key == "audit_head")).scalar_one_or_none()
+        if not isinstance(value, dict) or type(value.get("sequence")) is not int or value["sequence"] < 0 or not isinstance(value.get("hash"), str) or len(value["hash"]) != 64 or any(char not in "0123456789abcdef" for char in value["hash"]):
+            raise DatabaseSchemaError("database_schema_incomplete", "Missing or invalid audit_head metadata")
+
+    def check(self):
+        if self.path is not None and not self.path.is_file():
+            raise DatabaseSchemaError("database_schema_missing", "Run sovite db migrate before startup")
+        with self.engine.connect() as connection:
+            version = self._version(connection)
+            if version == 0:
+                raise DatabaseSchemaError("database_schema_missing", "Run sovite db migrate before startup")
+            if version < self.schema_version:
+                raise DatabaseSchemaError("database_schema_older", "Run sovite db migrate with the migration role before startup")
+            self._structure(connection, Base.metadata.sorted_tables)
+            self._audit_head(connection)
+
+    def migrate(self):
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.engine.begin() as connection:
+            if self.schema is not None and not inspect(connection).has_schema(self.schema):
+                raise DatabaseSchemaError("database_schema_missing", "Provision the configured PostgreSQL schema before migration")
+            version = self._version(connection)
+            if version:
+                self._structure(connection, [table for number, tables in MIGRATIONS if number <= version for table in tables])
+                self._audit_head(connection)
+            if connection.dialect.name == "sqlite" and version < self.schema_version:
+                connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            for number, tables in MIGRATIONS:
+                if number <= version:
+                    continue
+                for table in tables:
+                    table.create(connection, checkfirst=True)
+                if number == 1:
+                    connection.execute(MetadataRow.__table__.insert(), [
+                        {"key": "schema_version", "value": {"version": number}},
+                        {"key": "audit_head", "value": {"sequence": 0, "hash": "0" * 64}},
+                    ])
+                else:
+                    connection.execute(MetadataRow.__table__.update().where(MetadataRow.key == "schema_version").values(value={"version": number}))
+            self._structure(connection, Base.metadata.sorted_tables)
+            self._audit_head(connection)
 
     def audit(self, session: Session, actor: str, action: str, target: str, detail: dict | None = None) -> AuditEvent:
         # Lock acquisition also serializes audit appenders using SQLite's write lock.

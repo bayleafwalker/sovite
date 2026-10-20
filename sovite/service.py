@@ -28,11 +28,11 @@ class PlatformError(Exception):
 class Platform:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.db = Database(settings.database_url)
+        self.db = Database(settings.database_url, schema=settings.database_schema)
         self.store = ArtifactStore(settings)
 
     def initialize(self):
-        self.db.initialize()
+        self.db.initialize(self.settings.database_migrate)
         with self.db.sessions() as session:
             active = session.get(MetadataRow, "active_generation")
         # API replicas do not silently revert a revision loaded through the CLI.

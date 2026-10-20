@@ -14,7 +14,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from . import policy
-from .db import Job, WorkerHeartbeat
+from .db import Database, DatabaseSchemaError, Job, WorkerHeartbeat
 from .qualification import initialize_keys, issue_qualification, runtime_settings_fingerprint
 from .service import Platform
 from .settings import Settings
@@ -35,7 +35,7 @@ async def assessment(settings: Settings, output: str) -> dict:
     grant = enabled[0]
     checks = []
     with tempfile.TemporaryDirectory(prefix="sovite-assessment-") as work:
-        ephemeral = replace(settings, database_url=f"sqlite:///{work}/control.db", artifact_backend="filesystem", artifact_path=f"{work}/artifacts", require_qualification=False, compute_id=grant["compute"])
+        ephemeral = replace(settings, database_url=f"sqlite:///{work}/control.db", database_schema=None, database_migrate="startup", artifact_backend="filesystem", artifact_path=f"{work}/artifacts", require_qualification=False, compute_id=grant["compute"])
         platform = Platform(ephemeral)
         platform.initialize()
         checks.append({"name": "bundle-validation", "status": "passed", "detail": "Current bundle parses, resolves and passes declared policy constraints."})
@@ -77,6 +77,8 @@ async def assessment(settings: Settings, output: str) -> dict:
 def main():
     parser = argparse.ArgumentParser(prog="sovite", description="Operate the provisioned agent platform")
     commands = parser.add_subparsers(dest="command", required=True)
+    database = commands.add_parser("db", help="Explicit database lifecycle; no bundle activation")
+    database.add_argument("action", choices=["migrate", "check"])
     commands.add_parser("init", help="Initialize schema and import the first configuration revision")
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
@@ -102,6 +104,15 @@ def main():
     recovery.add_argument("--reason", required=True)
     args = parser.parse_args()
     try:
+        if args.command == "db":
+            settings = Settings.from_database_env()
+            db = Database(settings.database_url, schema=settings.database_schema)
+            try:
+                getattr(db, args.action)()
+                emit({"status": "compatible", "schema_version": db.schema_version})
+            finally:
+                db.engine.dispose()
+            return
         if args.command == "validate":
             bundle, generation = policy.load_bundle(args.path or "config/platform.local.yaml")
             emit({"valid": True, "generation": generation, "mode": bundle["mode"], "grants": len(bundle["grants"]), "scope": "Declared configuration constraints only"})
@@ -164,7 +175,9 @@ def main():
     except Exception as exc:
         # Administrative diagnostics contain configuration validation details only.
         # Do not print upstream exception bodies or credentials.
-        if isinstance(exc, (ValueError, policy.PolicyError)):
+        if isinstance(exc, DatabaseSchemaError):
+            print(json.dumps({"code": exc.code, "message": str(exc)}), file=sys.stderr)
+        elif isinstance(exc, (ValueError, policy.PolicyError)):
             print(str(exc), file=sys.stderr)
         else:
             print(f"Operation failed ({type(exc).__name__}); inspect private operational state.", file=sys.stderr)
