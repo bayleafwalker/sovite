@@ -346,3 +346,92 @@ and records `model_cancel_unconfirmed`. Restart fences previous gateway sessions
 interrupts outstanding ledgers and inhibits bindings with uncertain generation;
 it never resumes or replays inference (`NO_TRANSPARENT_REPLAY`). Single active
 gateway operation is intentional; no HA ownership protocol is provided.
+
+## Hosted policy envelope and qualification
+
+Hosted mode is selected only by `SOVITE_HOSTING_ENVELOPE`, a host-controlled JSON
+file implementing `sovite.hosting/v1`. Sovite defines its strict schema in
+[`config/hosting.schema.json`](../config/hosting.schema.json) and its semantics in
+[`sovite/hosting.py`](../sovite/hosting.py). The file is limited to 256 KiB;
+duplicate keys, nonfinite numbers, unknown fields and unapproved service hosts
+are refused. It is configuration authority, outside tenant bundle authorship;
+protect both its delivery and the public-key trust configuration from tenant writes.
+
+| Envelope field | Contract |
+|---|---|
+| `workspace`, `installation_id`, `revision` | Opaque workspace and installation identities; positive integer policy revision |
+| `placement.namespace` | Host-selected Kubernetes namespace; bundle compute must match exactly |
+| `placement.resources` | Total `max_replicas`, `max_cpu_millis`, `max_memory_bytes`; CPU/memory count every replica across every declared pool |
+| `allowed_data_classes` | C0 plus explicitly approved C1; C2/C3 cannot be hosted content |
+| `destinations` | Exact baseline destination declarations: private services with explicit hosts in the approved namespace and complete retention settings (logging, persistent context and cache bounds/cleanup) |
+| `connector_kinds` | Only `model-gateway`; models contain no direct endpoint or upstream credential |
+| `connector_image_digests` | Approved helper/engine package digests; tenant declarations cannot introduce arbitrary images |
+| `harnesses` | Exact approved non-demo digest-pinned harness declarations; no image, executable or secret reference; any HTTP endpoint must be an approved internal service |
+
+Hosted compilation requires an enforced v1alpha2 bundle. C0..C3 definitions may
+remain as the classification vocabulary, with canonical ranks 0..3; every grant
+class and destination clearance must be within the envelope. Disabled and unused
+declarations are checked too. All tools are refused. Compute profiles declare only
+replicas, CPU and memory; node selectors, worker images and extra placement controls
+are refused. Labels remain declarations, not content classification: local-only
+content must never be submitted through this profile.
+
+A hosted generation hashes the bundle and the canonical envelope digest, revision,
+workspace and installation identity. The runtime fingerprint also adds those
+hosting fields alongside its existing database/schema, artifact, origin and
+deployment binding. Placement or revision changes invalidate qualification even
+if the bundle is unchanged. With no envelope, bundle generations and runtime
+fingerprints retain their existing representation and operator qualifications.
+No new database tables or migrations are needed: drafts reuse `bundle_revisions`
+and signatures reuse `qualifications`.
+
+Bundle authoring and activation are distinct authenticated roles. An `author`
+submits/compiles drafts through `POST /api/bundles`; an `activator` selects a
+compiled generation through `POST /api/bundles/{generation}/activate`.
+Compilation stores a revision without changing active authority. Activation
+recompiles against the current envelope and preserves the existing supersession
+and inhibit rules. First hosted startup does not activate the file automatically.
+The operator retains operational duties, but cannot author or activate hosted
+policy. Hosted `reload` is refused; the CLI uses `compile` then `activate GENERATION`.
+Without an envelope the operator can perform both operations through Git/CLI as
+before; bundle mutation HTTP routes are registered only in hosted mode.
+These roles use the existing bearer/session mechanism and exact-origin cookie
+checks; they do not introduce caller delegation.
+
+Hosted qualification uses signed `sovite.qualification/v2` payloads declaring
+`role`, `workspace` and `hosting` (digest, revision, workspace, installation).
+Trusted Ed25519 issuer entries specify one role, an expiry and, for tenant keys,
+one workspace. A public key cannot serve multiple configured roles. Legacy
+unscoped public keys never satisfy hosted qualification. Both signatures must
+cover the same generation, effective profile, runtime fingerprint and current
+hosting binding, with complete passing deployment evidence:
+
+| Signing role | Required check names and interpretation |
+|---|---|
+| Platform | `runtime-identity` (hosting workload/placement identity), `network-isolation` (actual allowed/denied traffic), `recovery` (hosting lifecycle/restore) |
+| Tenant | `binding-identity` (helper, model and execution-host identity), `retention` (host/provider and task-body retention), `artifact-placement` (workspace storage custody), `receipt-boundary`, `task-competence`, `recovery` (tenant-side recovery) |
+
+The existing `runtime-identity` category is split by responsibility: the platform
+retains its name for hosting identity and the tenant uses `binding-identity` for
+its bindings. Receipt, recovery and competence retain their existing check names;
+retention and artifact placement are explicit additional tenant categories.
+Every required check must occur exactly once and pass; failed, not-run, duplicate
+or incomplete evidence cannot qualify. Extra checks must pass too. Signatures
+are assertions about collected evidence, not evidence collectors or attestation.
+
+`verify_qualification` validates an individual role record; `current_qualification`
+and `is_qualified` require the pair in hosted mode. The reported effective expiry
+is the earlier expiry of the latest valid record for each role. Key expiry,
+not-before bounds, removal and digest revocation are checked on each verification.
+Admission, worker claim/renewal and result release continue to pass through
+`Platform.authorize`; receipt access and grant resume also require current
+qualification. A signature of one role cannot substitute for the other, regardless
+of its included check names.
+
+Signed JSON records can be exported and imported without private keys on the
+runtime. Import checks document bounds, public key id, signature, role/workspace,
+validity, evidence, compiled generation/profile and current runtime binding before
+storage; duplicate record ids are refused. Reuse of measurements requires a newly
+signed valid record. Gateway execution, caller assertions, external worker and BYO
+artifact protocols, and hosted deployment rendering remain separate work; this
+contract alone does not make hosted dispatch operational.

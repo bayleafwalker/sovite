@@ -34,7 +34,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
         },
         "display_name": {
           "type": "string",
@@ -59,7 +59,7 @@
     },
     "default_profile": {
       "type": "string",
-      "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+      "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
     },
     "data_classes": {
       "type": "array",
@@ -72,7 +72,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -104,7 +104,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -116,7 +116,7 @@
           },
           "clearance": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "kind": {
             "enum": [
@@ -152,7 +152,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -181,11 +181,11 @@
           },
           "digest": {
             "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
+            "pattern": "^sha256:[0-9a-f]{64}$(?!\\n)"
           },
           "destination": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "wire_api": {
             "enum": [
@@ -279,7 +279,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -303,7 +303,7 @@
           },
           "digest": {
             "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$"
+            "pattern": "^sha256:[0-9a-f]{64}$(?!\\n)"
           },
           "version": {
             "type": "string",
@@ -313,7 +313,7 @@
             "type": "array",
             "items": {
               "type": "string",
-              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
             },
             "uniqueItems": true,
             "maxItems": 100
@@ -358,7 +358,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -380,21 +380,21 @@
           },
           "input_class": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "output_class": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "destination": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "allowed_operations": {
             "type": "array",
             "items": {
               "type": "string",
-              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
             },
             "uniqueItems": true,
             "maxItems": 100
@@ -410,7 +410,7 @@
           },
           "namespace": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "read_only": {
             "type": "boolean"
@@ -433,7 +433,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -445,17 +445,17 @@
           },
           "harness": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "model": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "tools": {
             "type": "array",
             "items": {
               "type": "string",
-              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
             },
             "uniqueItems": true,
             "maxItems": 100
@@ -490,7 +490,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -508,11 +508,11 @@
           },
           "destination": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "namespace": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "profile": {
             "type": "object",
@@ -573,7 +573,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -585,48 +585,48 @@
           },
           "agent": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "callers": {
             "type": "array",
             "items": {
               "type": "string",
-              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
             },
             "uniqueItems": true,
             "maxItems": 100
           },
           "input_class": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "output_class": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "compute": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "state_destination": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "telemetry_destination": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "telemetry_class": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "receipt_class": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "caller_clearance": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "return_contract": {
             "const": "reference"
@@ -663,7 +663,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "name": {
             "type": "string",
@@ -677,7 +677,7 @@
             "type": "array",
             "items": {
               "type": "string",
-              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
             },
             "uniqueItems": true,
             "maxItems": 100

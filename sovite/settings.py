@@ -27,6 +27,9 @@ class Settings:
     authority_token: str = ""
     execution_workload_identity: str = "worker"
     authority_retention_days: int = 7
+    author_token: str = ""
+    activator_token: str = ""
+    hosting_envelope_path: str | None = None
     caller_tokens: dict[str, str] = field(default_factory=dict)
     public_origin: str = "http://localhost:8080"
     secure_cookies: bool = True
@@ -38,6 +41,8 @@ class Settings:
     require_qualification: bool = True
     qualification_private_key: str = ".state/qualification-private.pem"
     qualification_public_keys: list[str] = field(default_factory=lambda: [".state/qualification-public.pem"])
+    qualification_issuers: list[dict] = field(default_factory=list)
+    qualification_revoked_keys: list[str] = field(default_factory=list)
     display_name: str = "Sovite"
     embedded_worker: bool = False
     max_request_bytes: int = 65536
@@ -47,7 +52,7 @@ class Settings:
     def __post_init__(self):
         if type(self.authority_retention_days) is not int or self.authority_retention_days < 1:
             raise ValueError("authority retention days must be a positive integer")
-        if self.authority_token and (len(self.authority_token) < 24 or self.authority_token in [self.operator_token, *self.caller_tokens.values()]):
+        if self.authority_token and (len(self.authority_token) < 24 or self.authority_token in [self.operator_token, self.author_token, self.activator_token, *self.caller_tokens.values()]):
             raise ValueError("authority credential must be dedicated and contain at least 24 characters")
         validate_database_schema(self.database_schema)
         if self.database_migrate not in {"startup", "never"}:
@@ -60,11 +65,14 @@ class Settings:
                    database_migrate=os.environ.get("SOVITE_DATABASE_MIGRATE", "startup"))
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls, *, require_auth: bool = True, auth_role: str | None = None) -> "Settings":
+        # Servers load all roles. Trusted local CLI processes load only their role.
+        if auth_role not in {None, "operator", "author", "activator"}:
+            raise ValueError("Unknown authentication role")
         env = os.environ
         def truth(key: str, default: bool) -> bool:
             return env.get("SOVITE_" + key, str(default)).lower() in {"1", "true", "yes"}
-        caller_tokens = json.loads(env.get("SOVITE_CALLER_TOKENS", "{}"))
+        caller_tokens = json.loads(env.get("SOVITE_CALLER_TOKENS", "{}")) if auth_role is None else {}
         if not isinstance(caller_tokens, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in caller_tokens.items()):
             raise ValueError("SOVITE_CALLER_TOKENS must be a JSON object mapping caller identities to tokens")
         defaults = cls.from_database_env()
@@ -78,9 +86,12 @@ class Settings:
             s3_endpoint=env.get("SOVITE_S3_ENDPOINT"),
             s3_bucket=env.get("SOVITE_S3_BUCKET", defaults.s3_bucket),
             s3_region=env.get("SOVITE_S3_REGION", defaults.s3_region),
-            operator_token=env.get("SOVITE_OPERATOR_TOKEN", ""),
-            caller_tokens=caller_tokens,
-            authority_token=env.get("SOVITE_AUTHORITY_TOKEN", ""),
+            operator_token=env.get("SOVITE_OPERATOR_TOKEN", "") if auth_role in {None, "operator"} else "",
+            author_token=env.get("SOVITE_AUTHOR_TOKEN", "") if auth_role in {None, "author"} else "",
+            activator_token=env.get("SOVITE_ACTIVATOR_TOKEN", "") if auth_role in {None, "activator"} else "",
+            hosting_envelope_path=env.get("SOVITE_HOSTING_ENVELOPE") or None,
+            caller_tokens=caller_tokens if auth_role is None else {},
+            authority_token=env.get("SOVITE_AUTHORITY_TOKEN", "") if auth_role is None else "",
             execution_workload_identity=env.get("SOVITE_EXECUTION_WORKLOAD_IDENTITY", "worker"),
             authority_retention_days=int(env.get("SOVITE_AUTHORITY_RETENTION_DAYS", "7")),
             public_origin=env.get("SOVITE_PUBLIC_ORIGIN", defaults.public_origin).rstrip("/"),
@@ -93,6 +104,8 @@ class Settings:
             require_qualification=truth("REQUIRE_QUALIFICATION", True),
             qualification_private_key=env.get("SOVITE_QUALIFICATION_PRIVATE_KEY", defaults.qualification_private_key),
             qualification_public_keys=json.loads(env.get("SOVITE_QUALIFICATION_PUBLIC_KEYS", json.dumps(defaults.qualification_public_keys))),
+            qualification_issuers=json.loads(env.get("SOVITE_QUALIFICATION_ISSUERS", "[]")),
+            qualification_revoked_keys=json.loads(env.get("SOVITE_QUALIFICATION_REVOKED_KEYS", "[]")),
             display_name=env.get("SOVITE_DISPLAY_NAME", defaults.display_name),
             embedded_worker=truth("EMBEDDED_WORKER", False),
             max_request_bytes=int(env.get("SOVITE_MAX_REQUEST_BYTES", "65536")),
@@ -101,10 +114,17 @@ class Settings:
         )
         if result.artifact_backend not in {"filesystem", "s3"}:
             raise ValueError("artifact backend must be filesystem or s3")
-        if len(result.operator_token) < 24:
+        if require_auth and auth_role in {None, "operator"} and len(result.operator_token) < 24:
             raise ValueError("SOVITE_OPERATOR_TOKEN must contain at least 24 characters")
-        if any(len(v) < 24 for v in result.caller_tokens.values()):
+        if require_auth and auth_role in {"author", "activator"} and len(getattr(result, auth_role + "_token")) < 24:
+            raise ValueError(f"SOVITE_{auth_role.upper()}_TOKEN must contain at least 24 characters")
+        if require_auth and any(len(v) < 24 for v in result.caller_tokens.values()):
             raise ValueError("caller tokens must contain at least 24 characters")
-        if len(set([result.operator_token, *result.caller_tokens.values()])) != len(result.caller_tokens) + 1:
-            raise ValueError("operator and caller tokens must be distinct")
+        roles = [token for token in (result.operator_token, *result.caller_tokens.values(), result.author_token, result.activator_token) if token]
+        if require_auth and (any(len(token) < 24 for token in roles) or len(set(roles)) != len(roles)):
+            raise ValueError("role tokens must be distinct and contain at least 24 characters")
+        if result.hosting_envelope_path and (not result.require_qualification or (require_auth and auth_role is None and (not result.author_token or not result.activator_token))):
+            raise ValueError("Hosted mode requires qualification and separate author and activator tokens")
+        from .qualification import validate_issuers
+        validate_issuers(result)
         return result

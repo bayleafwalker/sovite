@@ -318,3 +318,136 @@ elapsed become `interrupted` / `model_cancel_unconfirmed` at the next authority
 check and visibly inhibit the binding. Reconnect closes stale helper sessions
 after six seconds without a control heartbeat, or when they belong to an old
 gateway; uncertain requests still require the operator inhibit/resume procedure.
+
+## Hosted mode: policy roles and offline qualification
+
+The hosted policy contract is in [PLATFORM-SPEC](PLATFORM-SPEC.md#hosted-policy-envelope-and-qualification).
+This is a service-only policy/qualification foundation, not a hosted Helm profile.
+Do not copy the standalone chart's direct `modelPeers`, provider egress or
+`modelCredentials` into hosted deployment configuration. Preserve strict default
+deny, including DNS policy, and qualify the service-only network explicitly.
+Required internal paths include DNS and PostgreSQL, as well as approved control,
+gateway and authority services. No public model/provider Internet egress is granted
+by an envelope; helpers initiate connections. Actual network rendering and packet
+qualification belong to the hosted deployment work.
+
+Supply a host-controlled `SOVITE_HOSTING_ENVELOPE` JSON file and separate tokens
+of at least 24 characters in `SOVITE_AUTHOR_TOKEN`, `SOVITE_ACTIVATOR_TOKEN` and
+`SOVITE_OPERATOR_TOKEN`. All role and caller tokens must differ. Keep
+`SOVITE_REQUIRE_QUALIFICATION=true`. The envelope selects the workspace,
+installation, revision, namespace, total resource ceilings, classes, exact service
+destinations (including complete retention declarations) and approved packages; its schema and bounds are public owner
+contracts. A minimal placement policy is:
+
+```json
+{"namespace":"workspace","resources":{"max_replicas":1,"max_cpu_millis":1000,"max_memory_bytes":536870912}}
+```
+
+This is the `placement` field, not a complete envelope. Fill every required field
+from `config/hosting.schema.json`; do not accept tenant-provided envelope files.
+Bundle namespaces must equal the host selection; approved hosts use
+`service.namespace.svc` or `service.namespace.svc.cluster.local`. C1 must be
+explicitly present in `allowed_data_classes`. Canonical C2/C3 vocabulary can remain
+in the bundle, but grants, destinations and hosted content cannot use those classes.
+
+After explicit database migration, `sovite init` leaves a new hosted installation
+awaiting activation. Authors submit `{"bundle": ...}` to `POST /api/bundles` or
+run `sovite compile path/to/bundle.yaml` using their token in
+`SOVITE_ADMIN_TOKEN`. An activator calls `POST /api/bundles/{generation}/activate`
+or runs `sovite activate GENERATION` with its token in `SOVITE_ADMIN_TOKEN`.
+Hosted mode refuses `reload`; compilation and activation must be separate steps.
+The API server requires all role tokens. A hosted CLI command loads only its
+role's configured token: `compile` needs `SOVITE_AUTHOR_TOKEN`, while `activate`
+needs `SOVITE_ACTIVATOR_TOKEN`. Present that token in `SOVITE_ADMIN_TOKEN`;
+neither command needs the other role's token or the operator token. Other online
+administrative CLI commands use `SOVITE_OPERATOR_TOKEN`. An author has no
+activation or operational artifact access. The operator can inhibit/cancel and
+inspect private operational state, but its token cannot author or activate hosted
+policy. Bearer credentials and cookie sessions follow the existing auth scheme;
+cookie mutations require the exact configured Origin. CLI and direct database
+access are outside the role model: whoever holds database credentials is trusted
+and can rewrite configuration and authority. Keep those credentials on trusted
+administrative hosts; use the HTTP API for tenant role enforcement. Standalone
+configuration changes remain Git/CLI only; bundle mutation HTTP routes do not exist.
+
+Every destination's `retention` object, including its in-memory cache bounds and
+cleanup flags, must exactly match the host-owned envelope, even for unused and
+non-inference destinations. Tenants cannot enable logging or persistent context
+beyond that declaration.
+
+Provision public trust with `SOVITE_QUALIFICATION_ISSUERS`, a JSON array such as:
+
+```json
+[
+  {"path":"/trust/platform.pem","role":"platform","not_before":1700000000,"expires_at":1893456000},
+  {"path":"/trust/tenant.pem","role":"tenant","workspace":"workspace-a","expires_at":1893456000}
+]
+```
+
+Times are Unix seconds; choose actual reviewed validity windows. Both current
+verification time and the record's signed `created_at` must fall in the issuer's
+`not_before <= time < expires_at` interval. Explicit issuers
+require `path`, `role`, `expires_at`; `not_before` is optional. Only tenant issuers
+carry `workspace`. Each key must have exactly one issuer entry; duplicate key
+material, even in different files or roles, is a startup configuration error. `operator` is
+supported for standalone trust; the existing `SOVITE_QUALIFICATION_PUBLIC_KEYS`
+list remains valid outside hosted mode. Unscoped keys do not count in hosted mode.
+
+Keep the tenant Ed25519 private key on an owner-controlled signing device or
+workstation and the separate platform key outside the hosted cluster. Neither
+belongs on the helper, worker or API, and neither is a release-promotion key.
+Runtime services need public trust and signed records only. Collect deployment
+evidence for each role using the exact check names in PLATFORM-SPEC. Record actual
+measurements, limitations and current runtime binding; synthetic or not-run
+results cannot qualify hosted dispatch.
+
+On the signing workstation, provide the reviewed bundle and envelope and the
+installation's **nonsecret** runtime settings (database identity/schema, artifact
+placement, origin, secure-cookie/qualification settings and deployment binding).
+Database passwords and runtime bearer tokens are unnecessary in hosted offline
+signing. `keys`, `runtime-binding` and offline `qualify --output` do not open a
+database or construct a runtime. Standalone `keys` and `runtime-binding` retain
+their operator-token requirement. Enforced bundles require evidence with the
+exact runtime binding for both online and offline qualification.
+Select the relevant private key only on that workstation:
+
+```bash
+sovite validate path/to/bundle.yaml
+sovite runtime-binding
+SOVITE_QUALIFICATION_PRIVATE_KEY=/offline/tenant-private.pem sovite qualify --role tenant --evidence evidence/tenant.json --profile hosted --issuer workspace-owner --output tenant.qualification.json
+SOVITE_QUALIFICATION_PRIVATE_KEY=/offline/platform-private.pem sovite qualify --role platform --evidence evidence/platform.json --profile hosted --issuer hosting-platform --output platform.qualification.json
+```
+
+Set `SOVITE_BUNDLE_PATH` and `SOVITE_HOSTING_ENVELOPE` to the reviewed local files;
+`--profile` must match the bundle's effective profile and evidence. The examples
+assume a profile named `hosted`. Import on the runtime's administrative host:
+
+```bash
+sovite qualification-import tenant.qualification.json
+sovite qualification-import platform.qualification.json
+sovite qualification-export QUALIFICATION_ID --output archived.qualification.json
+```
+
+Import verifies the signature, key id, role, workspace, generation/profile, runtime
+binding, envelope revision, validity and required checks before storing. Duplicate
+ids, other-workspace records and superseded generations are refused. Export
+includes the payload, signature, PEM public key and `public_key_id`, the SHA-256
+digest of the raw 32-byte Ed25519 public key. Never include a private key. Retain
+these files with the evidence set in the owner's approved storage.
+
+Revoke by adding key ids to `SOVITE_QUALIFICATION_REVOKED_KEYS`, a JSON array of
+`sha256:...` values, or remove their issuer entries. Deploy the updated trust
+configuration to **every** API and worker process. Environment settings load at
+process start: restart/reconcile those processes to apply a changed list. Once
+applied, every authorization check refuses the revoked key immediately, including
+claim, renewal and release; historical signed records remain stored for audit.
+Key expiry applies independently of record expiry. Missing/unreadable trust files
+fail closed. For rotation, use distinct keys and entries, obtain both newly valid
+role records, and remove/revoke superseded keys deliberately.
+
+Any envelope change, including placement or revision, changes hosted generation
+identity and the runtime binding. Recompile, activate and obtain both signatures
+against that new binding. Existing inhibits remain; after restore, run the existing
+recovery lock and review effects before resuming. A valid signature pair is no
+substitute for actual gateway, external-worker, artifact-custody and network
+qualification; those integrations are not supplied by this policy change.

@@ -34,9 +34,9 @@ class PolicyError(ValueError):
         super().__init__(self.message)
 
 
-ID = {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$"}
+ID = {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\n)"}
 TEXT = {"type": "string", "maxLength": 16000}
-DIGEST = {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+DIGEST = {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$(?!\n)"}
 REFS = {"type": "array", "items": ID, "uniqueItems": True, "maxItems": 100}
 
 

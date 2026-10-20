@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import tempfile
@@ -15,7 +16,8 @@ from sqlalchemy import select
 
 from . import policy
 from .db import Database, DatabaseSchemaError, Job, WorkerHeartbeat
-from .qualification import initialize_keys, issue_qualification, runtime_settings_fingerprint
+from .hosting import compile_bundle, load_envelope, load_json
+from .qualification import export_qualification, import_qualification, initialize_keys, issue_qualification, runtime_settings_fingerprint, write_qualification
 from .service import Platform
 from .settings import Settings
 from .worker import Worker, healthy_worker_count
@@ -88,9 +90,11 @@ def main():
     commands.add_parser("worker")
     commands.add_parser("worker-health")
     commands.add_parser("runtime-binding", help="Print the nonsecret deployment-settings fingerprint for qualification evidence")
-    for name in ("validate", "reload"):
+    for name in ("validate", "compile", "reload"):
         command = commands.add_parser(name)
         command.add_argument("path", nargs="?")
+    activate = commands.add_parser("activate", help="Activate an already compiled generation")
+    activate.add_argument("generation")
     keys = commands.add_parser("keys")
     keys.add_argument("action", choices=["init"])
     qualify = commands.add_parser("qualify")
@@ -98,6 +102,13 @@ def main():
     qualify.add_argument("--profile")
     qualify.add_argument("--valid-days", default=30, type=int)
     qualify.add_argument("--issuer", default="operator")
+    qualify.add_argument("--role", choices=["operator", "platform", "tenant"], default="operator")
+    qualify.add_argument("--output", help="Sign offline to a file without opening the database")
+    export = commands.add_parser("qualification-export")
+    export.add_argument("id")
+    export.add_argument("--output", required=True)
+    ingest = commands.add_parser("qualification-import")
+    ingest.add_argument("path")
     assess = commands.add_parser("assess")
     assess.add_argument("--output", required=True)
     audit = commands.add_parser("audit")
@@ -124,10 +135,27 @@ def main():
             helper_main()
             return
         if args.command == "validate":
-            bundle, generation = policy.load_bundle(args.path or "config/platform.local.yaml")
+            envelope = load_envelope(os.environ.get("SOVITE_HOSTING_ENVELOPE") or None)
+            default_path = os.environ.get("SOVITE_BUNDLE_PATH", "config/platform.local.yaml") if envelope else "config/platform.local.yaml"
+            bundle, generation = compile_bundle(policy.load_bundle(args.path or default_path)[0], envelope)
             emit({"valid": True, "generation": generation, "mode": bundle["mode"], "grants": len(bundle["grants"]), "scope": "Declared configuration constraints only"})
             return
-        settings = Settings.from_env()
+        hosted = bool(os.environ.get("SOVITE_HOSTING_ENVELOPE"))
+        offline = (hosted and args.command in {"keys", "runtime-binding"}) or (args.command == "qualify" and args.output)
+        if offline:
+            settings = Settings.from_env(require_auth=False)
+        elif hosted and args.command != "serve":
+            role = {"compile": "author", "activate": "activator", "reload": "activator"}.get(args.command, "operator")
+            settings = Settings.from_env(auth_role=role)
+        else:
+            settings = Settings.from_env()
+        if args.command == "qualify" and args.output:
+            bundle, generation = compile_bundle(policy.load_bundle(settings.bundle_path)[0], load_envelope(settings.hosting_envelope_path))
+            evidence = load_json(args.evidence, 2_000_000)
+            row = issue_qualification(None, settings, generation, args.profile or bundle.get("default_profile", "local"), evidence, args.valid_days, args.issuer, args.role)
+            write_qualification(row, args.output)
+            emit({"id": row.id, "generation": generation, "passed": row.passed, "output": args.output})
+            return
         if args.command == "runtime-binding":
             emit({"runtime_binding": runtime_settings_fingerprint(settings)})
             return
@@ -146,9 +174,20 @@ def main():
             return
         platform.initialize()
         if args.command == "init":
-            emit({"status": "initialized", "generation": platform.active()[1]})
+            emit({"status": "awaiting_activation"} if settings.hosting_envelope_path else {"status": "initialized", "generation": platform.active()[1]})
+        elif args.command == "compile":
+            from .api import token_identity
+            auth = token_identity(os.environ.get("SOVITE_ADMIN_TOKEN", ""), settings)
+            generation = platform.compile(policy.load_bundle(args.path or settings.bundle_path)[0], auth[1] if auth else "operator")
+            emit({"status": "compiled", "generation": generation})
         elif args.command == "reload":
-            emit({"status": "activated", "generation": platform.reload(args.path or settings.bundle_path), "existing_sessions": "Previous revisions are blocked; running tasks receive cancellation intent"})
+            from .api import token_identity
+            auth = token_identity(os.environ.get("SOVITE_ADMIN_TOKEN", ""), settings)
+            emit({"status": "activated", "generation": platform.reload(args.path or settings.bundle_path, role=auth[1] if auth else "operator"), "existing_sessions": "Previous revisions are blocked; running tasks receive cancellation intent"})
+        elif args.command == "activate":
+            from .api import token_identity
+            auth = token_identity(os.environ.get("SOVITE_ADMIN_TOKEN", ""), settings)
+            emit({"status": "activated", "generation": platform.activate(args.generation, role=auth[1] if auth else "operator")})
         elif args.command == "worker":
             logging.basicConfig(level=logging.INFO)
             async def run_worker():
@@ -166,10 +205,16 @@ def main():
         elif args.command == "qualify":
             bundle, generation = platform.active()
             evidence = json.loads(Path(args.evidence).read_text())
-            row = issue_qualification(platform.db, settings, generation, args.profile or bundle.get("default_profile", "local"), evidence, args.valid_days, args.issuer)
+            row = issue_qualification(platform.db, settings, generation, args.profile or bundle.get("default_profile", "local"), evidence, args.valid_days, args.issuer, args.role)
             emit({"id": row.id, "generation": row.generation, "passed": row.passed, "expires_at": row.expires_at, "scope": evidence["scope"]})
             if not row.passed:
                 raise SystemExit(1)
+        elif args.command == "qualification-export":
+            export_qualification(platform.db, args.id, args.output)
+            emit({"id": args.id, "output": args.output})
+        elif args.command == "qualification-import":
+            row = import_qualification(platform.db, settings, platform.active()[1], args.path)
+            emit({"id": row.id, "generation": row.generation, "passed": row.passed})
         elif args.command == "audit":
             result = platform.db.verify_audit()
             emit(result)

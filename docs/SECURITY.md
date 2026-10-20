@@ -99,3 +99,63 @@ generation termination or reserve a loaded model. Production gateway, authority,
 worker/native routing and network cutover are not implemented; gateway bindings
 still fail closed in `require_model_adapter()`. See
 [connector protocol and limitations](CONNECTOR-PROTOCOL.md).
+
+## 8. Hosted policy and signer separation
+
+When an installation configures a hosting envelope, Sovite treats its host-owned
+file and issuer configuration as authority separate from tenant-authored bundles.
+The strict, bounded `sovite.hosting/v1` contract permits only C0 and explicitly
+approved C1 content, host-selected namespace/resource budgets, exact private
+service destinations, approved fixed harness packages and model-gateway connector
+kinds. It refuses tools, arbitrary images/executables, direct model endpoints,
+provider egress declarations and secret references before activation. These
+checks govern declarations; the platform must separately observe actual network
+isolation and runtime placement. C2/C3 and local-only content are unsupported in
+this profile; no automatic content classification is claimed.
+
+Author and activator credentials are separate roles in the existing bearer and
+server-side session mechanism. Compilation stores a draft only; activation
+requires an activator in hosted mode, including initial activation. An operator
+cannot use its operational token to bypass that policy boundary. Protect the
+runtime filesystem, database, process environment and trust configuration from
+tenants. CLI and direct database access are outside the role model: whoever holds
+database credentials is trusted and can rewrite authority. Hosted CLI commands
+load only their own role token; they do not provide isolation from that database
+authority. Hosted `reload` is refused; use author compilation followed by
+`activate GENERATION` with the activator credential. Standalone bundle changes
+remain Git/CLI only and expose no bundle mutation HTTP routes.
+
+The hosting envelope includes complete destination retention declarations;
+compilation requires exact equality, including logging, persistent context and
+cache lifetime/cleanup flags on non-inference destinations. Both online and
+offline qualification require runtime-binding evidence for enforced bundles.
+
+Hosted qualification requires independent platform and workspace signatures from
+role-scoped public keys. Tenant keys additionally bind one workspace; a key cannot
+serve two configured roles. Payloads bind workspace, installation, generation,
+runtime settings and envelope digest/revision. Each role has required passing
+deployment checks, with tenant binding identity, retention and artifact placement
+separate from platform hosting identity/isolation. A tenant signature containing
+all platform check names still cannot satisfy the platform role. Missing,
+expired, revoked, wrong-workspace or incomplete records keep dispatch disabled.
+Duplicate public key material is rejected at startup. Record creation time must
+also fall within its issuer's validity interval, so a currently trusted key cannot
+validate a backdated record from before that key became valid.
+The runtime rechecks trust without a positive-verification cache. Environment
+trust changes must first be applied to every API/worker process; revocation does
+not retract already transmitted content or prove a remote engine stopped.
+
+Tenant and platform qualification private keys stay on separate owner-controlled
+signing systems outside hosted execution. Offline signing opens no runtime database
+and needs no runtime bearer credentials. Signed import verifies public key id,
+signature and current binding before storage, rejects duplicate ids and cannot
+rebind a signature to a different workspace/generation. Exported signatures are
+portable evidence, not transferable execution authority. Existing standalone
+operator trust, generations and fingerprint representation are preserved when no
+envelope is configured. See [hosted operations](OPERATIONS.md#hosted-mode-policy-roles-and-offline-qualification)
+and [the hosted contract](PLATFORM-SPEC.md#hosted-policy-envelope-and-qualification).
+
+This change adds no caller delegation/assertions, worker lease API, workspace
+artifact upload, transport gateway authority or hosted chart profile. Existing
+gateway bindings still fail closed until their execution integration is supplied;
+signing fixture evidence does not establish a production-ready hosted service.

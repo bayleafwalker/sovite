@@ -10,7 +10,8 @@ from sqlalchemy.exc import IntegrityError
 
 from . import policy
 from .db import BundleRevision, Database, GrantState, Job, MetadataRow, canonical, digest
-from .qualification import is_qualified
+from .hosting import compile_bundle, load_envelope
+from .qualification import is_qualified, validate_issuers
 from .settings import Settings
 from .storage import ArtifactStore
 
@@ -32,19 +33,52 @@ class Platform:
         self.store = ArtifactStore(settings)
 
     def initialize(self):
+        validate_issuers(self.settings)
         self.db.initialize(self.settings.database_migrate)
         with self.db.sessions() as session:
             active = session.get(MetadataRow, "active_generation")
         # API replicas do not silently revert a revision loaded through the CLI.
-        if active is None:
+        if active is None and not self.settings.hosting_envelope_path:
             self.reload(self.settings.bundle_path, initial=True)
         elif not self.settings.require_qualification:
             bundle, _ = self.active()
             if bundle.get("mode") == "enforced":
                 raise PlatformError("qualification_cannot_be_disabled", "Enforced deployments require trusted qualification", 400)
 
-    def reload(self, path: str, initial: bool = False) -> str:
-        bundle, generation = policy.load_bundle(path)
+    def compile(self, bundle: dict, role: str = "operator") -> str:
+        self.policy_role(role, "author")
+        bundle, generation = compile_bundle(bundle, load_envelope(self.settings.hosting_envelope_path))
+        with self.db.sessions.begin() as session:
+            if session.get(BundleRevision, generation) is None:
+                session.add(BundleRevision(generation=generation, bundle=bundle))
+            self.db.audit(session, role, "configuration.compiled", generation)
+        return generation
+
+    def policy_role(self, role: str, required: str, *, api: bool = False):
+        if role != required and not (role == "operator" and not api and not self.settings.hosting_envelope_path):
+            raise PlatformError("forbidden", f"{required.capitalize()} access is required", 403)
+
+    def reload(self, path: str, initial: bool = False, role: str = "operator") -> str:
+        if self.settings.hosting_envelope_path:
+            raise PlatformError("hosted_reload_forbidden", "Hosted policy requires compile by an author, then activate <generation> by an activator", 403)
+        self.policy_role(role, "activator")
+        bundle, generation = compile_bundle(policy.load_bundle(path)[0], load_envelope(self.settings.hosting_envelope_path))
+        if bundle.get("mode") == "enforced" and not self.settings.require_qualification:
+            raise PlatformError("qualification_cannot_be_disabled", "Enforced deployments require trusted qualification", 400)
+        with self.db.sessions.begin() as session:
+            if session.get(BundleRevision, generation) is None:
+                session.add(BundleRevision(generation=generation, bundle=bundle))
+        return self.activate(generation, role, initial)
+
+    def activate(self, generation: str, role: str = "operator", initial: bool = False) -> str:
+        self.policy_role(role, "activator")
+        with self.db.sessions() as session:
+            revision = session.get(BundleRevision, generation)
+            if revision is None:
+                raise PlatformError("configuration_missing", "Compile the configuration before activation", 404)
+            bundle, expected = compile_bundle(revision.bundle, load_envelope(self.settings.hosting_envelope_path))
+        if generation != expected:
+            raise PlatformError("hosting_changed", "Recompile against the current hosting envelope", 409)
         if bundle.get("mode") == "enforced" and not self.settings.require_qualification:
             raise PlatformError("qualification_cannot_be_disabled", "Enforced deployments require trusted qualification", 400)
         with self.db.sessions.begin() as session:
@@ -66,7 +100,7 @@ class Platform:
                 # into a new route or resurrect authorization removed in another revision.
                 session.execute(update(Job).where(Job.status.in_(["queued", "retry_wait"]), Job.generation != generation).values(status="blocked", error_code="revision_superseded", finished_at=time.time(), updated_at=time.time()))
                 session.execute(update(Job).where(Job.status == "running", Job.generation != generation).values(cancel_requested=True))
-            self.db.audit(session, "operator", "configuration.initialized" if initial else "configuration.activated", generation, {"previous_generation": old, "mode": bundle.get("mode", "development")})
+            self.db.audit(session, role, "configuration.initialized" if initial else "configuration.activated", generation, {"previous_generation": old, "mode": bundle.get("mode", "development")})
         return generation
 
     def active(self, session=None) -> tuple[dict, str]:
@@ -80,6 +114,13 @@ class Platform:
         row = session.get(BundleRevision, generation)
         if row is None:
             raise PlatformError("configuration_missing", "The active configuration revision is unavailable", 503)
+        if self.settings.hosting_envelope_path:
+            try:
+                _, expected = compile_bundle(row.bundle, load_envelope(self.settings.hosting_envelope_path))
+                if expected != generation or not self.settings.require_qualification:
+                    raise ValueError("Hosted binding changed")
+            except (ValueError, OSError) as exc:
+                raise PlatformError("hosting_changed", "The active configuration requires current hosting policy and qualification", 403) from exc
         return row.bundle, generation
 
     def authorize(self, session, grant_id: str, caller: str, input_class: str | None = None, generation: str | None = None, is_operator: bool = False) -> dict:
@@ -98,6 +139,7 @@ class Platform:
             raise PlatformError("grant_inhibited", "The grant is operationally inhibited", 403)
         if not is_qualified(session, self.settings, active_generation, bundle.get("default_profile", "local")):
             raise PlatformError("qualification_required", "The active deployment has no valid trusted qualification", 403)
+        recipe["generation"] = active_generation
         return recipe
 
     def submit(self, grant_id: str, task: str, caller: str, idempotency_key: str, input_class: str | None = None, is_operator: bool = False) -> Job:

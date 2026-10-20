@@ -42,10 +42,18 @@ class Reason(StrictBody):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class BundleDraft(StrictBody):
+    bundle: dict
+
+
 def token_identity(token: str, settings: Settings) -> tuple[str, str] | None:
     raw = token.encode()
     if settings.operator_token and secrets.compare_digest(raw, settings.operator_token.encode()):
         return "operator", "operator"
+    for role in ("author", "activator"):
+        expected = getattr(settings, role + "_token")
+        if expected and secrets.compare_digest(raw, expected.encode()):
+            return role, role
     for name, expected in settings.caller_tokens.items():
         if secrets.compare_digest(raw, expected.encode()):
             return name, "caller"
@@ -72,7 +80,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             worker_task.cancel()
             await asyncio.gather(worker_task, return_exceptions=True)
 
-    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.14", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.15", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.platform = platform
     from .authority_api import install_routes
     install_routes(app, platform, settings)
@@ -138,6 +146,35 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             raise PlatformError("forbidden", "Operator access is required", 403)
         return auth
 
+    async def console_identity(auth=Depends(identity)) -> tuple[str, str]:
+        if auth[1] not in {"operator", "author", "activator"}:
+            raise PlatformError("forbidden", "Console access is required", 403)
+        return auth
+
+    async def author(auth=Depends(identity)) -> tuple[str, str]:
+        platform.policy_role(auth[1], "author", api=True)
+        return auth
+
+    async def activator(auth=Depends(identity)) -> tuple[str, str]:
+        platform.policy_role(auth[1], "activator", api=True)
+        return auth
+
+    async def compile_draft(body: BundleDraft, auth=Depends(author)):
+        try:
+            return {"generation": platform.compile(body.bundle, auth[1]), "status": "compiled"}
+        except ValueError:
+            raise PlatformError("invalid_bundle", "The bundle exceeds the current policy or hosting envelope", 422) from None
+
+    async def activate_bundle(generation: str, auth=Depends(activator)):
+        try:
+            return {"generation": platform.activate(generation, auth[1]), "status": "activated"}
+        except ValueError:
+            raise PlatformError("invalid_bundle", "The bundle exceeds the current policy or hosting envelope", 422) from None
+
+    if settings.hosting_envelope_path:
+        app.post("/api/bundles", status_code=201)(compile_draft)
+        app.post("/api/bundles/{generation}/activate")(activate_bundle)
+
     @app.get("/health/live")
     async def liveness():
         return {"status": "ok"}
@@ -172,7 +209,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     @app.post("/api/auth/session")
     async def login(body: Login, response: Response):
         found = token_identity(body.token, settings)
-        if not found or found[1] != "operator":
+        if not found or found[1] not in {"operator", "author", "activator"}:
             raise PlatformError("unauthorized", "Operator authentication failed", 401)
         cookie = secrets.token_urlsafe(32)
         with platform.db.sessions.begin() as session:
@@ -182,11 +219,11 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         return {"identity": found[0], "role": found[1]}
 
     @app.get("/api/auth/session")
-    async def whoami(auth=Depends(operator)):
+    async def whoami(auth=Depends(console_identity)):
         return {"identity": auth[0], "role": auth[1]}
 
     @app.delete("/api/auth/session")
-    async def logout(request: Request, response: Response, auth=Depends(operator)):
+    async def logout(request: Request, response: Response, auth=Depends(console_identity)):
         cookie = request.cookies.get("sovite_session")
         if cookie:
             with platform.db.sessions.begin() as session:
@@ -221,7 +258,11 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     @app.get("/api/flows")
     async def flows(auth=Depends(operator)):
         from .policy import flow_projection
-        return flow_projection(platform.active()[0])
+        bundle, generation = platform.active()
+        projection = flow_projection(bundle)
+        if settings.hosting_envelope_path:
+            projection["generation"] = generation
+        return projection
 
     @app.get("/api/grants")
     async def grants(auth=Depends(operator)):
@@ -333,7 +374,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         if method == "initialize":
             requested = params.get("protocolVersion")
             version = requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-11-25"
-            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.14"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
+            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.15"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
         if method == "ping":
             return reply({})
         if method == "tools/list":
@@ -363,6 +404,12 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         except PlatformError:
             return reply({"content": [{"type": "text", "text": "Task unavailable or not permitted."}], "isError": True})
         return reply({"content": [{"type": "text", "text": json.dumps(result, separators=(",", ":"))}], "structuredContent": result, "isError": False})
+
+    # Keep unknown API paths out of the static console mount, which otherwise
+    # responds to POST with 405 even when no API route exists.
+    @app.api_route("/api/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], include_in_schema=False)
+    async def api_not_found(path: str):
+        raise HTTPException(status_code=404)
 
     static = Path(__file__).parent / "static"
     if static.exists():
