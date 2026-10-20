@@ -522,7 +522,7 @@ def test_empty_model_answer_fails_and_thinking_control_is_top_level(setup):
     def handler(request):
         payload = json.loads(request.content)
         seen.append(payload)
-        return httpx.Response(200, json={"message": {"role": "assistant", "thinking": "Budget consumed before producing an answer.", "content": "  "}, "done": True, "done_reason": "length"})
+        return httpx.Response(200, json={"message": {"role": "assistant", "thinking": "No final answer.", "content": "  "}, "done": True, "done_reason": "stop"})
     job = platform.submit("incident-forensics", "task", "cloud-codex", "empty-result")
     asyncio.run(Worker(platform, AdapterRunner(httpx.MockTransport(handler))).run_once())
     assert seen[0]["think"] is False
@@ -625,3 +625,35 @@ def test_external_harness_disconnect_blocks_task_for_operator(setup):
     row = platform.get_job(job.id)
     assert (row.status, row.error_code, row.attempts) == ("blocked", "execution_uncertain", 1)
     assert not row.released_at and Worker(platform).claim() is None
+
+
+@pytest.mark.parametrize('adapter', ['ollama', 'openai-compatible'])
+def test_nonempty_truncated_model_output_never_becomes_artifact(setup, adapter):
+    settings, platform, bundle = setup
+    runtime_bundle(settings, platform, bundle)
+    bundle['models'][0]['adapter'] = adapter
+    Path(settings.bundle_path).write_text(yaml.safe_dump(bundle))
+    platform.reload(settings.bundle_path)
+    def handler(request):
+        message = {'role': 'assistant', 'content': 'Incomplete private handover'}
+        body = {'message': message, 'done': True, 'done_reason': 'length'} if adapter == 'ollama' else {
+            'choices': [{'message': message, 'finish_reason': 'length'}]}
+        return httpx.Response(200, json=body)
+    job = platform.submit('incident-forensics', 'task', 'cloud-codex', 'truncated')
+    asyncio.run(Worker(platform, AdapterRunner(httpx.MockTransport(handler))).run_once())
+    row = platform.get_job(job.id)
+    assert row.status == 'failed' and row.error_code == 'model_output_truncated'
+    assert row.public_projection is None and row.artifact_key is None
+    assert platform.public_status(row.receipt, row.caller)['status'] == 'unavailable'
+
+
+def test_complete_model_result_records_stop_reason(setup):
+    settings, platform, bundle = setup
+    runtime_bundle(settings, platform, bundle)
+    response = {'message': {'role': 'assistant', 'content': 'Complete handover.'}, 'done': True, 'done_reason': 'stop'}
+    job = platform.submit('incident-forensics', 'task', 'cloud-codex', 'complete')
+    asyncio.run(Worker(platform, AdapterRunner(httpx.MockTransport(lambda _: httpx.Response(200, json=response)))).run_once())
+    row = platform.get_job(job.id)
+    assert row.status == 'completed'
+    artifact = json.loads(platform.store.get(row.artifact_key, row.artifact_sha256))
+    assert artifact['finish_reason'] == 'stop'
