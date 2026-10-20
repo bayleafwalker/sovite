@@ -6,7 +6,7 @@ mode: development
 deploymentBinding: ""
 image:
   repository: sovite-platform
-  tag: "0.1.8"
+  tag: "0.1.9"
   digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -42,7 +42,7 @@ nativeHarness:
   agentId: code-review
   image:
     repository: sovite-platform-codex
-    tag: "0.1.8"
+    tag: "0.1.9"
     digest: ""
   storage: 10Gi
   storageClass: ""

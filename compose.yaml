@@ -22,7 +22,7 @@ x-runtime-env: &runtime-env
   SOVITE_HARNESS_TOKEN: ${SOVITE_HARNESS_TOKEN:-}
 
 x-runtime: &runtime
-  image: ${SOVITE_IMAGE:-sovite-platform:0.1.8}
+  image: ${SOVITE_IMAGE:-sovite-platform:0.1.9}
   build:
     context: .
     target: runtime

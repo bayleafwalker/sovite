@@ -584,3 +584,16 @@ def test_model_disconnect_mid_request_is_a_retryable_outage():
     with pytest.raises(RuntimeFailure) as caught:
         asyncio.run(AdapterRunner(httpx.MockTransport(_disconnecting)).request_json("POST", "http://model:11434/api/chat", payload={}, timeout=5))
     assert (caught.value.code, caught.value.retryable) == ("upstream_unavailable", True)
+
+
+def test_external_harness_disconnect_blocks_task_for_operator(setup):
+    _, platform, _ = setup
+    job = platform.submit("incident-forensics", "task", "cloud-codex", "harness-lost")
+    class LostHarness:
+        authorization_check = None
+        async def run(self, resolved, task, job_id):
+            raise RuntimeFailure("external_execution_uncertain", False)
+    asyncio.run(Worker(platform, LostHarness()).run_once())
+    row = platform.get_job(job.id)
+    assert (row.status, row.error_code, row.attempts) == ("blocked", "execution_uncertain", 1)
+    assert not row.released_at and Worker(platform).claim() is None

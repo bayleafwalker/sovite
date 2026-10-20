@@ -160,7 +160,8 @@ class Worker:
                 row.public_projection = {"receipt": row.receipt, "status": "available"}
                 row.released_at = now
                 self.platform.db.audit(session, self.id, "result.release_authorized", row.id, {"grant_id": row.grant_id, "generation": row.generation, "artifact_sha256": row.artifact_sha256})
-            elif error and error.retryable and any(not tool.get("read_only", tool["kind"] == "kubernetes-read") for tool in row.resolved.get("tools", [])):
+            elif error and (error.code == "external_execution_uncertain" or error.retryable and any(not tool.get("read_only", tool["kind"] == "kubernetes-read") for tool in row.resolved.get("tools", []))):
+                # Whatever path discovered it, an execution whose effect is unknown waits for an operator.
                 row.status, row.error_code = "blocked", "execution_uncertain"
             elif error and error.retryable and row.resolved["grant"].get("on_outage", "queue") == "queue" and row.attempts < int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts)):
                 row.status, row.error_code = "retry_wait", error.code
