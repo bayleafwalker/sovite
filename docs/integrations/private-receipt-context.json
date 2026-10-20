@@ -1,0 +1,77 @@
+{
+  "schema_version": "test-context/v1",
+  "id": "sovite.local-private-receipt-v1",
+  "owner_repo": "sovite",
+  "subject": "Local receipt integration and model completion boundary",
+  "contract_ref": {
+    "doc_id": "docs/integrations/vuoro-private-workflow.md",
+    "revision": "sha256:7da395f176adce6b74ac272481c4be28dc1e239d989299bc9df7439f09a72247"
+  },
+  "source_of_truth": "Sovite owner task/grant/receipt state; native Work owner callback for attempt authorization",
+  "depth": 2,
+  "backends": [
+    "SQLite",
+    "owned PostgreSQL 18.6 regression parity"
+  ],
+  "actors": [
+    "setup-agent",
+    "operator",
+    "task-caller",
+    "verifier",
+    "acceptor"
+  ],
+  "initial_state": [
+    "Owned C0 fixture; no hosted qualification"
+  ],
+  "operations": [
+    {
+      "name": "setup/operator activation",
+      "actors": "*"
+    },
+    {
+      "name": "task request/retry",
+      "actors": "*"
+    },
+    {
+      "name": "receipt status",
+      "actors": "*"
+    },
+    {
+      "name": "private artifact read",
+      "actors": "*"
+    },
+    {
+      "name": "model completion",
+      "actors": "*"
+    }
+  ],
+  "consistency": {
+    "target": "application-invariant",
+    "object": "private task admission and receipt observations"
+  },
+  "invariants": [
+    "No explicit truncated or filtered completion becomes an artifact or tool call",
+    "Authenticated workspace/repo/principal and current Work attempt required before and after catalog access",
+    "Reference integrity is not authorization; private artifact bytes never cross catalog results",
+    "Only operator activates setup; revoked setup principal cannot read context"
+  ],
+  "faults": [
+    "nonempty length completion",
+    "wrong identity/expiry/work/run/grant/receipt",
+    "private upstream fields",
+    "thinking-only model and mismatched digest",
+    "initialization failure",
+    "producer SIGKILL after durable receipt"
+  ],
+  "oracles": [
+    "Owner rejection codes and artifact states",
+    "Exact response allowlist",
+    "Actual local consumer receipt, source candidate at this stage"
+  ],
+  "implementation_anchors": [
+    "sovite/adapters.py:tool_agent",
+    "sovite/vuoro_adapter.py:LocalSoviteApplication.invoke",
+    "sovite/local_evaluation.py:local_evaluation",
+    "tests/test_backend.py:test_nonempty_truncated_model_output_never_becomes_artifact"
+  ]
+}

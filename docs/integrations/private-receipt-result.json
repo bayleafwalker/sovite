@@ -1,0 +1,94 @@
+{
+  "schema_version": "verification-result/v1",
+  "context_id": "sovite.local-private-receipt-v1",
+  "contract_ref": {
+    "doc_id": "docs/integrations/vuoro-private-workflow.md",
+    "revision": "sha256:7da395f176adce6b74ac272481c4be28dc1e239d989299bc9df7439f09a72247"
+  },
+  "implementation_sha": "77ab888e9e46caba0ca8cecee85cf87c6686b890",
+  "depth": 2,
+  "environment": {
+    "backend": "SQLite and owned socket-only PostgreSQL 18.6",
+    "isolation": "Local disposable state; no live databases or cluster",
+    "tool_versions": {
+      "python": "3.12.14",
+      "pytest": "8.4.2",
+      "postgresql": "18.6",
+      "adapter-kit": "0.2.2",
+      "vuoro-service": "0.1.97"
+    }
+  },
+  "execution": {
+    "histories": 1,
+    "bounds": {
+      "full_tests": 903,
+      "focused_tests": 54,
+      "full_failures": 0,
+      "full_skipped": 0,
+      "source_class": "C0",
+      "hosted": false
+    },
+    "faults_exercised": [
+      "nonempty length completion",
+      "wrong identity/expiry/work/run/grant/receipt",
+      "private upstream fields",
+      "thinking-only model and mismatched digest",
+      "initialization failure",
+      "producer SIGKILL after durable receipt"
+    ]
+  },
+  "claims": [
+    {
+      "property": "No explicit truncated or filtered completion becomes an artifact or tool call",
+      "result": "example-tested",
+      "evidence": [
+        "tests/test_backend.py",
+        "tests/test_vuoro_adapter.py",
+        "tests/test_local_evaluation.py"
+      ]
+    },
+    {
+      "property": "Authenticated workspace/repo/principal and current Work attempt required before and after catalog access",
+      "result": "example-tested",
+      "evidence": [
+        "tests/test_backend.py",
+        "tests/test_vuoro_adapter.py",
+        "tests/test_local_evaluation.py"
+      ]
+    },
+    {
+      "property": "Reference integrity is not authorization; private artifact bytes never cross catalog results",
+      "result": "example-tested",
+      "evidence": [
+        "tests/test_backend.py",
+        "tests/test_vuoro_adapter.py",
+        "tests/test_local_evaluation.py"
+      ]
+    },
+    {
+      "property": "Only operator activates setup; revoked setup principal cannot read context",
+      "result": "example-tested",
+      "evidence": [
+        "tests/test_backend.py",
+        "tests/test_vuoro_adapter.py",
+        "tests/test_local_evaluation.py"
+      ]
+    }
+  ],
+  "counterexamples": [
+    {
+      "summary": "Pre-repair regression demonstrated nonempty length completion published an artifact."
+    },
+    {
+      "summary": "Two earlier Thinking-2507 handovers produced planning narratives; neither was accepted."
+    }
+  ],
+  "notes": [
+    "Full suite: {'name': 'pytest', 'errors': '0', 'failures': '0', 'skipped': '0', 'tests': '903', 'time': '113.607', 'timestamp': '2026-10-20T20:51:15.290619+03:00', 'hostname': 'workstation'}",
+    "Focused suite: {'name': 'pytest', 'errors': '0', 'failures': '0', 'skipped': '0', 'tests': '54', 'time': '4.751', 'timestamp': '2026-10-20T20:53:36.961876+03:00', 'hostname': 'workstation'}",
+    "Helm lint/22-resource structural validation passed; no cluster mutation.",
+    "Independent findings-first review: all targeted findings closed. Consumer profile/source pin and cancellation fixes belong to Vuoro.",
+    "Actual source-candidate dev4 workflow completed; final immutable released-owner composition is recorded by Vuoro.",
+    "No hosted activation, protected-operation qualification, semantic diagnosis or general model competence claimed."
+  ]
+}

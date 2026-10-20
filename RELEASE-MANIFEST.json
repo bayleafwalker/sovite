@@ -1,7 +1,7 @@
 {
   "format": "sovite-source-release/v1",
-  "version": "0.1.15",
-  "created_at": "2026-10-20T16:57:11.963528+00:00",
+  "version": "0.1.16",
+  "created_at": "2026-10-20T17:55:04.234460+00:00",
   "contents": "Application, configuration, deployment, tests and operating evidence",
   "excluded": [
     "runtime state",
@@ -24,8 +24,8 @@
       "bytes": 1266
     },
     "README.md": {
-      "sha256": "e25e89724afe5ec8184545aa6df3a3f3b9511ebe1f09a6924f666ed6852ffffc",
-      "bytes": 9002
+      "sha256": "b32be7d87a42ef790d20b4ca4270f25c26cf5d90862088a6be369c710d22aa4e",
+      "bytes": 9401
     },
     "compose.yaml": {
       "sha256": "a6565c06a344e3db9e3fcc9e47235606333856f97992229eda8747faddaf4107",
@@ -143,6 +143,18 @@
       "sha256": "d00cec8ed0560ad7620cf6fdd01a63fe8ee40b3f33bab1f872950e75c0989aa8",
       "bytes": 9036
     },
+    "docs/AGENTIC-REAL-ASSESSMENT.json": {
+      "sha256": "c7ef0e44c2be930168c35c52ca24c124e27d8c06c575deb5b3260a5ca5cb2d50",
+      "bytes": 1983
+    },
+    "docs/AGENTIC-REAL-RETRY-ASSESSMENT.json": {
+      "sha256": "b2acba24ef2c664179bc2eb14a363996487d9fe41c35aef5bf83476efff4cdfa",
+      "bytes": 2069
+    },
+    "docs/AGENTIC-SETUP-PLAN.md": {
+      "sha256": "2400eaf1d9e8858c187910523b2de1f743d928f21d0aaa9b3677a17f4d00e0af",
+      "bytes": 7393
+    },
     "docs/API_CONTRACT.md": {
       "sha256": "0c1b20ee8da1d173cb92c4f165896ca982ed30bbc0fbce6fb306197949d62cf4",
       "bytes": 6831
@@ -156,8 +168,8 @@
       "bytes": 8434
     },
     "docs/OPERATIONS.md": {
-      "sha256": "80999c370c4d6076706324e8800bb355887fd0773ab22c05cd9561191a691c0b",
-      "bytes": 46016
+      "sha256": "8e9f51269c5d683ba66d6286046a39411b022d0ed53e4082479cc77c42441e81",
+      "bytes": 49576
     },
     "docs/PLATFORM-SPEC.md": {
       "sha256": "39ffd572388a5f266639b26fcf73e98b8c72cfd5ecc5ad27ff6f70f98cfc27d9",
@@ -187,13 +199,25 @@
       "sha256": "3c65c58aa4baa941ac977c06f75c9d4e6572fea7a796bbc15be3470eb4df6053",
       "bytes": 6150
     },
+    "docs/integrations/private-receipt-context.json": {
+      "sha256": "4cd782a45b1c39cce78af493e313ae5a93c3b12725b6187e33e3b2c7c4742000",
+      "bytes": 2348
+    },
+    "docs/integrations/private-receipt-result.json": {
+      "sha256": "f8a223272fad123ea1f7e83aa41d3283bc601cb90f431b42c55ac48966abb762",
+      "bytes": 3533
+    },
+    "docs/integrations/vuoro-private-workflow.md": {
+      "sha256": "7da395f176adce6b74ac272481c4be28dc1e239d989299bc9df7439f09a72247",
+      "bytes": 3506
+    },
     "pyproject.toml": {
-      "sha256": "09f795ba99a2b72a3345b23d7542505403a86442d30c1659241a81bfd1c1da85",
-      "bytes": 813
+      "sha256": "5d0726c44fd0af219d48980a9900d7eb8503bbeca4ba71462f65c57a9f3814c2",
+      "bytes": 1033
     },
     "requirements.lock": {
-      "sha256": "a1a8e257aca4fb687555e103fc8ae085571c13d680e194c29a6d4c2b9c7ff1a8",
-      "bytes": 972
+      "sha256": "bc43af2a04f0b87f0c6c8fee7bbf328d4b788a845c5ce9b6c46f53864f34852b",
+      "bytes": 1407
     },
     "scripts/build_seccomp_profile.py": {
       "sha256": "ecd9c334944939fb6ccdf3e9525c8ba27d92c42906bd43707bb77547337d7f6b",
@@ -220,8 +244,12 @@
       "bytes": 2548
     },
     "scripts/package_release.py": {
-      "sha256": "e0f971d427ee6b3007b13b68c4e731e2a9565cf2a46220194a27c0827eaf9ccd",
+      "sha256": "7a6e59b47c576d9d0d4915bfdbb7c1155f55434833f72d149329d55cb2a823cd",
       "bytes": 3956
+    },
+    "scripts/qualify_agentic_setup.py": {
+      "sha256": "72e2bbf16d5579857cb1570c53299f5f4f7bd2e7564a7e984ea1b18df93d97c0",
+      "bytes": 14553
     },
     "scripts/qualify_kubernetes.py": {
       "sha256": "d700cda640883f88d2105eafc14ca378b5443a6fb3ca7c9d3ce926d82002d10a",
@@ -236,16 +264,16 @@
       "bytes": 5048
     },
     "sovite/__init__.py": {
-      "sha256": "96c7166815c36f490fbfcb8177282865bff1745fa850152fbc078e8e7e5dbd46",
+      "sha256": "4ba57031b93f20f70f76aedfa18d6026083e46d4924ef1c7aa2a95789dd7b328",
       "bytes": 65
     },
     "sovite/adapters.py": {
-      "sha256": "c86c77d985d8763e994befa0ad6aa110996040fb5ebf671df2e5645dbb1249eb",
-      "bytes": 21002
+      "sha256": "9ad5f9687b83eadb774a0510f59ee19aa76b131216ed2aa2903e200ee2ec8ac6",
+      "bytes": 21460
     },
     "sovite/api.py": {
-      "sha256": "4ac88c17244b9ad59956b2793e55abafb24bc5ceda70d6d5a0f9cc80c3d40816",
-      "bytes": 25745
+      "sha256": "75889d5546612716ce4a31b085e9a8d8a2dac2399c0212d362a48d0c9ae64983",
+      "bytes": 25940
     },
     "sovite/authority.py": {
       "sha256": "6e92b11ac58190859500019562e757468cf21e530da06d83a19533ba3dc14d59",
@@ -280,8 +308,8 @@
       "bytes": 15702
     },
     "sovite/db.py": {
-      "sha256": "01618eb94462e24b72635dbe18a35ee71652cc3f9fc85cf252ab3203664256aa",
-      "bytes": 18440
+      "sha256": "61a442de92f05cc5e7e610e5f0537068c72e0b5e9b6f8642e7b6db699d107038",
+      "bytes": 19783
     },
     "sovite/gateway/__init__.py": {
       "sha256": "29f050bee186d7f2d6be452c0eafd3404a0d7ae56faf3d553e8d2a7f0de3e25e",
@@ -311,21 +339,29 @@
       "sha256": "b3dd2b5dd9c52ac2419db18250bc6eac0bcb1eb96c2d99954a2c42e3f6e8283b",
       "bytes": 10410
     },
+    "sovite/local_evaluation.py": {
+      "sha256": "6afbf4d4fe4009e145fd2d70ee9a8f3c49dfff7b4db26dda9931f84662eee828",
+      "bytes": 17440
+    },
     "sovite/policy.py": {
       "sha256": "3bf2de7c6987d6118b6a1cb6b3656e188a0e50a972b83d928b219a672fe41141",
       "bytes": 28933
     },
     "sovite/qualification.py": {
-      "sha256": "48973140edf36c17db006082649e42288a41f2bc916320b5ea343eddfd8ade3c",
-      "bytes": 19607
+      "sha256": "3b0a5364b14873e13706443298618542db1c46c88546b1896a48ed54a02a9a35",
+      "bytes": 19739
     },
     "sovite/service.py": {
-      "sha256": "8eb5bddf5cbc54c123e1e404e193e61e1a6ba3aadab8b2afc29c921f91d7c13d",
-      "bytes": 17064
+      "sha256": "4de6c7d2011e375569e8b97137e793208081f5285479d5cde54ffc272d1b5c7e",
+      "bytes": 17792
     },
     "sovite/settings.py": {
-      "sha256": "c87e98c3767e58de19b2950f2a973aa6e1fcaf18c60b51229659045ddad59d8c",
-      "bytes": 8145
+      "sha256": "260d7881aca7a8a030f8065b9e551b7a776b636137564654952da6e18d587d55",
+      "bytes": 8748
+    },
+    "sovite/setup_api.py": {
+      "sha256": "7489c59ace52b8c764ca0a0242ca590cc57a90cbf132524c3cc9d042ce2e7894",
+      "bytes": 11884
     },
     "sovite/static/app.js": {
       "sha256": "0d62d40905c238dd52af1344676f365fdaa1c4b439afcde0cb49a355829bc7ca",
@@ -347,6 +383,10 @@
       "sha256": "51912b897f893e0a73c6838d16d6eb25029ce6ae8c5fb7791a37735c5bda9a6e",
       "bytes": 2602
     },
+    "sovite/vuoro_adapter.py": {
+      "sha256": "a0d8a8cb98a2c9ad2b89b84576c02c90baae1e8428d931cb7f938ce886436e6b",
+      "bytes": 11422
+    },
     "sovite/worker.py": {
       "sha256": "0faf746c6c13c0f244da85a28174635a4c1e1f59812703fad7bbb08b94057d22",
       "bytes": 15217
@@ -360,8 +400,8 @@
       "bytes": 5417
     },
     "tests/test_backend.py": {
-      "sha256": "2c651f6533a985f6ce7f4343469148201726d962090eafdd786ba54a6b85886b",
-      "bytes": 35692
+      "sha256": "c2dd83d3b191c7d801ec729cd7622da45adfa7d37c2d59ee4b0a7ed2162f5f2c",
+      "bytes": 37514
     },
     "tests/test_connector_helper.py": {
       "sha256": "72293fd15dad00872eb1c1afd4db0a106412d610d7c4c40c7c3f1ee61a3689f1",
@@ -383,9 +423,13 @@
       "sha256": "fa2afc1bf4b517beac794210e5e64779e7d27b4c3dd4f5e23b2f00768f1732c1",
       "bytes": 39776
     },
+    "tests/test_local_evaluation.py": {
+      "sha256": "72ed32758342d323f330ed41c510ed1925be34973a9084d3950f1f7846042a33",
+      "bytes": 3372
+    },
     "tests/test_migrations.py": {
-      "sha256": "2278f838913e917ca102773b9daa49ebe10daf115d9b8a5125565e44f870004d",
-      "bytes": 24904
+      "sha256": "7dfecd856f445a2b3591b9918fd112f96012a99f072e252883d5ba4d0ee1225f",
+      "bytes": 25895
     },
     "tests/test_model_authority.py": {
       "sha256": "1fdac6b79b3f21f1ebd8308bb82c163d268d7af7b4be29ab240b7eaa9e5927f1",
@@ -406,6 +450,14 @@
     "tests/test_pr3_review.py": {
       "sha256": "102a3d15562bb4160039e31661d4ec3b729d8fc480ac82aa50011ee2c13aea93",
       "bytes": 17475
+    },
+    "tests/test_setup_api.py": {
+      "sha256": "2e8e6420956281e95a6e794e02308168bda32a184140bb57906170e11b7d4f77",
+      "bytes": 14194
+    },
+    "tests/test_vuoro_adapter.py": {
+      "sha256": "82a1103d15669f74b89bf39932c1313383e4521f06163fe86472ccbf4dac2345",
+      "bytes": 6690
     },
     "tests/vectors/connector-v1.json": {
       "sha256": "11a06932cde91adb45b5f40a019f4d4fcfca8604328fbd2b74af5c87ccd46e54",
