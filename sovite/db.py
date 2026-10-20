@@ -171,10 +171,37 @@ class RequestLedger(Base):
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class SetupPrincipal(Base):
+    __tablename__ = "setup_principals"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    installation_id: Mapped[str] = mapped_column(String(160))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    envelope: Mapped[dict] = mapped_column(JSON)
+    expires_at: Mapped[float] = mapped_column(Float)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
+class SetupDraft(Base):
+    __tablename__ = "setup_drafts"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    author: Mapped[str] = mapped_column(String(64), index=True)
+    installation_id: Mapped[str] = mapped_column(String(160))
+    idempotency_key: Mapped[str] = mapped_column(String(80), unique=True)
+    request_digest: Mapped[str] = mapped_column(String(80))
+    base_generation: Mapped[str] = mapped_column(String(80))
+    generation: Mapped[str] = mapped_column(String(80))
+    bundle: Mapped[dict] = mapped_column(JSON)
+    state: Mapped[str] = mapped_column(String(32), default="draft")
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 MIGRATIONS = (
-    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests"})),
+    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts"})),
     (2, (BindingState.__table__,)),
     (3, (ExecutionAuthority.__table__, HelperEnrollment.__table__, HelperSession.__table__, RequestLedger.__table__)),
+    (4, (SetupPrincipal.__table__, SetupDraft.__table__)),
 )
 
 

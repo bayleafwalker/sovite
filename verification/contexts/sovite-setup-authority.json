@@ -1,0 +1,128 @@
+{
+  "schema_version": "test-context/v1",
+  "id": "sovite-setup-authority-v1",
+  "owner_repo": "sovite",
+  "subject": "Bounded setup identity, proposals and operator activation",
+  "contract_ref": {
+    "doc_id": "docs/AGENTIC-SETUP-PLAN.md",
+    "revision": "b00f8bd2eb380378d7ea6526304d153b5a679631"
+  },
+  "source_of_truth": "SetupPrincipal, SetupDraft, bundle revision and active_generation rows; AuditEvent is hash-chained history committed in the same transaction, not a separate decision authority.",
+  "depth": 2,
+  "backends": [
+    "SQLite",
+    "PostgreSQL"
+  ],
+  "actors": [
+    "operator",
+    "setup-A",
+    "setup-B",
+    "caller",
+    "worker"
+  ],
+  "initial_state": [
+    "Migrated platform with active development bundle",
+    "Setup API enabled for one explicit installation; no setup principals"
+  ],
+  "operations": [
+    {
+      "name": "mint",
+      "actors": [
+        "operator"
+      ],
+      "synchronization": "Database transaction; authority_lock for writes/currentness"
+    },
+    {
+      "name": "propose",
+      "actors": [
+        "setup-A",
+        "setup-B"
+      ],
+      "synchronization": "Database transaction; authority_lock for writes/currentness"
+    },
+    {
+      "name": "inspect-own",
+      "actors": [
+        "setup-A",
+        "setup-B"
+      ],
+      "synchronization": "Database transaction; authority_lock for writes/currentness"
+    },
+    {
+      "name": "revoke",
+      "actors": [
+        "operator"
+      ],
+      "synchronization": "Database transaction; authority_lock for writes/currentness"
+    },
+    {
+      "name": "activate",
+      "actors": [
+        "operator"
+      ],
+      "synchronization": "Database transaction; authority_lock for writes/currentness"
+    },
+    {
+      "name": "execute",
+      "actors": [
+        "caller",
+        "worker"
+      ],
+      "synchronization": "Database transaction; authority_lock for writes/currentness"
+    }
+  ],
+  "consistency": {
+    "target": "application-invariant",
+    "object": "Principal currentness, draft ownership, active base and exact generation at activation"
+  },
+  "assumptions": {
+    "isolation": "SQLite writer serialization; PostgreSQL READ COMMITTED with shared authority metadata lock",
+    "clock": "Trusted local wall clock for expiry; no distributed clock proof",
+    "fairness": "No liveness or fairness claim"
+  },
+  "bounds": {
+    "concurrent_clients": 2,
+    "race_histories_per_backend": 1,
+    "envelope_models_max": 8,
+    "principal_ttl_max_seconds": 86400
+  },
+  "invariants": [
+    "Setup credentials never authorize task/operator/artifact/credential-issuance routes",
+    "Only exact approved model definitions and allowed harness/grant/step bounds may be proposed",
+    "Only operator can activate; author must remain current and active base must match",
+    "Activation replay cannot reactivate a superseded revision",
+    "Setup enablement and installation identity change qualification binding",
+    "Raw setup credentials are neither stored nor audited",
+    "Local setup cannot be enabled or expose routes under a hosted envelope"
+  ],
+  "faults": [
+    "Forced-past expiry",
+    "Revocation before activation and proposal",
+    "Concurrent revocation/activation",
+    "Restart",
+    "Different installation/principal",
+    "Changed active revision",
+    "Invalid non-finite model JSON",
+    "Blocked dispatch then retry"
+  ],
+  "oracles": [
+    "Existing policy compiler",
+    "Exact API refusal status and unchanged active generation",
+    "Audit sequence orders winning activation before revocation",
+    "Hash-only credential storage",
+    "Private worker artifact and fixed caller receipt shape"
+  ],
+  "implementation_anchors": [
+    "sovite/setup_api.py:install_routes",
+    "sovite/service.py:Platform.activate_bundle",
+    "sovite/db.py:Database.authority_lock",
+    "sovite/qualification.py:runtime_settings_fingerprint",
+    "tests/test_setup_api.py:test_revoke_and_activation_share_the_authority_boundary",
+    "tests/test_migrations.py:test_v4_setup_tables_need_explicit_upgrade"
+  ],
+  "expansions": [
+    "semantic-doc",
+    "concurrent-history",
+    "fault-scenario"
+  ]
+}
