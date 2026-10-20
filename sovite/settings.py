@@ -48,12 +48,18 @@ class Settings:
     max_request_bytes: int = 65536
     compute_id: str = "local"
     deployment_binding: str = ""
+    setup_api_enabled: bool = False
+    setup_installation_id: str = ""
 
     def __post_init__(self):
         if type(self.authority_retention_days) is not int or self.authority_retention_days < 1:
             raise ValueError("authority retention days must be a positive integer")
         if self.authority_token and (len(self.authority_token) < 24 or self.authority_token in [self.operator_token, self.author_token, self.activator_token, *self.caller_tokens.values()]):
             raise ValueError("authority credential must be dedicated and contain at least 24 characters")
+        if self.setup_api_enabled and self.hosting_envelope_path:
+            raise ValueError("The bounded setup API is local-only; hosted delegation is not qualified")
+        if self.setup_api_enabled and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", self.setup_installation_id):
+            raise ValueError("An explicit installation identity is required for the setup API")
         validate_database_schema(self.database_schema)
         if self.database_migrate not in {"startup", "never"}:
             raise ValueError("SOVITE_DATABASE_MIGRATE must be startup or never")
@@ -111,6 +117,8 @@ class Settings:
             max_request_bytes=int(env.get("SOVITE_MAX_REQUEST_BYTES", "65536")),
             compute_id=env.get("SOVITE_COMPUTE_ID", "local"),
             deployment_binding=env.get("SOVITE_DEPLOYMENT_BINDING", ""),
+            setup_api_enabled=truth("SETUP_API_ENABLED", False),
+            setup_installation_id=env.get("SOVITE_SETUP_INSTALLATION_ID", ""),
         )
         if result.artifact_backend not in {"filesystem", "s3"}:
             raise ValueError("artifact backend must be filesystem or s3")

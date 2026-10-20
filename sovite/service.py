@@ -83,25 +83,35 @@ class Platform:
             raise PlatformError("qualification_cannot_be_disabled", "Enforced deployments require trusted qualification", 400)
         with self.db.sessions.begin() as session:
             self.db.authority_lock(session)
-            if session.get(BundleRevision, generation) is None:
-                session.add(BundleRevision(generation=generation, bundle=bundle))
-            row = session.get(MetadataRow, "active_generation")
-            if row:
-                old = row.value.get("generation")
-                row.value = {"generation": generation}
-            else:
-                old = None
-                session.add(MetadataRow(key="active_generation", value={"generation": generation}))
-            for grant in bundle.get("grants", []):
-                if session.get(GrantState, grant["id"]) is None:
-                    session.add(GrantState(id=grant["id"], inhibited=False))
-            if old != generation:
-                # Sessions are pinned. A config change cannot silently move an old session
-                # into a new route or resurrect authorization removed in another revision.
-                session.execute(update(Job).where(Job.status.in_(["queued", "retry_wait"]), Job.generation != generation).values(status="blocked", error_code="revision_superseded", finished_at=time.time(), updated_at=time.time()))
-                session.execute(update(Job).where(Job.status == "running", Job.generation != generation).values(cancel_requested=True))
-            self.db.audit(session, role, "configuration.initialized" if initial else "configuration.activated", generation, {"previous_generation": old, "mode": bundle.get("mode", "development")})
+            self.activate_bundle(session, bundle, generation, role=role, initial=initial)
         return generation
+
+    def activate_bundle(self, session, bundle: dict, generation: str, *, role: str = "operator", initial: bool = False):
+        """Activate a validated bundle while holding the database authority lock."""
+        self.policy_role(role, "activator")
+        bundle, expected = compile_bundle(bundle, load_envelope(self.settings.hosting_envelope_path))
+        if generation != expected:
+            raise PlatformError("hosting_changed", "Recompile against the current hosting envelope", 409)
+        if bundle.get("mode") == "enforced" and not self.settings.require_qualification:
+            raise PlatformError("qualification_cannot_be_disabled", "Enforced deployments require trusted qualification", 400)
+        if session.get(BundleRevision, generation) is None:
+            session.add(BundleRevision(generation=generation, bundle=bundle))
+        row = session.get(MetadataRow, "active_generation")
+        if row:
+            old = row.value.get("generation")
+            row.value = {"generation": generation}
+        else:
+            old = None
+            session.add(MetadataRow(key="active_generation", value={"generation": generation}))
+        for grant in bundle.get("grants", []):
+            if session.get(GrantState, grant["id"]) is None:
+                session.add(GrantState(id=grant["id"], inhibited=False))
+        if old != generation:
+            # Sessions are pinned. A config change cannot silently move an old session
+            # into a new route or resurrect authorization removed in another revision.
+            session.execute(update(Job).where(Job.status.in_(["queued", "retry_wait"]), Job.generation != generation).values(status="blocked", error_code="revision_superseded", finished_at=time.time(), updated_at=time.time()))
+            session.execute(update(Job).where(Job.status == "running", Job.generation != generation).values(cancel_requested=True))
+        self.db.audit(session, role, "configuration.initialized" if initial else "configuration.activated", generation, {"previous_generation": old, "mode": bundle.get("mode", "development")})
 
     def active(self, session=None) -> tuple[dict, str]:
         if session is None:

@@ -38,6 +38,9 @@ def runtime_settings_fingerprint(settings: Settings) -> str:
     envelope = load_envelope(settings.hosting_envelope_path)
     if envelope is not None:
         binding["hosting"] = envelope_binding(envelope)
+
+    if settings.setup_api_enabled:
+        binding["setup"] = {"enabled": True, "installation_id": settings.setup_installation_id}
     return "sha256:" + digest(binding)
 
 

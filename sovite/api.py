@@ -175,6 +175,9 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         app.post("/api/bundles", status_code=201)(compile_draft)
         app.post("/api/bundles/{generation}/activate")(activate_bundle)
 
+    from .setup_api import install_routes as install_setup_routes
+    install_setup_routes(app, platform, operator)
+
     @app.get("/health/live")
     async def liveness():
         return {"status": "ok"}
@@ -248,7 +251,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                 counts[state] = session.scalar(select(func.count()).select_from(Job).where(Job.status == state)) or 0
             workers = [{"id": row.id, "updated_at": row.updated_at, "job_id": row.job_id, "healthy": row.updated_at > time.time() - 120} for row in session.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.updated_at.desc()).limit(100))]
             qualified = is_qualified(session, settings, generation, bundle.get("default_profile", "local"))
-        return {"name": bundle.get("metadata", {}).get("display_name", settings.display_name), "mode": bundle.get("mode"), "generation": generation, "counts": counts, "workers": workers, "qualified": qualified, "qualification_required": settings.require_qualification, "audit": platform.db.verify_audit(), "storage": {"backend": settings.artifact_backend}, "security": {"public_origin": settings.public_origin, "secure_cookies": settings.secure_cookies}, "capabilities": {"receipt_only_mcp": True, "private_artifacts": True, "signed_qualification": True, "native_harness": "Configured separately; catalog presence is not readiness", "automatic_model_fallback": False, "config_updates": "Git/CLI only", "live_cluster_verification": False}}
+        return {"name": bundle.get("metadata", {}).get("display_name", settings.display_name), "mode": bundle.get("mode"), "generation": generation, "counts": counts, "workers": workers, "qualified": qualified, "qualification_required": settings.require_qualification, "audit": platform.db.verify_audit(), "storage": {"backend": settings.artifact_backend}, "security": {"public_origin": settings.public_origin, "secure_cookies": settings.secure_cookies}, "capabilities": {"receipt_only_mcp": True, "private_artifacts": True, "signed_qualification": True, "native_harness": "Configured separately; catalog presence is not readiness", "automatic_model_fallback": False, "config_updates": "Git/CLI; bounded setup proposals enabled" if settings.setup_api_enabled else "Git/CLI only", "live_cluster_verification": False}}
 
     @app.get("/api/catalog")
     async def catalog(auth=Depends(operator)):

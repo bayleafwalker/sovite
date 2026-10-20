@@ -1,0 +1,38 @@
+{
+  "schema": "sovite.agentic-real-assessment/v1",
+  "observed_at": 1792515516.6477947,
+  "scope": "Disposable local C0 source fixture. Actual inference; not semantic work acceptance or hosted qualification.",
+  "model": "qwen3:4b",
+  "model_digest": "359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7",
+  "serving_version": {
+    "version": "0.40.6"
+  },
+  "source_sha256": "ee7c6bc4670731b054494e14487a0232e7e3b2990255fa477026570472ec4e12",
+  "generation": "sha256:49360597a2a31f7054031b36ab3854f68443584ba7cc761b99793c6b2f77edb3",
+  "setup_principal": "72b756329e6b4ae5a13f990c941267ad",
+  "setup_draft": "0732e7cc9fb14af69ef0680744226c77",
+  "qualification_id": "da67cefe58d645bca5741ca4610c0b5c",
+  "qualification_kind": "development-integration-authorization",
+  "receipt": "rcpt_AvvKwHj6qp1lRFaddTE5aqBFjPTX3cy2",
+  "status": "available",
+  "artifact_sha256": "c31e60feeb18b9c6407226f2ab51a8d7a691466f55c33f12a6c3c6609639e715",
+  "artifact_bytes": 3870,
+  "answer_characters": 3579,
+  "checks": {
+    "agent_activation_refused": true,
+    "unqualified_task_blocked": true,
+    "qualified_retry_available": true,
+    "submission_retry_same_receipt": true,
+    "caller_artifact_refused": true,
+    "fresh_client_exact_hash_match": true,
+    "M1_M2_M3_references_present": true,
+    "audit_chain_valid": true
+  },
+  "elapsed_seconds": 95.721,
+  "remaining": [
+    "Independent semantic verification and Vuoro work acceptance",
+    "Released owner-adapter composition",
+    "Two-session recovery and stale settlement refusal",
+    "Hosted qualification and rollout"
+  ]
+}

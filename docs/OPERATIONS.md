@@ -142,11 +142,11 @@ sovite db migrate
 sovite db check
 ```
 
-These commands use only database settings; they need no operator token, bundle, artifact credentials or signing keys and do not activate a generation. `migrate` creates a fresh schema's tables at version 1 and applies the version 2 binding-state step, recording each version in `platform_metadata`. Existing version 1 data and audit history survive the upgrade; version 2 migration is an idempotent compatibility check. SQLite DDL and version writes share an explicit transaction; PostgreSQL uses transactional DDL. Run one migration process at a time with runtime processes stopped, after a verified backup. There is no automatic downgrade.
+These commands use only database settings; they need no operator token, bundle, artifact credentials or signing keys and do not activate a generation. `migrate` creates the version 1 tables and applies the ordered binding-state (2), execution-authority (3) and setup-identity/draft (4) steps, recording each version in `platform_metadata`. Existing data and audit history survive the upgrade; repeated migration checks compatibility without resetting state. SQLite DDL and version writes share an explicit transaction; PostgreSQL uses transactional DDL. Run one migration process at a time with runtime processes stopped, after a verified backup. There is no automatic downgrade.
 
 Switch the runtime URL to the runtime role, keep the same schema, and set `SOVITE_DATABASE_MIGRATE=never`. Run `sovite db check` as that role, then start the API and workers. `Platform.initialize()` checks compatibility before bundle activation or work; it issues no DDL in this mode. Existing first-bundle activation and operational DML still occur after a successful check. The separate native harness receives no platform database credentials and owns an independent local SQLite execution ledger; these settings govern the platform database only.
 
-`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":3}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
+`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":4}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
 
 | Code | Meaning |
 | --- | --- |
@@ -451,3 +451,55 @@ against that new binding. Existing inhibits remain; after restore, run the exist
 recovery lock and review effects before resuming. A valid signature pair is no
 substitute for actual gateway, external-worker, artifact-custody and network
 qualification; those integrations are not supplied by this policy change.
+
+
+### Bounded agent-led setup (opt-in source capability)
+
+Schema version 4 adds `setup_principals` and `setup_drafts`. Use the existing explicit
+`db migrate` procedure before starting with `SOVITE_DATABASE_MIGRATE=never`. Older
+binaries refuse the newer schema; restore a compatible backup for rollback. Runtime
+setup requests perform DML only. Back up both tables together with bundle/audit state.
+
+Enable with `SOVITE_SETUP_API_ENABLED=true` and an explicit, stable
+`SOVITE_SETUP_INSTALLATION_ID`. Changing that ID makes previous setup credentials and
+drafts unusable. Enablement and the active setup installation ID are included in
+the runtime qualification binding; changing them requires fresh qualification.
+Defaults leave all setup endpoints absent. This local identity is
+not a hosted tenant assertion, workload attestation or general task identity.
+
+1. Operator: `POST /api/setup/principals` with `name`, optional `ttl_seconds` (60–86400),
+   and `envelope`: exact new `models` definitions, existing `harnesses`, existing
+   `grants`, and `max_steps`. The token appears once in this response; store it on
+   the authorized agent side. The database stores only its SHA-256 digest.
+2. Setup agent: `GET /api/setup/context`, then `POST /api/setup/drafts` with
+   `idempotency_key`, `base_generation`, one exact approved `model`, `agent_id`,
+   `agent_name`, `harness`, `instructions`, `max_steps`, and `grant`. New agents have
+   no tools. Only the selected existing grant's agent reference changes. No caller,
+   clearance, storage, credentials, compute or runtime settings can be edited.
+3. Agent: `GET /api/setup/my-drafts/{id}` returns its own draft metadata. Agent
+   responses never contain the installation bundle. Operator:
+   `GET /api/setup/drafts/{id}` inspects the full validated proposed bundle.
+4. Operator: `POST /api/setup/drafts/{id}/activate` with the exact `generation`.
+   Expired/revoked author or changed active base refuses activation. An identical
+   activation retry succeeds only while that revision is still active and its
+   author remains current. Qualification is never minted by setup or activation;
+   apply the existing qualification procedure to the exact new generation.
+5. Operator: `GET /api/setup/principals` inventories credential IDs without tokens
+   or token digests (100 per page; pass `after=next_cursor` for the next page). Use
+   this to revoke unused principals after an uncertain mint response; a lost token
+   cannot be recovered. Operator: `POST /api/setup/principals/{id}/revoke` immediately prevents further
+   proposals and activation of pending drafts. Revocation does not revert an already
+   activated configuration; inhibit affected grants using existing operator controls.
+
+Use ordinary task-caller and worker identities for execution. Setup credentials
+cannot use operator, task, artifact or qualification surfaces. See
+[the implementation plan](AGENTIC-SETUP-PLAN.md) for remaining real-model, Vuoro and
+hosted acceptance gates. The setup API is not enabled in hosted deployment packaging.
+
+
+For a disposable real-inference assessment, run
+`python scripts/qualify_agentic_setup.py --help`. The runner requires an explicit
+loopback Ollama endpoint and expected digest; it refuses non-C0/non-synthetic inputs,
+never downloads a model or substitutes a synthetic adapter, and writes private bytes
+only to the explicitly supplied `--private-artifact` path. The summary is bounded
+execution evidence; it does not accept Vuoro work or qualify hosted operation.
