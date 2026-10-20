@@ -151,7 +151,10 @@ class AdapterRunner:
 
     def tool_schema(self, tool: dict) -> dict:
         operations = tool.get("allowed_operations", [])
-        return {"type": "function", "function": {"name": tool["id"], "description": tool.get("description", "Read scoped operational information using an approved operation."), "parameters": {"type": "object", "properties": {"operation": {"type": "string", "enum": operations}, "arguments": {"type": "object", "additionalProperties": True}}, "required": ["operation"], "additionalProperties": False}}}
+        # Advertise exactly what execution accepts: Kubernetes reads take no arguments
+        # because configuration fixes the namespace and resource paths.
+        arguments = {"type": "object", "maxProperties": 0, "description": "Must be empty; the namespace is fixed by configuration."} if tool["kind"] == "kubernetes-read" else {"type": "object", "additionalProperties": True}
+        return {"type": "function", "function": {"name": tool["id"], "description": tool.get("description", "Read scoped operational information using an approved operation."), "parameters": {"type": "object", "properties": {"operation": {"type": "string", "enum": operations}, "arguments": arguments}, "required": ["operation"], "additionalProperties": False}}}
 
     async def tool_agent(self, recipe: dict, task: str, job_id: str) -> dict:
         agent, model = recipe["agent"], recipe["model"]
@@ -202,10 +205,12 @@ class AdapterRunner:
                         arguments = json.loads(arguments)
                     except json.JSONDecodeError:
                         arguments = None
-                if not isinstance(arguments, dict) or set(arguments) - {"operation", "arguments"}:
+                if not isinstance(arguments, dict) or set(arguments) - {"operation", "arguments"} or (tools[name]["kind"] == "kubernetes-read" and arguments.get("arguments")):
                     # Malformed calls are never executed; the model sees the expected shape and may
                     # correct itself within the step limit. Undeclared tools and denied operations stay fatal.
                     output = {"error": "invalid_tool_arguments", "expected": {"operation": tools[name].get("allowed_operations", []), "arguments": {}}}
+                    if tools[name]["kind"] == "kubernetes-read":
+                        output["hint"] = "Pass no arguments; the namespace is fixed by configuration."
                     trace.append({"tool": name, "operation": None, "result": output})
                 else:
                     output = await self.execute_tool(tools[name], arguments, f"{job_id}:{step}:{index}")

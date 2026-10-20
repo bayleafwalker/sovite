@@ -235,6 +235,35 @@ def test_malformed_tool_call_is_not_executed_and_model_can_correct_it(setup):
     assert tool_requests == [{"operation": "inspect", "arguments": {}}]
 
 
+def test_kubernetes_read_arguments_are_correctable_not_fatal(setup, monkeypatch):
+    settings, platform, bundle = setup
+    runtime_bundle(settings, platform, bundle)
+    bundle["tools"] = [{"id": "kube", "kind": "kubernetes-read", "endpoint": "http://localhost:6443", "namespace": "sovite", "input_class": "C3", "output_class": "C3",
+                        "destination": "private-runtime", "allowed_operations": ["list-pods"], "read_only": True, "api_key_env": "TEST_KUBE_TOKEN"}]
+    bundle["agents"][0]["tools"] = ["kube"]
+    Path(settings.bundle_path).write_text(yaml.safe_dump(bundle))
+    platform.reload(settings.bundle_path)
+    monkeypatch.setenv("TEST_KUBE_TOKEN", "t")
+    chats, api = [], []
+    def handler(request):
+        if request.url.port == 6443:
+            api.append(request.url.path)
+            return httpx.Response(200, json={"items": [{"metadata": {"name": "sovite-worker-1"}}]})
+        body = json.loads(request.content)
+        chats.append(body)
+        call = [{"operation": "list-pods", "arguments": {"namespace": "sovite"}}, {"operation": "list-pods", "arguments": {}}]
+        if len(chats) <= 2:
+            return httpx.Response(200, json={"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "kube", "arguments": call[len(chats) - 1]}}]}})
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": "sovite-worker-1"}})
+    job = platform.submit("incident-forensics", "task", "cloud-codex", "r")
+    asyncio.run(Worker(platform, AdapterRunner(httpx.MockTransport(handler))).run_once())
+    assert platform.get_job(job.id).status == "completed", platform.get_job(job.id).error_code
+    schema = chats[0]["tools"][0]["function"]["parameters"]["properties"]["arguments"]
+    assert schema["maxProperties"] == 0
+    assert json.loads(chats[1]["messages"][-1]["content"])["error"] == "invalid_tool_arguments"
+    assert api == ["/api/v1/namespaces/sovite/pods"]
+
+
 def test_concurrent_workers_cannot_claim_same_task(setup):
     _, platform, _ = setup
     job = platform.submit("incident-forensics", "task", "cloud-codex", "r")
