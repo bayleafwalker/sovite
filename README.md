@@ -106,3 +106,10 @@ The release is a complete implementation for whole-platform assessment. It does 
 - [Upstreams](docs/UPSTREAMS.md): adopted components, pinned references and explicit extension boundaries.
 
 No production credentials, private keys, runtime databases or model weights are included in the source distribution.
+
+## Vuoro private workflow integration
+
+Python owner release 0.1.16 adds a local-only task/receipt catalog and rejects
+explicitly truncated model responses. See [the integration contract](docs/integrations/vuoro-private-workflow.md)
+for identity binding, private artifact separation and the bounded C0 evaluation.
+This Python release does not change published deployment image tags or hosted gates.

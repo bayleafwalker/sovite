@@ -179,12 +179,14 @@ class AdapterRunner:
             if tools:
                 payload["tools"] = [self.tool_schema(tool) for tool in tools.values()]
             parameters = model.get("parameters", {})
+            finish_reason = None
             if model["adapter"] == "ollama":
                 payload["options"] = {k: v for k, v in parameters.items() if k in {"temperature", "num_ctx", "num_predict", "seed", "top_p", "top_k"}}
                 if "think" in parameters:
                     payload["think"] = parameters["think"]
                 result = await self.request_json("POST", endpoint_url(model["endpoint"], "/api/chat"), payload=payload, headers=token_headers(model), timeout=int(model.get("timeout_seconds", 120)), verify=model_verify(model))
                 message = result.get("message")
+                finish_reason = result.get("done_reason")
             elif model["adapter"] == "openai-compatible":
                 if model.get("wire_api", "chat") != "chat":
                     raise RuntimeFailure("tool_agent_requires_chat_api")
@@ -192,10 +194,15 @@ class AdapterRunner:
                 result = await self.request_json("POST", endpoint_url(model["endpoint"], "/chat/completions"), payload=payload, headers=token_headers(model), timeout=int(model.get("timeout_seconds", 120)), verify=model_verify(model))
                 choices = result.get("choices", [])
                 message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
+                finish_reason = choices[0].get("finish_reason") if choices and isinstance(choices[0], dict) else None
             else:
                 raise RuntimeFailure("unsupported_model_adapter")
             if not isinstance(message, dict):
                 raise RuntimeFailure("model_protocol_error")
+            if finish_reason == "length":
+                raise RuntimeFailure("model_output_truncated")
+            if finish_reason == "content_filter":
+                raise RuntimeFailure("model_output_filtered")
             calls = message.get("tool_calls", [])
             if not isinstance(calls, list) or len(calls) > 8:
                 raise RuntimeFailure("invalid_tool_calls")
@@ -205,7 +212,7 @@ class AdapterRunner:
                     raise RuntimeFailure("model_protocol_error")
                 if not content.strip():
                     raise RuntimeFailure("model_empty_result")
-                return {"kind": "agent-result", "answer": content, "trace": trace, "model_id": model["id"], "agent_id": agent["id"], "generation": recipe["generation"], "steps": step + 1}
+                return {"kind": "agent-result", "finish_reason": finish_reason, "answer": content, "trace": trace, "model_id": model["id"], "agent_id": agent["id"], "generation": recipe["generation"], "steps": step + 1}
             messages.append({"role": "assistant", "content": message.get("content", ""), "tool_calls": calls})
             for index, call in enumerate(calls):
                 function = call.get("function", {}) if isinstance(call, dict) else {}
