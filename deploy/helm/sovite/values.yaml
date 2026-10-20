@@ -6,7 +6,7 @@ mode: development
 deploymentBinding: ""
 image:
   repository: sovite-platform
-  tag: "0.1.10"
+  tag: "0.1.11"
   digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -42,7 +42,7 @@ nativeHarness:
   agentId: code-review
   image:
     repository: sovite-platform-codex
-    tag: "0.1.10"
+    tag: "0.1.11"
     digest: ""
   storage: 10Gi
   storageClass: ""
@@ -113,6 +113,9 @@ networkPolicy:
   # Reachability is all the chart grants; an external host needs its own controls.
   modelPeers: []
   harnessPeers: []
+  # Prometheus pods allowed to scrape the control plane's /metrics. Both selectors are required.
+  # The port also serves the API, so route only the console and MCP paths publicly, never /metrics.
+  metricsScrapers: []
   # Only these gateway pods can reach the private operator/API service.
   controlIngress:
     ciliumGateway: false

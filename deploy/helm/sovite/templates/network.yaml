@@ -48,6 +48,12 @@ spec:
         - namespaceSelector: {{ toYaml .Values.networkPolicy.controlIngress.namespaceSelector | nindent 12 }}
           podSelector: {{ toYaml .Values.networkPolicy.controlIngress.podSelector | nindent 12 }}
       ports: [{protocol: TCP, port: 8080}]
+    {{- range .Values.networkPolicy.metricsScrapers }}
+    - from:
+        - namespaceSelector: {{ toYaml (required "metricsScrapers namespaceSelector is required" .namespaceSelector) | nindent 12 }}
+          podSelector: {{ toYaml (required "metricsScrapers podSelector is required" .podSelector) | nindent 12 }}
+      ports: [{protocol: TCP, port: 8080}]
+    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -11,13 +11,13 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 
 from .db import AuditEvent, AuthSession, BundleRevision, GrantState, Job, Qualification, WorkerHeartbeat
-from .qualification import is_qualified, verify_qualification
+from .qualification import current_qualification, is_qualified, verify_qualification
 from .service import PUBLIC_STATUS, Platform, PlatformError, job_dict
 from .settings import Settings
 from .worker import Worker
@@ -72,7 +72,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             worker_task.cancel()
             await asyncio.gather(worker_task, return_exceptions=True)
 
-    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.10", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.11", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.platform = platform
 
     @app.middleware("http")
@@ -149,6 +149,23 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         except Exception:
             return JSONResponse({"status": "unavailable"}, status_code=503)
         return {"status": "ready", "checks": ["database", "private-artifact-store"], "scope": "Control-plane dependencies only"}
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    async def metrics():
+        # Unauthenticated for in-cluster scraping, so it carries numbers only: no identifiers,
+        # generations or evidence. Keep it off public routes.
+        bundle, generation = platform.active()
+        with platform.db.sessions() as session:
+            qualified = is_qualified(session, settings, generation, bundle.get("default_profile", "local"))
+            row = current_qualification(session, settings, generation, bundle.get("default_profile", "local"))
+            healthy = session.scalar(select(func.count()).select_from(WorkerHeartbeat).where(WorkerHeartbeat.updated_at > time.time() - 120)) or 0
+        lines = [
+            "# HELP sovite_qualification_required Whether dispatch requires a trusted qualification.", "# TYPE sovite_qualification_required gauge", f"sovite_qualification_required {int(settings.require_qualification)}",
+            "# HELP sovite_qualified Whether the active generation may dispatch under its qualification rules.", "# TYPE sovite_qualified gauge", f"sovite_qualified {int(qualified)}",
+            "# HELP sovite_qualification_expiry_timestamp_seconds Expiry of the latest trusted qualification for the active generation; 0 when there is none.", "# TYPE sovite_qualification_expiry_timestamp_seconds gauge", f"sovite_qualification_expiry_timestamp_seconds {int(row.expires_at) if row else 0}",
+            "# HELP sovite_workers_healthy Workers with a heartbeat in the last 120 seconds.", "# TYPE sovite_workers_healthy gauge", f"sovite_workers_healthy {healthy}",
+        ]
+        return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
     @app.post("/api/auth/session")
     async def login(body: Login, response: Response):
@@ -306,7 +323,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         if method == "initialize":
             requested = params.get("protocolVersion")
             version = requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-11-25"
-            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.10"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
+            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.11"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
         if method == "ping":
             return reply({})
         if method == "tools/list":

@@ -163,6 +163,31 @@ def test_signed_qualification_tampering_and_trust_are_checked(setup):
         assert not is_qualified(session, settings, generation, "local")
 
 
+
+def test_metrics_report_qualification_expiry_without_identifiers(setup):
+    settings, platform, _ = setup
+    settings.require_qualification = True
+    with TestClient(create_app(settings, platform)) as client:
+        def metrics():
+            response = client.get("/metrics")
+            assert response.status_code == 200 and response.headers["content-type"].startswith("text/plain")
+            return response.text, {line.split()[0]: float(line.split()[1]) for line in response.text.splitlines() if not line.startswith("#")}
+        _, values = metrics()
+        assert values["sovite_qualification_required"] == 1 and values["sovite_qualified"] == 0 and values["sovite_qualification_expiry_timestamp_seconds"] == 0
+        initialize_keys(settings)
+        generation = platform.active()[1]
+        evidence = {"generation": generation, "profile": "local", "scope": "Test fixture only", "checks": [{"name": "receipt-boundary", "status": "passed"}]}
+        short = issue_qualification(platform.db, settings, generation, "local", evidence, valid_days=1)
+        long = issue_qualification(platform.db, settings, generation, "local", evidence, valid_days=7)
+        text, values = metrics()
+        assert values["sovite_qualified"] == 1 and values["sovite_qualification_expiry_timestamp_seconds"] == int(long.expires_at)
+        assert generation.split(":")[-1] not in text and long.id not in text and short.id not in text
+        with platform.db.sessions.begin() as session:
+            session.get(Qualification, long.id).issuer = "different-issuer"
+        # A row that no longer verifies does not count; the next valid one does.
+        _, values = metrics()
+        assert values["sovite_qualified"] == 1 and values["sovite_qualification_expiry_timestamp_seconds"] == int(short.expires_at)
+
 def runtime_bundle(settings, platform, bundle, *, tools=False, readonly=True):
     bundle["models"][0] = {"id": "assessment-model", "adapter": "ollama", "model": "test-model", "endpoint": "http://localhost:11434", "destination": "private-runtime", "parameters": {}}
     bundle["harnesses"][0]["kind"] = "tool-agent"

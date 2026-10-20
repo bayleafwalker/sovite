@@ -84,11 +84,17 @@ def verify_qualification(row: Qualification, settings: Settings, now: float | No
 
 
 def is_qualified(session, settings: Settings, generation: str, profile: str | None = None) -> bool:
+    if not settings.require_qualification:
+        revision = session.get(BundleRevision, generation)
+        return not (revision and revision.bundle.get("mode") == "enforced")
+    return current_qualification(session, settings, generation, profile) is not None
+
+
+def current_qualification(session, settings: Settings, generation: str, profile: str | None = None) -> Qualification | None:
+    """The trusted qualification for this generation that expires last, if any."""
     revision = session.get(BundleRevision, generation)
     enforced = bool(revision and revision.bundle.get("mode") == "enforced")
-    if not settings.require_qualification:
-        return not enforced
-    rows = session.scalars(select(Qualification).where(Qualification.generation == generation, Qualification.passed == True, Qualification.expires_at > time.time())).all()
+    rows = session.scalars(select(Qualification).where(Qualification.generation == generation, Qualification.passed == True, Qualification.expires_at > time.time()).order_by(Qualification.expires_at.desc())).all()
     for row in rows:
         if (profile is not None and row.profile not in {profile, "all"}) or not verify_qualification(row, settings):
             continue
@@ -98,8 +104,8 @@ def is_qualified(session, settings: Settings, generation: str, profile: str | No
             required = {"runtime-identity", "network-isolation", "receipt-boundary", "recovery", "task-competence"}
             if evidence.get("evidence_kind") != "deployment" or not all(checks.get(name) == "passed" for name in required):
                 continue
-        return True
-    return False
+        return row
+    return None
 
 
 def issue_qualification(db: Database, settings: Settings, generation: str, profile: str, evidence: dict, valid_days: int = 30, issuer: str = "operator") -> Qualification:
