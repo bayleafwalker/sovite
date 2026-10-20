@@ -12,6 +12,7 @@ from collections import Counter
 from sqlalchemy import or_, select, text, update
 
 from .adapters import AdapterRunner, RuntimeFailure
+from .authority import issue_execution, refresh_execution, revoke_execution, sweep_terminal_authority
 from .db import Job, WorkerHeartbeat
 from .service import Platform, PlatformError, TERMINAL
 
@@ -44,6 +45,7 @@ class Worker:
         self.platform, self.runner = platform, runner or AdapterRunner()
         self.id = f"{worker_scope(platform)}{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.stop = asyncio.Event()
+        self.execution_fences = {}
 
     def heartbeat(self, job_id: str | None = None):
         with self.platform.db.sessions.begin() as session:
@@ -56,6 +58,8 @@ class Worker:
     def recover_expired(self):
         now = time.time()
         with self.platform.db.sessions.begin() as session:
+            self.platform.db.authority_lock(session)
+            sweep_terminal_authority(self.platform, session)
             rows = session.scalars(select(Job).where(Job.status == "running", Job.lease_until < now).with_for_update(skip_locked=True)).all()
             for row in rows:
                 if row.resolved.get("compute", {}).get("id") != self.platform.settings.compute_id:
@@ -70,6 +74,8 @@ class Worker:
                     row.status, row.error_code = "retry_wait", "lease_expired"
                     row.next_attempt_at = now
                 row.lease_owner, row.lease_until, row.updated_at = None, None, now
+                revoke_execution(session, row.id)
+                self.execution_fences.pop(row.id, None)
                 if row.status in TERMINAL:
                     row.finished_at = now
                 self.platform.db.audit(session, self.id, "task.lease_recovered", row.id, {"status": row.status, "error_code": row.error_code})
@@ -78,6 +84,7 @@ class Worker:
         self.recover_expired()
         now = time.time()
         with self.platform.db.sessions.begin() as session:
+            self.platform.db.authority_lock(session)
             if self.platform.db.engine.dialect.name == "postgresql":
                 # Per-model limits count running jobs, so concurrent claims must not both see a free slot.
                 session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CLAIM_LOCK})
@@ -99,12 +106,16 @@ class Worker:
                 if claimed.rowcount != 1:
                     continue
                 session.refresh(row)
+                issue_execution(self.platform, session, row)
+                if hasattr(row, "execution_fence"):
+                    self.execution_fences[row.id] = row.execution_fence
                 self.platform.db.audit(session, self.id, "task.started", row.id, {"attempt": row.attempts, "compute_id": self.platform.settings.compute_id})
                 return row
         return None
 
     def renew(self, job_id: str) -> bool:
         with self.platform.db.sessions.begin() as session:
+            self.platform.db.authority_lock(session)
             row = session.get(Job, job_id)
             if not row or row.status != "running" or row.lease_owner != self.id or row.cancel_requested or row.lease_until < time.time():
                 return False
@@ -112,12 +123,15 @@ class Worker:
                 self.platform.authorize(session, row.grant_id, row.caller, generation=row.generation, is_operator=row.resolved.get("submission_role") == "operator")
             except PlatformError:
                 return False
-            row.lease_until, row.updated_at = time.time() + self.platform.settings.lease_seconds, time.time()
+            now = time.time()
+            row.lease_until, row.updated_at = now + self.platform.settings.lease_seconds, now
+            refresh_execution(self.platform, session, row, self.execution_fences.get(job_id), now)
             return True
 
     def hand_back(self, job_id: str):
         """Return a running job on worker shutdown, as lease recovery would but at once."""
         with self.platform.db.sessions.begin() as session:
+            self.platform.db.authority_lock(session)
             row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one()
             if row.status != "running" or row.lease_owner != self.id:
                 return
@@ -131,12 +145,15 @@ class Worker:
                 row.status, row.error_code, row.next_attempt_at = "retry_wait", "worker_shutdown", now
                 row.attempts = max(0, row.attempts - 1)
             row.lease_owner, row.lease_until, row.updated_at = None, None, now
+            revoke_execution(session, row.id)
+            self.execution_fences.pop(row.id, None)
             if row.status in TERMINAL:
                 row.finished_at = now
             self.platform.db.audit(session, self.id, "task.handed_back", row.id, {"status": row.status, "error_code": row.error_code})
 
     def finish(self, job_id: str, artifact: tuple[str, str] | None = None, error: RuntimeFailure | None = None, cancelled: bool = False):
         with self.platform.db.sessions.begin() as session:
+            self.platform.db.authority_lock(session)
             row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one()
             if row.status != "running" or row.lease_owner != self.id or row.lease_until < time.time():
                 # A late process cannot publish after its lease has been reclaimed.
@@ -169,6 +186,8 @@ class Worker:
             else:
                 row.status, row.error_code = "failed", error.code if error else "execution_failed"
             row.lease_owner, row.lease_until, row.updated_at = None, None, now
+            revoke_execution(session, row.id)
+            self.execution_fences.pop(row.id, None)
             if row.status in TERMINAL:
                 row.finished_at = now
             self.platform.db.audit(session, self.id, "task.state_changed", row.id, {"status": row.status, "error_code": row.error_code})

@@ -152,6 +152,13 @@ def verify_preparation(signed, key, expected, connection: Verification, binding:
     for field in FIELDS - {"issued_at", "expires_at"}:
         if assertion[field] != original[field]:
             raise ProtocolError("model_host_preempted: " + field)
+    if assertion["operation"] != binding["wire_api"]:
+        raise ProtocolError("EXACT_BINDING operation mismatch")
+    return verify_binding(result, expected, binding, role, mode=mode)
+
+
+def verify_binding(connection: Verification, expected: ExpectedIdentity, binding: dict, role: dict, *, mode: str) -> Verification:
+    assertion = connection.assertion
     if mode not in {"development", "enforced"}:
         raise ProtocolError("unsupported mode")
     if mode == "enforced" and assertion["cancellation"] == "disconnect-only":
@@ -161,7 +168,6 @@ def verify_preparation(signed, key, expected, connection: Verification, binding:
             or binding["connection"]["enrollment_role"] != expected.enrollment_role
             or role["id"] != expected.enrollment_role or role["destination"] != binding["destination"]
             or assertion["model_id"] != binding["model"] or assertion["wire_apis"] != [binding["wire_api"]]
-            or assertion["operation"] != binding["wire_api"]
             or identity["protocol"] != "helper-signed-v1"):
         raise ProtocolError("EXACT_BINDING configuration mismatch")
     pinning = identity["pinning"]
@@ -175,7 +181,7 @@ def verify_preparation(signed, key, expected, connection: Verification, binding:
             raise ProtocolError("PIN_BEFORE_PROMPT identity pin mismatch")
     else:
         raise ProtocolError("unsupported pinning")
-    return Verification(result.assertion, pinning)
+    return Verification(assertion, pinning)
 
 
 def verify_continuity(prepared: Verification, *, session_id: str, load_epoch: str,

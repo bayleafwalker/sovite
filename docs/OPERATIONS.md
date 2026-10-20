@@ -146,7 +146,7 @@ These commands use only database settings; they need no operator token, bundle, 
 
 Switch the runtime URL to the runtime role, keep the same schema, and set `SOVITE_DATABASE_MIGRATE=never`. Run `sovite db check` as that role, then start the API and workers. `Platform.initialize()` checks compatibility before bundle activation or work; it issues no DDL in this mode. Existing first-bundle activation and operational DML still occur after a successful check. The separate native harness receives no platform database credentials and owns an independent local SQLite execution ledger; these settings govern the platform database only.
 
-`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":2}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
+`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":3}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
 
 | Code | Meaning |
 | --- | --- |
@@ -232,3 +232,89 @@ port. It verifies the live runtime fingerprint and active generation before
 signing. The database connection uses the local tunnel while the signature binds
 the installation's original database address. A qualification's scope must state
 what was actually observed; commissioning evidence is not production evidence.
+
+## Isolated model gateway (PR 3)
+
+Status: **not yet routed from workers (PR 4)**. Do not enable it as an enforced
+worker/native inference route. No chart, worker egress, retry accounting, enrollment
+issuer or demand cutover is included in this stage.
+
+Run `sovite db migrate` with the migration role before upgrading runtime processes.
+Schema version 3 adds `execution_authority`, `helper_enrollments`, `helper_sessions`
+and `inference_requests`; versions 1 and 2 upgrade without altering job snapshots,
+qualification, inhibits or the audit chain. Schema version 3 is not readable by
+releases before this one; rollback requires a database restore from before the upgrade.
+Runtime
+startup can use `SOVITE_DATABASE_MIGRATE=never` and `sovite db check` as before.
+
+The control service needs `SOVITE_AUTHORITY_TOKEN`, a dedicated random credential
+of at least 24 characters, and `SOVITE_EXECUTION_WORKLOAD_IDENTITY` (initially
+`worker`). It accepts only that gateway credential on `/internal/authority/*`.
+Keep those routes private and serve control through authenticated HTTPS trust.
+Operator/caller tokens and helper certificates cannot call them.
+
+Start the separate process with `sovite gateway`. It reads only the JSON file
+named by `SOVITE_GATEWAY_SETTINGS`. Its allowed fields are:
+
+| Field | Purpose |
+|---|---|
+| `authority_url`, `authority_ca_file` | Fixed HTTPS control origin and explicit workload trust bundle |
+| `authority_token` | Gateway's dedicated authority credential |
+| `workload_tokens` | Map of execution workload IDs to distinct inference bearer credentials |
+| `cert_file`, `key_file`, `helper_ca_file` | Gateway server certificate/key and separate helper client trust |
+| `connector_host`, `connector_port` | mTLS WebSocket listener, defaults `0.0.0.0:8443` |
+| `inference_host`, `inference_port` | Workload HTTPS listener, defaults `127.0.0.1:8444` |
+
+Mount a reduced environment and only those secrets. **Never mount the shared
+runtime environment**, database, S3, operator credentials or CA signing keys in
+this process. Helper trust must use a separate CA/intermediate from workload
+trust. Both gateway listeners require TLS 1.3; the connector requires a client
+certificate and the `sovite-inference.v1` subprotocol. Compression, ambient proxy
+use, payload access logging and redirects are disabled.
+
+Preprovision approved helper certificates out of band, then register their public
+certificate with `sovite.authority.provision_enrollment()` against the active
+binding, installation, enrollment ID and connector role. This administrative
+in-process registry writes public trust only; certificate issuance, renewal and
+rotation automation arrive in PR 6. Do not reuse a helper key as workload identity.
+
+`Gateway.infer()` is the internal async entrypoint. The HTTPS equivalent is
+`POST /inference/{binding_id}/{operation}` with the exact inference body and:
+
+- `Authorization: Bearer <execution workload credential>`
+- `X-Sovite-Capability`, `X-Sovite-Job`, `X-Sovite-Fence`
+- `X-Sovite-Deadline` (absolute whole Unix seconds)
+
+Successful streaming preserves the original chunks/SSE bytes. A terminal gateway
+failure after response headers is an SSE `sovite_error` event containing only a
+bounded `code`; it must be treated as failure. Pre-stream denials return JSON.
+These staging interfaces do not configure native provider clients (PR 4).
+
+Operator-only `POST /api/bindings/{id}/inhibit` and `/resume` accept the same
+`{"reason":"..."}` body as grant controls. Inhibit fences helper sessions. Resume
+requires an enabled binding and current qualification. After
+`model_cancel_unconfirmed`, independently establish that old generation has
+stopped before explicitly clearing the inhibit and reconnecting a helper.
+A gateway restart produces visible interruption, never recovery by replay.
+
+Worker lease renewal refreshes the current execution capability to at most 60
+seconds from renewal, capped by the execution deadline, in the same locked
+transaction. Revoked capabilities and replaced fences are never revived. Permits expire
+within three seconds, control calls within one second, and cancellation waits at
+most the binding's qualified bound capped at six seconds. A failed control call
+never extends a permit. The development pilot proves local HTTP operation stop
+against a cooperative test engine; it does not prove real provider stop bounds.
+Qualification must account for permit expiry, engine abort latency and transport
+latency together. Public test evidence contains no installation addresses or data.
+
+Terminal inference requests and closed helper sessions are retained for
+`SOVITE_AUTHORITY_RETENTION_DAYS` (positive integer, default 7). Worker lease
+recovery, including idle polling, sweeps at most once per hour across all workers,
+deleting at most 500 rows from each table per sweep. Request age is measured from
+the terminal update; session age from closure. Active rows and sessions referenced
+by retained requests are preserved. This sweep does not delete job or audit history.
+Abandoned active requests whose permit plus the binding's cancellation bound has
+elapsed become `interrupted` / `model_cancel_unconfirmed` at the next authority
+check and visibly inhibit the binding. Reconnect closes stale helper sessions
+after six seconds without a control heartbeat, or when they belong to an old
+gateway; uncertain requests still require the operator inhibit/resume procedure.

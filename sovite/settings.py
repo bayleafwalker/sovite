@@ -24,6 +24,9 @@ class Settings:
     s3_bucket: str = "sovite-private"
     s3_region: str = "us-east-1"
     operator_token: str = ""
+    authority_token: str = ""
+    execution_workload_identity: str = "worker"
+    authority_retention_days: int = 7
     caller_tokens: dict[str, str] = field(default_factory=dict)
     public_origin: str = "http://localhost:8080"
     secure_cookies: bool = True
@@ -42,6 +45,10 @@ class Settings:
     deployment_binding: str = ""
 
     def __post_init__(self):
+        if type(self.authority_retention_days) is not int or self.authority_retention_days < 1:
+            raise ValueError("authority retention days must be a positive integer")
+        if self.authority_token and (len(self.authority_token) < 24 or self.authority_token in [self.operator_token, *self.caller_tokens.values()]):
+            raise ValueError("authority credential must be dedicated and contain at least 24 characters")
         validate_database_schema(self.database_schema)
         if self.database_migrate not in {"startup", "never"}:
             raise ValueError("SOVITE_DATABASE_MIGRATE must be startup or never")
@@ -73,6 +80,9 @@ class Settings:
             s3_region=env.get("SOVITE_S3_REGION", defaults.s3_region),
             operator_token=env.get("SOVITE_OPERATOR_TOKEN", ""),
             caller_tokens=caller_tokens,
+            authority_token=env.get("SOVITE_AUTHORITY_TOKEN", ""),
+            execution_workload_identity=env.get("SOVITE_EXECUTION_WORKLOAD_IDENTITY", "worker"),
+            authority_retention_days=int(env.get("SOVITE_AUTHORITY_RETENTION_DAYS", "7")),
             public_origin=env.get("SOVITE_PUBLIC_ORIGIN", defaults.public_origin).rstrip("/"),
             secure_cookies=truth("SECURE_COOKIES", True),
             session_ttl_seconds=int(env.get("SOVITE_SESSION_TTL_SECONDS", "3600")),

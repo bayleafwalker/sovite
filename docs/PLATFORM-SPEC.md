@@ -278,3 +278,71 @@ Those mappings describe integration boundaries. This release does not write to a
 - [FIDES](https://arxiv.org/html/2505.23643v2): information-flow reasoning and remaining implicit channels.
 
 Implementation details and verification evidence are authoritative in the accompanying source release and `RELEASE-READINESS.md`.
+
+## Gateway and execution authority (PR 3)
+
+Status: **not yet routed from workers (PR 4)**. `require_model_adapter()` still
+refuses `model-gateway` bindings. This component does not establish an enforced
+installation before the worker/native routing and network cutover are complete.
+
+A gateway job claim creates an execution fence and a 256-bit random capability.
+Only its SHA-256 digest is stored, in `execution_authority`; the raw capability is
+a transient attribute of the claim result. Its context includes job, generation,
+actual grant/caller/submission role, binding, lease owner, permitted workload and
+attempt deadline. Capabilities expire after at most 60 seconds and never exceed
+the attempt deadline. Recovery, hand-back, finalization and re-claim revoke or
+replace them. Existing non-gateway recipes acquire no capability.
+
+`Authority.authorize_request()` is the control transaction linearization point.
+`Database.authority_lock()` serializes it with claim/recovery/renewal/finalization,
+configuration activation, grant inhibit, binding inhibit and cancellation on both
+SQLite and PostgreSQL. The same seven checks run on permit renewal and completion:
+
+1. Capability digest/expiry and the authenticated execution workload.
+2. Running job, exact fence, unchanged execution context, owner and live lease.
+3. No job cancellation intent.
+4. Current generation, grant/caller authority and trusted qualification.
+5. Binding enabled, operational inhibit absent, compiled context clearance.
+6. Exact live helper session, current enrollment, enrolled key and qualified pins.
+7. Fixed operation, request size/digest/deadline and one active request per binding.
+
+The private `/internal/authority/{action}` routes expose `start`, `open`, `hello`,
+`touch`, `fence`, `authorize`, `renew` and `finish`. They require the dedicated
+`SOVITE_AUTHORITY_TOKEN`, distinct from operator/caller tokens. The trusted gateway
+authenticates execution workloads separately and forwards that identity; helper
+certificates and asserted identity headers never authenticate workloads. The
+in-process equivalent is `sovite.authority.Authority`. No inference body goes to
+control: the gateway validates its strict operation schema and sends its size and
+SHA-256 digest. Control independently verifies the signed preparation against it.
+
+`helper_enrollments` holds preprovisioned certificate fingerprints, Ed25519 public
+keys, installation/binding/role, certificate expiry and revocation state. It issues
+no certificates. `helper_sessions` records the challenged, verified instance and
+single gateway epoch. A second active session is rejected; explicit fencing is
+required before replacement. Binding inhibit fences its sessions immediately in
+control; the gateway closes them on its next control check.
+
+`inference_requests` is a private ledger of request IDs, fence, binding/session,
+workload, operation/body digest/size/deadline, permit digest/expiry and outcome. It
+retains verified connection/preparation identity and stop confirmation, including
+failed/cancelled requests. It stores no prompt, capability or raw permit. Request
+IDs are never replayed. Terminal success requires a fresh control transaction;
+late completion after lease loss or withdrawal is discarded. The gateway holds
+the final chunk until that transaction accepts completion. Existing artifact
+persistence and caller-release authorization remain independent (`RELEASE_RECHECK`).
+
+Permits last at most three seconds, bounded further by lease, capability,
+qualification and request expiry. They cannot be resurrected after expiry. Control
+calls time out after one second; the gateway charges their entire round-trip time
+against the relative TTL. It renews at most one second apart while preparing and
+streaming. It authorizes before `prepare`, verifies request-scoped signed identity,
+and rechecks control before `invoke` (`PIN_BEFORE_PROMPT`, `CURRENT_AUTHORITY`).
+
+The gateway only uses the selected binding's session (`EXACT_BINDING`). Its
+independent request task services renewal/cancel despite a full downstream output
+queue. Disconnect, authority failure, deadline, cancellation and consumer abort
+stop the stream and send `cancel`. Missing stop confirmation inhibits the binding
+and records `model_cancel_unconfirmed`. Restart fences previous gateway sessions,
+interrupts outstanding ledgers and inhibits bindings with uncertain generation;
+it never resumes or replays inference (`NO_TRANSPARENT_REPLAY`). Single active
+gateway operation is intentional; no HA ownership protocol is provided.

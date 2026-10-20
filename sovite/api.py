@@ -72,8 +72,10 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             worker_task.cancel()
             await asyncio.gather(worker_task, return_exceptions=True)
 
-    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.13", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.14", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.platform = platform
+    from .authority_api import install_routes
+    install_routes(app, platform, settings)
 
     @app.middleware("http")
     async def bounds_and_headers(request: Request, call_next):
@@ -240,6 +242,14 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     async def resume(grant_id: str, body: Reason, auth=Depends(operator)):
         return platform.inhibit(grant_id, body.reason, False)
 
+    @app.post("/api/bindings/{binding_id}/inhibit")
+    async def inhibit_binding(binding_id: str, body: Reason, auth=Depends(operator)):
+        return platform.inhibit_binding(binding_id, body.reason)
+
+    @app.post("/api/bindings/{binding_id}/resume")
+    async def resume_binding(binding_id: str, body: Reason, auth=Depends(operator)):
+        return platform.inhibit_binding(binding_id, body.reason, False)
+
     @app.get("/api/jobs")
     async def jobs(limit: int = 100, auth=Depends(operator)):
         with platform.db.sessions() as session:
@@ -323,7 +333,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         if method == "initialize":
             requested = params.get("protocolVersion")
             version = requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-11-25"
-            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.13"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
+            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.14"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
         if method == "ping":
             return reply({})
         if method == "tools/list":

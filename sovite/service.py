@@ -48,6 +48,7 @@ class Platform:
         if bundle.get("mode") == "enforced" and not self.settings.require_qualification:
             raise PlatformError("qualification_cannot_be_disabled", "Enforced deployments require trusted qualification", 400)
         with self.db.sessions.begin() as session:
+            self.db.authority_lock(session)
             if session.get(BundleRevision, generation) is None:
                 session.add(BundleRevision(generation=generation, bundle=bundle))
             row = session.get(MetadataRow, "active_generation")
@@ -108,6 +109,7 @@ class Platform:
         key = digest({"caller": caller, "key": idempotency_key})
         try:
             with self.db.sessions.begin() as session:
+                self.db.authority_lock(session)
                 recipe = self.authorize(session, grant_id, caller, input_class, is_operator=is_operator)
                 recipe["submission_role"] = "operator" if is_operator else "caller"
                 existing = session.scalar(select(Job).where(Job.idempotency_key == key))
@@ -157,6 +159,7 @@ class Platform:
         if not reason.strip() or len(reason) > 500:
             raise PlatformError("invalid_reason", "Provide an operational reason of 1..500 characters", 422)
         with self.db.sessions.begin() as session:
+            self.db.authority_lock(session)
             bundle, generation = self.active(session)
             grant = next((g for g in bundle.get("grants", []) if g["id"] == grant_id), None)
             if not grant:
@@ -177,8 +180,37 @@ class Platform:
             self.db.audit(session, "operator", "grant.inhibited" if inhibit else "grant.resumed", grant_id, {"reason": reason, "generation": generation})
             return {"id": grant_id, "inhibited": inhibit, "reason": reason, "updated_at": row.updated_at}
 
+    def inhibit_binding(self, binding_id: str, reason: str, inhibit: bool = True) -> dict:
+        from .authority import Authority
+        from .db import BindingState, HelperSession
+        if not reason.strip() or len(reason) > 500:
+            raise PlatformError("invalid_reason", "Provide an operational reason of 1..500 characters", 422)
+        with self.db.sessions.begin() as session:
+            self.db.authority_lock(session)
+            bundle, generation = self.active(session)
+            binding = next((m for m in bundle["models"] if m["id"] == binding_id), None)
+            if binding is None:
+                raise PlatformError("not_found", "Binding not found", 404)
+            if not inhibit:
+                if not binding.get("enabled", True):
+                    raise PlatformError("binding_disabled", "The desired configuration disables this binding", 403)
+                if not is_qualified(session, self.settings, generation, bundle.get("default_profile", "local")):
+                    raise PlatformError("qualification_required", "Re-enablement requires current qualification", 403)
+            else:
+                authority = Authority(self)
+                for helper in session.scalars(select(HelperSession).where(HelperSession.binding_id == binding_id, HelperSession.active == True)):
+                    authority._close(session, helper)
+            state = session.get(BindingState, binding_id)
+            if state is None:
+                state = BindingState(id=binding_id)
+                session.add(state)
+            state.inhibited, state.reason, state.updated_at = inhibit, reason, time.time()
+            self.db.audit(session, "operator", "binding.inhibited" if inhibit else "binding.resumed", binding_id, {"reason": reason, "generation": generation})
+            return {"id": binding_id, "inhibited": inhibit, "reason": reason, "updated_at": state.updated_at}
+
     def cancel(self, job_id: str) -> Job:
         with self.db.sessions.begin() as session:
+            self.db.authority_lock(session)
             row = self.get_job(job_id, session)
             if row.status not in TERMINAL:
                 row.cancel_requested, row.updated_at = True, time.time()

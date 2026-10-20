@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Boolean, Float, Integer, JSON, String, Text, UniqueConstraint, create_engine, event, inspect, select
+from sqlalchemy import Boolean, Float, Index, Integer, JSON, String, Text, UniqueConstraint, create_engine, event, inspect, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -115,9 +115,66 @@ class WorkerHeartbeat(Base):
     job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class ExecutionAuthority(Base):
+    __tablename__ = "execution_authority"
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fence: Mapped[str] = mapped_column(String(64))
+    capability_digest: Mapped[str] = mapped_column(String(64))
+    context: Mapped[dict] = mapped_column(JSON)
+    expires_at: Mapped[float] = mapped_column(Float)
+    deadline: Mapped[float] = mapped_column(Float)
+
+
+class HelperEnrollment(Base):
+    __tablename__ = "helper_enrollments"
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    binding_id: Mapped[str] = mapped_column(String(160))
+    installation_id: Mapped[str] = mapped_column(String(160))
+    role: Mapped[str] = mapped_column(String(160))
+    expires_at: Mapped[float] = mapped_column(Float)
+    certificate_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    public_key: Mapped[str] = mapped_column(Text)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class HelperSession(Base):
+    __tablename__ = "helper_sessions"
+    __table_args__ = (Index("ix_helper_sessions_retention", "active", "last_seen", "id"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    binding_id: Mapped[str] = mapped_column(String(160), index=True)
+    enrollment_id: Mapped[str] = mapped_column(String(160))
+    gateway_id: Mapped[str] = mapped_column(String(64))
+    generation: Mapped[str] = mapped_column(String(80))
+    challenge: Mapped[str] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    identity: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_seen: Mapped[float] = mapped_column(Float)
+
+
+class RequestLedger(Base):
+    __tablename__ = "inference_requests"
+    __table_args__ = (Index("ix_inference_requests_retention", "status", "updated_at", "id"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), index=True)
+    fence: Mapped[str] = mapped_column(String(64))
+    binding_id: Mapped[str] = mapped_column(String(160), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    gateway_id: Mapped[str] = mapped_column(String(64))
+    workload: Mapped[str] = mapped_column(String(160))
+    request: Mapped[dict] = mapped_column(JSON)
+    permit_digest: Mapped[str] = mapped_column(String(64))
+    permit_until: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    outcome: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 MIGRATIONS = (
-    (1, tuple(table for table in Base.metadata.sorted_tables if table is not BindingState.__table__)),
+    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests"})),
     (2, (BindingState.__table__,)),
+    (3, (ExecutionAuthority.__table__, HelperEnrollment.__table__, HelperSession.__table__, RequestLedger.__table__)),
 )
 
 
@@ -252,6 +309,10 @@ class Database:
                     connection.execute(MetadataRow.__table__.update().where(MetadataRow.key == "schema_version").values(value={"version": number}))
             self._structure(connection, Base.metadata.sorted_tables)
             self._audit_head(connection)
+
+    def authority_lock(self, session: Session):
+        from sqlalchemy import update
+        session.execute(update(MetadataRow).where(MetadataRow.key == "audit_head").values(value=MetadataRow.value))
 
     def audit(self, session: Session, actor: str, action: str, target: str, detail: dict | None = None) -> AuditEvent:
         # Lock acquisition also serializes audit appenders using SQLite's write lock.

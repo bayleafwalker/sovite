@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
 
 from sovite.db import (AuthSession, Base, BindingState, BundleRevision, Database,
-                       DatabaseSchemaError, GrantState, Job, MetadataRow, Qualification)
+                       DatabaseSchemaError, GrantState, Job, MetadataRow, Qualification, MIGRATIONS)
 from sovite.policy import load_bundle, resolve_recipe
 
 
@@ -32,7 +32,7 @@ def database_cli(database, monkeypatch, capsys):
             main()
             result = capsys.readouterr()
             assert not result.err
-            assert json.loads(result.out) == {"status": "compatible", "schema_version": 2}
+            assert json.loads(result.out) == {"status": "compatible", "schema_version": 3}
     return run
 
 
@@ -63,8 +63,7 @@ def database(request, tmp_path):
 
 
 def released_schema(db):
-    Base.metadata.create_all(db.engine, tables=[table for table in Base.metadata.sorted_tables
-                                               if table is not BindingState.__table__])
+    Base.metadata.create_all(db.engine, tables=list(MIGRATIONS[0][1]))
     with db.sessions.begin() as session:
         session.add(MetadataRow(key="schema_version", value={"version": 1}))
         session.add(MetadataRow(key="audit_head", value={"sequence": 0, "hash": "0" * 64}))
@@ -95,7 +94,7 @@ def test_upgrade_v1_preserves_jobs_bundle_and_operational_state(database, databa
     database_cli("migrate")
     assert "binding_runtime_state" in inspect(db.engine).get_table_names(schema=db.schema)
     with db.sessions.begin() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 2}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 3}
         assert session.get(MetadataRow, "active_generation").value == {"generation": generation}
         assert session.get(BundleRevision, generation).bundle == bundle
         job = session.get(Job, "old-job")
@@ -120,7 +119,7 @@ def test_fresh_schema_stores_and_reads_binding_state(database):
     db = database
     db.initialize()
     with db.sessions.begin() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 2}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 3}
         session.add(BindingState(id="model-a"))
     with db.sessions.begin() as session:
         state = session.get(BindingState, "model-a")
@@ -145,7 +144,7 @@ def test_upgrade_is_idempotent_after_table_creation(database):
     db.initialize()
     db.initialize()
     with db.sessions() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 2}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 3}
         assert session.get(BindingState, "model-a").inhibited
 
 
@@ -162,7 +161,10 @@ def test_unknown_schema_version_rejected_before_migration(database):
 
 
 def test_db_migrate_v2_preserves_state_and_is_idempotent(database, database_cli):
-    database.migrate()
+    released_schema(database)
+    BindingState.__table__.create(database.engine)
+    with database.sessions.begin() as session:
+        session.get(MetadataRow, "schema_version").value = {"version": 2}
     with database.sessions.begin() as session:
         session.add(BindingState(id="model-v2", inhibited=True, reason="Preserve v2"))
         database.audit(session, "operator", "v2-event", "model-v2")
@@ -474,3 +476,26 @@ def test_postgres_missing_schema_never_falls_back(postgres_roles):
             assert connection.exec_driver_sql('SELECT count(*) FROM binding_runtime_state').scalar_one() == 1
     finally:
         db.engine.dispose()
+
+
+def test_v3_execution_tables_require_upgrade_and_old_runtime_refuses(database):
+    released_schema(database)
+    BindingState.__table__.create(database.engine)
+    with database.sessions.begin() as session:
+        session.get(MetadataRow, 'schema_version').value = {'version': 2}
+    assert not {'execution_authority', 'helper_enrollments', 'helper_sessions', 'inference_requests'}.intersection(
+        inspect(database.engine).get_table_names(schema=database.schema))
+    with pytest.raises(DatabaseSchemaError) as failure:
+        database.check()
+    assert failure.value.code == 'database_schema_older'
+    database.migrate()
+    database.check()
+    assert {'execution_authority', 'helper_enrollments', 'helper_sessions', 'inference_requests'}.issubset(
+        inspect(database.engine).get_table_names(schema=database.schema))
+    database.schema_version = 2
+    try:
+        with pytest.raises(DatabaseSchemaError) as failure:
+            database.check()
+        assert failure.value.code == 'database_schema_newer'
+    finally:
+        database.schema_version = 3

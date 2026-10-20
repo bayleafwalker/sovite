@@ -218,5 +218,48 @@ must measure this, or a cooperating/supervised adapter must replace this pilot.
 
 Tests exercise local TLS, mTLS, messages, identity and a cooperative fake engine.
 Real host images, loaded weight reservation, packet/CNI restrictions, real engine
-stop bounds, private artifact persistence, authority checks, certificate issuance,
+stop bounds, private artifact persistence, certificate issuance,
 rotation and revocation are later-PR/deployment evidence and have not been run.
+
+
+## Gateway authority boundary (PR 3)
+
+Status: **not yet routed from workers (PR 4)**. The gateway is a separate
+`sovite gateway` entrypoint with reduced configuration, a workload HTTPS inference
+listener and an mTLS TLS 1.3 WebSocket connector. It talks to control exclusively
+through the private workload-authenticated authority HTTP API. See
+[PLATFORM-SPEC](PLATFORM-SPEC.md#gateway-and-execution-authority-pr-3) for the seven
+transactional checks and [OPERATIONS](OPERATIONS.md#isolated-model-gateway-pr-3)
+for configuration. No helper credential is accepted on either workload surface.
+
+After certificate fingerprint lookup, control reserves a single session and
+supplies a fresh challenge. The gateway calls `verify_connection` on `hello`, and
+control independently verifies the signed identity and binding pins. A second
+live session is denied; an explicit fence must invalidate its predecessor.
+Revoked/expired enrollments and inhibited/disabled bindings fail closed.
+
+Before any `prepare`, the gateway obtains control authorization and a ledger ID.
+Before `invoke`, it calls `verify_preparation` and submits that signed preparation
+for independent control verification and another complete authority recheck.
+Only operation, digest and instance context cross during preparation. Invocation
+contains no capability, caller identity, grant credential or workload credential.
+The signed preparation binds the exact operation and body digest.
+
+The gateway computes `permit_ttl_ms` from its remaining monotonic budget after
+subtracting the complete control HTTP round trip. Permit issuance and renewal are
+bounded by the remaining job lease, capability, qualification and fixed request
+deadline as well as the three-second maximum. Expired permits cannot renew.
+Renewal/cancel run independently of downstream output buffering; full bounded
+queues terminate requests rather than deferring authority checks.
+
+The final response chunk is held until completion commits, so a terminal engine
+marker cannot precede control acceptance. Completion requires current control
+authority and a still-live permit; late
+frames after fence replacement, cancellation or lease loss cannot complete the
+ledger. Cancel acknowledgement is recorded separately from uncertain stop. Lost
+connectivity or unconfirmed stop interrupts the private ledger and inhibits the
+binding. A new gateway epoch invalidates prior sessions and outstanding requests.
+There is no transparent replay, automatic session takeover, fallback or deadline
+extension. Local TLS tests cover denied-before-prompt and SQLite/PostgreSQL
+transaction races; real engine stop, CNI/network isolation and deployment
+qualification remain separate evidence.
