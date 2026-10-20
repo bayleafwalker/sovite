@@ -1,0 +1,250 @@
+{
+  "format": "sovite.connector-v1.vectors",
+  "test_only_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "domain_hex": "736f766974652f68656c7065722d7369676e65642d763100",
+  "now": 1800000000,
+  "frames": [
+    {
+      "message": {
+        "version": 1,
+        "session_id": "session-1",
+        "seq": 1,
+        "type": "invoke",
+        "request_id": "id",
+        "operation": "chat",
+        "body": "eyJtb2RlbCI6InRlc3QtbW9kZWwiLCJtZXNzYWdlcyI6W3sicm9sZSI6InVzZXIiLCJjb250ZW50IjoicHJpdmF0ZS1jYW5hcnkifV0sInN0cmVhbSI6dHJ1ZX0=",
+        "deadline": 1800000000,
+        "permit_ttl_ms": 3000
+      },
+      "canonical_utf8": "{\"body\":\"eyJtb2RlbCI6InRlc3QtbW9kZWwiLCJtZXNzYWdlcyI6W3sicm9sZSI6InVzZXIiLCJjb250ZW50IjoicHJpdmF0ZS1jYW5hcnkifV0sInN0cmVhbSI6dHJ1ZX0=\",\"deadline\":1800000000,\"operation\":\"chat\",\"permit_ttl_ms\":3000,\"request_id\":\"id\",\"seq\":1,\"session_id\":\"session-1\",\"type\":\"invoke\",\"version\":1}"
+    },
+    {
+      "message": {
+        "version": 1,
+        "session_id": "session-1",
+        "seq": 1,
+        "type": "permit",
+        "request_id": "id",
+        "permit_ttl_ms": 3000
+      },
+      "canonical_utf8": "{\"permit_ttl_ms\":3000,\"request_id\":\"id\",\"seq\":1,\"session_id\":\"session-1\",\"type\":\"permit\",\"version\":1}"
+    }
+  ],
+  "assertions": [
+    {
+      "kind": "hello",
+      "canonical_utf8": "{\"binding_id\":\"binding-a\",\"cancellation\":\"engine-cooperative\",\"challenge\":\"nonce-1\",\"engine_image_digest\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"engine_process_instance\":\"process-1\",\"engine_version\":\"test-engine-1\",\"enrollment_id\":\"enrollment-a\",\"enrollment_role\":\"pilot-role\",\"expires_at\":1800000030,\"helper_image_digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"host_instance_id\":\"host-1\",\"installation_id\":\"installation-test\",\"issued_at\":1800000000,\"load_epoch\":\"epoch-1\",\"model_id\":\"test-model\",\"session_id\":\"session-1\",\"weight_files\":[{\"name\":\"model.gguf\",\"sha256\":\"sha256:9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c\",\"size\":7}],\"weights_manifest_digest\":\"sha256:17aea083beae3bfa2dae1fe541d7f7b57c07190bccbef70af085f9d6f3d6ea0f\",\"wire_apis\":[\"chat\"]}",
+      "signed": {
+        "assertion": {
+          "installation_id": "installation-test",
+          "binding_id": "binding-a",
+          "enrollment_id": "enrollment-a",
+          "enrollment_role": "pilot-role",
+          "helper_image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "engine_image_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "engine_version": "test-engine-1",
+          "model_id": "test-model",
+          "load_epoch": "epoch-1",
+          "weight_files": [
+            {
+              "name": "model.gguf",
+              "size": 7,
+              "sha256": "sha256:9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c"
+            }
+          ],
+          "weights_manifest_digest": "sha256:17aea083beae3bfa2dae1fe541d7f7b57c07190bccbef70af085f9d6f3d6ea0f",
+          "host_instance_id": "host-1",
+          "engine_process_instance": "process-1",
+          "session_id": "session-1",
+          "wire_apis": [
+            "chat"
+          ],
+          "cancellation": "engine-cooperative",
+          "challenge": "nonce-1",
+          "issued_at": 1800000000,
+          "expires_at": 1800000030
+        },
+        "signature": "4d77f61934f4f0a82b06743d3b36efa90b008cb0b5687a82586c8a16e43fcbcf1a4d1b3267d889b82051dadb8cee04172619d000f9a7975f80a92f328b3ab102"
+      },
+      "expected": "verified"
+    },
+    {
+      "kind": "prepared",
+      "canonical_utf8": "{\"binding_id\":\"binding-a\",\"body_digest\":\"sha256:722a63c74f0c589dd9e36756de906bc907025b2a0b2c9b9226aedc92f8fb740c\",\"cancellation\":\"engine-cooperative\",\"challenge\":\"nonce-1\",\"engine_image_digest\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"engine_process_instance\":\"process-1\",\"engine_version\":\"test-engine-1\",\"enrollment_id\":\"enrollment-a\",\"enrollment_role\":\"pilot-role\",\"expires_at\":1800000030,\"helper_image_digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"host_instance_id\":\"host-1\",\"installation_id\":\"installation-test\",\"issued_at\":1800000000,\"load_epoch\":\"epoch-1\",\"model_id\":\"test-model\",\"operation\":\"chat\",\"request_id\":\"request-1\",\"session_id\":\"session-1\",\"weight_files\":[{\"name\":\"model.gguf\",\"sha256\":\"sha256:9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c\",\"size\":7}],\"weights_manifest_digest\":\"sha256:17aea083beae3bfa2dae1fe541d7f7b57c07190bccbef70af085f9d6f3d6ea0f\",\"wire_apis\":[\"chat\"]}",
+      "signed": {
+        "assertion": {
+          "installation_id": "installation-test",
+          "binding_id": "binding-a",
+          "enrollment_id": "enrollment-a",
+          "enrollment_role": "pilot-role",
+          "helper_image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "engine_image_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "engine_version": "test-engine-1",
+          "model_id": "test-model",
+          "load_epoch": "epoch-1",
+          "weight_files": [
+            {
+              "name": "model.gguf",
+              "size": 7,
+              "sha256": "sha256:9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c"
+            }
+          ],
+          "weights_manifest_digest": "sha256:17aea083beae3bfa2dae1fe541d7f7b57c07190bccbef70af085f9d6f3d6ea0f",
+          "host_instance_id": "host-1",
+          "engine_process_instance": "process-1",
+          "session_id": "session-1",
+          "wire_apis": [
+            "chat"
+          ],
+          "cancellation": "engine-cooperative",
+          "challenge": "nonce-1",
+          "issued_at": 1800000000,
+          "expires_at": 1800000030,
+          "request_id": "request-1",
+          "body_digest": "sha256:722a63c74f0c589dd9e36756de906bc907025b2a0b2c9b9226aedc92f8fb740c",
+          "operation": "chat"
+        },
+        "signature": "dc0dddee06e2245439f161e773bc51dae9d8dfea9dbe27e14414293a687840735e288a4dc0754c4eaa05eb3f00d6ca455bcad02bcf090a79f0220bb1c7e83a07"
+      },
+      "expected": "verified"
+    }
+  ],
+  "negative": [
+    {
+      "case": "old-nonce",
+      "signed": {
+        "assertion": {
+          "installation_id": "installation-test",
+          "binding_id": "binding-a",
+          "enrollment_id": "enrollment-a",
+          "enrollment_role": "pilot-role",
+          "helper_image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "engine_image_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "engine_version": "test-engine-1",
+          "model_id": "test-model",
+          "load_epoch": "epoch-1",
+          "weight_files": [
+            {
+              "name": "model.gguf",
+              "size": 7,
+              "sha256": "sha256:9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c"
+            }
+          ],
+          "weights_manifest_digest": "sha256:17aea083beae3bfa2dae1fe541d7f7b57c07190bccbef70af085f9d6f3d6ea0f",
+          "host_instance_id": "host-1",
+          "engine_process_instance": "process-1",
+          "session_id": "session-1",
+          "wire_apis": [
+            "chat"
+          ],
+          "cancellation": "engine-cooperative",
+          "challenge": "nonce-1",
+          "issued_at": 1800000000,
+          "expires_at": 1800000030
+        },
+        "signature": "4d77f61934f4f0a82b06743d3b36efa90b008cb0b5687a82586c8a16e43fcbcf1a4d1b3267d889b82051dadb8cee04172619d000f9a7975f80a92f328b3ab102"
+      },
+      "expected_identity": {
+        "installation_id": "installation-test",
+        "binding_id": "binding-a",
+        "enrollment_id": "enrollment-a",
+        "enrollment_role": "pilot-role",
+        "session_id": "session-1",
+        "challenge": "old"
+      },
+      "expected": "rejected"
+    },
+    {
+      "case": "tampered",
+      "signed": {
+        "assertion": {
+          "installation_id": "installation-test",
+          "binding_id": "binding-a",
+          "enrollment_id": "enrollment-a",
+          "enrollment_role": "pilot-role",
+          "helper_image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "engine_image_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "engine_version": "tampered",
+          "model_id": "test-model",
+          "load_epoch": "epoch-1",
+          "weight_files": [
+            {
+              "name": "model.gguf",
+              "size": 7,
+              "sha256": "sha256:9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c"
+            }
+          ],
+          "weights_manifest_digest": "sha256:17aea083beae3bfa2dae1fe541d7f7b57c07190bccbef70af085f9d6f3d6ea0f",
+          "host_instance_id": "host-1",
+          "engine_process_instance": "process-1",
+          "session_id": "session-1",
+          "wire_apis": [
+            "chat"
+          ],
+          "cancellation": "engine-cooperative",
+          "challenge": "nonce-1",
+          "issued_at": 1800000000,
+          "expires_at": 1800000030
+        },
+        "signature": "4d77f61934f4f0a82b06743d3b36efa90b008cb0b5687a82586c8a16e43fcbcf1a4d1b3267d889b82051dadb8cee04172619d000f9a7975f80a92f328b3ab102"
+      },
+      "expected": "rejected"
+    },
+    {
+      "case": "epoch-changed",
+      "signed": {
+        "assertion": {
+          "installation_id": "installation-test",
+          "binding_id": "binding-a",
+          "enrollment_id": "enrollment-a",
+          "enrollment_role": "pilot-role",
+          "helper_image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "engine_image_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "engine_version": "test-engine-1",
+          "model_id": "test-model",
+          "load_epoch": "new",
+          "weight_files": [
+            {
+              "name": "model.gguf",
+              "size": 7,
+              "sha256": "sha256:9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c"
+            }
+          ],
+          "weights_manifest_digest": "sha256:17aea083beae3bfa2dae1fe541d7f7b57c07190bccbef70af085f9d6f3d6ea0f",
+          "host_instance_id": "host-1",
+          "engine_process_instance": "process-1",
+          "session_id": "session-1",
+          "wire_apis": [
+            "chat"
+          ],
+          "cancellation": "engine-cooperative",
+          "challenge": "nonce-1",
+          "issued_at": 1800000000,
+          "expires_at": 1800000030,
+          "request_id": "request-1",
+          "body_digest": "sha256:722a63c74f0c589dd9e36756de906bc907025b2a0b2c9b9226aedc92f8fb740c",
+          "operation": "chat"
+        },
+        "signature": "1b79f7e0ba3499745f47f7b83a0b9f359a638ee2d804f1f77509dbee6df347697dc69e084b99b1b96ddd7d12ee8661a683ee74a29bb892b34e9d58200a45e605"
+      },
+      "expected": "model_host_preempted"
+    }
+  ],
+  "invalid_canonical_hex": [
+    "7b2261223a312c2261223a327d",
+    "312e30",
+    "2d30",
+    "316530"
+  ],
+  "canonical": {
+    "value": {
+      "a": [
+        true,
+        -1,
+        "\u00e9\n"
+      ]
+    },
+    "utf8_hex": "7b2261223a5b747275652c2d312c22c3a95c7530303061225d7d"
+  }
+}

@@ -80,3 +80,22 @@ Expired leases are replayed only under the implemented read-only/idempotency rul
 Rotate runtime secrets separately from qualification: changing a secret value does not change the nonsecret fingerprint, while changing placement or public trust can invalidate evidence. Restart services that load credentials from their environment. Existing operator sessions currently survive token rotation until logout, expiry or explicit administrative removal of their session records. Removing a signing key from trusted public keys invalidates its qualifications without needing to rewrite historical records.
 
 After restore, retain current desired configuration and trust, apply `sovite recovery-lock --reason "Restored state requires review"`, verify the audit chain and review outstanding effects before clearing inhibits. Recovered session records and private backups also belong to the private boundary. See [operating and recovery procedures](OPERATIONS.md) for the provisioned profiles and their concrete storage duties.
+
+## 7. Connector identity foundation (not yet an executable gateway route)
+
+The connector's `helper-signed-v1` signatures establish which enrolled helper
+made the assertion, not that an uncompromised process executed those weights.
+They are not hardware attestation. Actual image and weight observations, engine
+reservation and cancellation guarantees require independent qualification.
+The identity verifier checks connection challenges, exact binding/enrollment,
+request-scoped pins and epoch continuity. Development unpinned results remain
+explicitly marked. Enrollment certificate validation and current execution
+authority remain gateway responsibilities in subsequent PRs.
+
+The outbound mTLS WebSocket pilot accepts one fixed engine origin and inference
+operations only. It exposes no forwarding or reverse-route operation. Its generic
+HTTP adapter is development-only: HTTP stream closure cannot prove server-side
+generation termination or reserve a loaded model. Production gateway, authority,
+worker/native routing and network cutover are not implemented; gateway bindings
+still fail closed in `require_model_adapter()`. See
+[connector protocol and limitations](CONNECTOR-PROTOCOL.md).

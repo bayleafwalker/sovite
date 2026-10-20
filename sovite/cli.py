@@ -83,6 +83,7 @@ def main():
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", default=8080, type=int)
+    commands.add_parser("helper", help="Run the development connector pilot with preprovisioned credentials")
     commands.add_parser("worker")
     commands.add_parser("worker-health")
     commands.add_parser("runtime-binding", help="Print the nonsecret deployment-settings fingerprint for qualification evidence")
@@ -112,6 +113,10 @@ def main():
                 emit({"status": "compatible", "schema_version": db.schema_version})
             finally:
                 db.engine.dispose()
+            return
+        if args.command == "helper":
+            from .connector.helper import main as helper_main
+            helper_main()
             return
         if args.command == "validate":
             bundle, generation = policy.load_bundle(args.path or "config/platform.local.yaml")

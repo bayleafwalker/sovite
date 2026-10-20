@@ -1,7 +1,7 @@
 {
   "format": "sovite-source-release/v1",
-  "version": "0.1.12",
-  "created_at": "2026-10-20T15:08:01.723648+00:00",
+  "version": "0.1.13",
+  "created_at": "2026-10-20T15:23:50.318664+00:00",
   "contents": "Application, configuration, deployment, tests and operating evidence",
   "excluded": [
     "runtime state",
@@ -28,7 +28,7 @@
       "bytes": 9002
     },
     "compose.yaml": {
-      "sha256": "876e65aa32cde565ccae6186831dc47867300a7394d078e9874b945a77699640",
+      "sha256": "b72d885897d66a013900337c35e93f7a1c5cb4f70b9dcd2853857974f065ca1c",
       "bytes": 5242
     },
     "config/codex.mcp.toml": {
@@ -68,7 +68,7 @@
       "bytes": 564
     },
     "deploy/compose/native-codex.yaml": {
-      "sha256": "1f77ab6eab05d898e79007df055cbf590cf1efe0a2a329c28a9d89a586a0168b",
+      "sha256": "091ae2427e83900f7fcedf7f12b432708c546767970d614897ee4428993e2a47",
       "bytes": 1228
     },
     "deploy/compose/native-workspace.yaml": {
@@ -88,7 +88,7 @@
       "bytes": 96
     },
     "deploy/helm/sovite/Chart.yaml": {
-      "sha256": "2584307d727b85d085b8829dede9aecc44107e736ce3919af1e095a53af2d195",
+      "sha256": "c06ce720352b17ad62afcac02303deb0d4deb9501a8ae065205dcf78603a0009",
       "bytes": 199
     },
     "deploy/helm/sovite/templates/_helpers.tpl": {
@@ -132,7 +132,7 @@
       "bytes": 12300
     },
     "deploy/helm/sovite/values.yaml": {
-      "sha256": "0563adf48cbf36b0aaabc53dd453068d600e691510d76ec2074727f45098ed6c",
+      "sha256": "ec0d1cc3c172c7d0fb10b935c9269612f23989e0e207c114f77af8ecccce6619",
       "bytes": 4664
     },
     "deploy/seccomp/sovite-codex-sandbox.json": {
@@ -142,6 +142,10 @@
     "docs/API_CONTRACT.md": {
       "sha256": "0c1b20ee8da1d173cb92c4f165896ca982ed30bbc0fbce6fb306197949d62cf4",
       "bytes": 6831
+    },
+    "docs/CONNECTOR-PROTOCOL.md": {
+      "sha256": "07c77310db36b1d90ea0a9e0730f93b4f1382c9c899ea88eb6cb9d2330361f8f",
+      "bytes": 14474
     },
     "docs/DEPLOYMENT-VALIDATION.json": {
       "sha256": "3dd48ca178cdd8ecb892baeba6cdd04cf8d7c276713fa6342dbd47994fbdb4f8",
@@ -164,8 +168,8 @@
       "bytes": 18028
     },
     "docs/SECURITY.md": {
-      "sha256": "51ee80d3d55a25fccfa61e806fd82e1e46bc6030cea81bf610d6fc73b5e7971c",
-      "bytes": 14713
+      "sha256": "8775056ac8d80b11a775af25e6eea533e3865850bb243ff9b7a385672eb00239",
+      "bytes": 15908
     },
     "docs/STATE-INTEGRATION.json": {
       "sha256": "b7bec815f0f493f7382d8f46899fa1c4bceb9d97d21193e80971ddd85e49f0b5",
@@ -180,12 +184,12 @@
       "bytes": 6150
     },
     "pyproject.toml": {
-      "sha256": "4a457e62588a7e252d31a31c3c3973f6a702829144b35228f63aa8bda65e23c4",
-      "bytes": 791
+      "sha256": "6b46b9f2beddacf5d5744c29dc89704e3ee934e2a2a1316e88a975bcff87f247",
+      "bytes": 813
     },
     "requirements.lock": {
-      "sha256": "010cdf632f3a0e442d6d065dd992830256ea545e1382cc017aa9d50cec497f83",
-      "bytes": 953
+      "sha256": "a1a8e257aca4fb687555e103fc8ae085571c13d680e194c29a6d4c2b9c7ff1a8",
+      "bytes": 972
     },
     "scripts/build_seccomp_profile.py": {
       "sha256": "ecd9c334944939fb6ccdf3e9525c8ba27d92c42906bd43707bb77547337d7f6b",
@@ -212,7 +216,7 @@
       "bytes": 2548
     },
     "scripts/package_release.py": {
-      "sha256": "10e1f9c9b69ac5263015040cf09cb2bf8232c1a9d8a5733b464e614964706bb7",
+      "sha256": "8b942c09cf8901cf11bf4d18568ed0d2af355dbafd4d24ce08c612fd6ebb5505",
       "bytes": 3956
     },
     "scripts/qualify_kubernetes.py": {
@@ -228,7 +232,7 @@
       "bytes": 5048
     },
     "sovite/__init__.py": {
-      "sha256": "652af92093f487c421ab3a6c3a62fc10b0c6576b032a0957a9bb98923ae15c95",
+      "sha256": "5366e98ee2f3dcd24b7b11501859c13f57c6761f784d15c6ddb41612f185e6ef",
       "bytes": 65
     },
     "sovite/adapters.py": {
@@ -236,12 +240,32 @@
       "bytes": 21002
     },
     "sovite/api.py": {
-      "sha256": "f7c300abcf8ec65ba11074be1554b840074b93d566c8395d834a9d165baee5b3",
+      "sha256": "57fe5be247ed03eceabc9395bce03d44e28e9332e27b1a340fcdeacaa0abc9bd",
       "bytes": 23051
     },
     "sovite/cli.py": {
-      "sha256": "d7a93f5c3075f6cf8a312b6dfb201315d1d394fc96b2922d87c1fc772690f3e2",
-      "bytes": 10889
+      "sha256": "5106bd1ab9959110dd32a9f99f0e96d80e779a06987cdd6a77da21636187888b",
+      "bytes": 11143
+    },
+    "sovite/connector/__init__.py": {
+      "sha256": "27011492ea1ae0a786f60c46b2c327d836dc1785dc648ac0c07e7fcc2fa4e1d9",
+      "bytes": 238
+    },
+    "sovite/connector/canonical.py": {
+      "sha256": "ae473f5423a89210881901e53d3adcd1efa9be8c8c0f256e492d7e018759d85f",
+      "bytes": 5537
+    },
+    "sovite/connector/helper.py": {
+      "sha256": "7718b10f075583ecbbdf6c86efa02e953d6e1006e30fa092f7061eeb05e5a7d4",
+      "bytes": 28624
+    },
+    "sovite/connector/identity.py": {
+      "sha256": "c89813da593126740d061463145474e7ff4b54358b4889a9d837d18a04ad63d6",
+      "bytes": 9005
+    },
+    "sovite/connector/protocol.py": {
+      "sha256": "b40092c53fbfa5c2ca6bc3a259ecdae928fe3f5e881f6e00be04fe3b10d5badc",
+      "bytes": 15702
     },
     "sovite/db.py": {
       "sha256": "f0134e11ae52f8e683ca7bfb727953c662e9352652894acd60ae3f140e991901",
@@ -291,9 +315,25 @@
       "sha256": "bb0dc1a21b6b509ddd70fb6c7c87524f96dcbf8fb66a51412c3b35fb4a739517",
       "bytes": 14154
     },
+    "tests/connector_support.py": {
+      "sha256": "14ec499a1b3ea3fc58d0f82591c6603d6ab978ab9294c0afb830eaa6f6c17f96",
+      "bytes": 2903
+    },
     "tests/test_backend.py": {
       "sha256": "2c651f6533a985f6ce7f4343469148201726d962090eafdd786ba54a6b85886b",
       "bytes": 35692
+    },
+    "tests/test_connector_helper.py": {
+      "sha256": "72293fd15dad00872eb1c1afd4db0a106412d610d7c4c40c7c3f1ee61a3689f1",
+      "bytes": 39499
+    },
+    "tests/test_connector_identity.py": {
+      "sha256": "d4c546a1b140e73571dadc68a7be85eb67c5f053ec5333f23ee01215fb061e23",
+      "bytes": 11204
+    },
+    "tests/test_connector_protocol.py": {
+      "sha256": "63d8d6229a3e5b8f30334f8752e2df5d978b7ea230c302207007e1628fdef3da",
+      "bytes": 11732
     },
     "tests/test_deployment.py": {
       "sha256": "3eac4d12fbfd7764973d1f042d9597f0e092fc583542998afdb79cba31b44761",
@@ -310,6 +350,10 @@
     "tests/test_policy_v1alpha2.py": {
       "sha256": "474ac9fe17fe5b777a8b804cbbb1dfdcc461c39db656919988a90757bfb49435",
       "bytes": 20858
+    },
+    "tests/vectors/connector-v1.json": {
+      "sha256": "11a06932cde91adb45b5f40a019f4d4fcfca8604328fbd2b74af5c87ccd46e54",
+      "bytes": 11714
     }
   }
 }
