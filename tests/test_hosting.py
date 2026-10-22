@@ -102,7 +102,7 @@ def resign(row, settings, role):
 
 def deny_dispatch(platform):
     with pytest.raises(PlatformError):
-        platform.submit("incident-forensics", "PRIVATE", "cloud-codex", "denied")
+        platform.submit("incident-forensics", "PRIVATE", "cloud-codex", "denied", input_class="C1")
 
 
 def test_hosted_compile_and_exported_schema(hosted):
@@ -112,6 +112,50 @@ def test_hosted_compile_and_exported_schema(hosted):
     assert load_envelope(settings.hosting_envelope_path) == envelope
     assert platform.active()[1] == compile_bundle(bundle, envelope)[1] != policy.bundle_generation(bundle)
     deny_dispatch(platform)
+
+
+
+def test_native_harness_binds_installed_hosting_envelope(hosted, monkeypatch, tmp_path):
+    from sovite.adapters import AdapterRunner
+    from sovite.harness_api import create_app as create_harness
+
+    settings, _, bundle, envelope = hosted
+    for model in bundle["models"]:
+        model["wire_api"] = "responses"
+    for harness in bundle["harnesses"]:
+        harness["kind"] = "native-codex"
+    envelope["harnesses"] = copy.deepcopy(bundle["harnesses"])
+    Path(settings.bundle_path).write_text(yaml.safe_dump(bundle))
+    Path(settings.hosting_envelope_path).write_text(json.dumps(envelope))
+    generation = compile_bundle(bundle, envelope)[1]
+    agent_id = bundle["agents"][0]["id"]
+    executions = []
+
+    async def fake_native(self, recipe, task, job_id, *, isolated=False):
+        executions.append((recipe["generation"], task, job_id, isolated))
+        return {"answer": "HOSTED TEST RESULT"}
+
+    monkeypatch.setattr(AdapterRunner, "run_native", fake_native)
+    monkeypatch.setenv("SOVITE_BUNDLE_PATH", settings.bundle_path)
+    monkeypatch.setenv("SOVITE_HOSTING_ENVELOPE", settings.hosting_envelope_path)
+    monkeypatch.setenv("SOVITE_HARNESS_AGENT_ID", agent_id)
+    monkeypatch.setenv("SOVITE_HARNESS_TOKEN", CALLER)
+    monkeypatch.setenv("SOVITE_HARNESS_STATE_PATH", str(tmp_path / "native"))
+    body = {"task_id": "hosted-task", "agent_id": agent_id,
+            "configuration_revision": generation, "input": {"task": "inspect"}}
+    headers = {"Authorization": "Bearer " + CALLER, "Idempotency-Key": "hosted-task"}
+    stale_envelope = {**envelope, "revision": envelope["revision"] + 1}
+    with TestClient(create_harness()) as client:
+        for mismatch in (policy.bundle_generation(bundle), compile_bundle(bundle, stale_envelope)[1]):
+            wrong = {**body, "configuration_revision": mismatch}
+            assert client.post("/run", headers=headers, json=wrong).json() == {"code": "binding_mismatch"}
+            cancel = {key: value for key, value in wrong.items() if key != "input"}
+            assert client.post("/cancel", headers=headers, json=cancel).status_code == 409
+        assert executions == []
+        response = client.post("/run", headers=headers, json=body)
+        assert response.status_code == 200
+        assert response.json() == {"answer": "HOSTED TEST RESULT"}
+    assert executions == [(generation, "inspect", "hosted-task", True)]
 
 
 @pytest.mark.parametrize("field", ["input_class", "output_class", "telemetry_class", "receipt_class", "caller_clearance"])
@@ -190,7 +234,7 @@ def test_single_role_refuses_dispatch(hosted, role):
         assert current_qualification(session, settings, row.generation) is None
     deny_dispatch(platform)
     qualify(hosted, "tenant" if role == "platform" else "platform")
-    assert platform.submit("incident-forensics", "fixture", "cloud-codex", "qualified").generation == row.generation
+    assert platform.submit("incident-forensics", "fixture", "cloud-codex", "qualified", input_class="C1").generation == row.generation
 
 
 @pytest.mark.parametrize("signer,claimed", [("tenant", "platform"), ("platform", "tenant")])
@@ -347,7 +391,7 @@ def test_signed_import_export_roundtrip_without_runtime_private_keys(hosted, tmp
         assert json.loads(output.read_text()) == json.loads(path.read_text())
         with pytest.raises(ValueError, match="already"):
             import_qualification(platform.db, settings, generation, str(path))
-    assert platform.submit("incident-forensics", "test", "cloud-codex", "roundtrip")
+    assert platform.submit("incident-forensics", "test", "cloud-codex", "roundtrip", input_class="C1")
 
 
 @pytest.mark.parametrize("change", ["signature", "public_key_id", "workspace", "role", "runtime_binding", "generation", "hosting", "profile", "evidence", "unknown", "expires_at"])
@@ -396,13 +440,13 @@ def test_revocation_rechecked_at_claim_and_release(hosted):
     settings, platform, _, _ = hosted
     qualify(hosted, "platform")
     tenant = qualify(hosted, "tenant")
-    first = platform.submit("incident-forensics", "private", "cloud-codex", "first")
+    first = platform.submit("incident-forensics", "private", "cloud-codex", "first", input_class="C1")
     settings.qualification_revoked_keys = [key_digest(tenant.public_key)]
     worker = Worker(platform)
     assert worker.claim() is None
     assert platform.get_job(first.id).status == "blocked"
     settings.qualification_revoked_keys = []
-    second = platform.submit("incident-forensics", "private", "cloud-codex", "second")
+    second = platform.submit("incident-forensics", "private", "cloud-codex", "second", input_class="C1")
     assert worker.claim().id == second.id
     artifact = platform.store.put(second.id, {"private": "result"})
     settings.qualification_revoked_keys = [key_digest(tenant.public_key)]

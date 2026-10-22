@@ -1,6 +1,6 @@
 # Sovite — a provisioned platform for mixed model and agent estates
 
-19 October 2026 · revised from the Tulli proposal
+19 October 2026 · revised from the Tulli proposal; class-aware delivery and subscription bindings updated 22 October 2026
 
 ## Product decision
 
@@ -22,7 +22,7 @@ The display name is configurable. The source package, command and environment pr
 
 Sovite assembles a mixed agent estate from replaceable packages and owns the resolved deployment and operating contract. It keeps the native harness visible, treats information placement as a first-class constraint, and gives operators a complete workflow for installing, changing, observing and recovering the system.
 
-A cloud caller can keep its native Codex environment. It delegates a bounded task through MCP to a private agent whose model, tools, execution and state remain within the approved environment. The private result is available to an authenticated operator. The caller receives an independent receipt and a small status vocabulary.
+A caller can keep its native environment and delegate a bounded task through MCP. Installed grants select the agent, model, tools, execution and state destinations. These bindings can use private or public model services where the declared data class permits the crossing; restricted inputs require private-boundary inference. The caller receives an independent receipt and can receive content only under the installed result contract, output class and current reader authority.
 
 A specialist Kubernetes agent is another package in the same installation. Its model can be fine-tuned or general-purpose, and its harness can be independently developed. The platform records the actual combination, restricts its declared tool authority and directs work to its configured compute pool. Model competence remains something to establish against the intended task.
 
@@ -34,7 +34,7 @@ Some layers remain coupled by their interfaces. A model's tool behavior affects 
 
 | Package or binding | Independently configured content | Compatibility that must remain explicit |
 | --- | --- | --- |
-| Model | Identifier, content digest, model name, parameters and identity endpoint | Context requirements, tool behavior, reasoning behavior and intended task quality |
+| Model | Identifier, model name, parameters and supported content or provider-service identity | Context requirements, tool behavior, reasoning behavior and intended task quality; provider identity does not prove immutable weights |
 | Serving | Adapter, protocol, endpoint and destination | Streaming and continuation semantics; model identity behind the endpoint |
 | Harness | Kind, image/digest, version, capability declarations and service interface | Native tools, state lifecycle, cancellation and provider protocol |
 | Agent | Harness/model references, instructions, allowed tools and execution bounds | The actual procedure and authority available to the agent |
@@ -49,14 +49,14 @@ Model weights remain in the serving system's managed cache or provisioned model 
 ```mermaid
 flowchart TD
     Git["Reviewed configuration"] --> Control["Control plane and qualification"]
-    Caller["Native cloud caller"] --> Receipt["MCP receipt interface"]
+    Caller["Native caller"] --> Receipt["MCP and scoped results"]
     Receipt --> Control
     Operator["Private operator console"] --> Control
     Control --> Queue["Durable jobs and grants"]
     Queue --> Worker["Bound compute pool"]
     Worker --> Diagnostic["Bounded diagnostic harness"]
     Worker --> Native["Isolated native harness"]
-    Diagnostic --> Model["Private model serving"]
+    Diagnostic --> Model["Policy-selected model service"]
     Native --> Model
     Diagnostic --> Tools["Scoped production tools"]
     Worker --> Artifacts["Private artifacts"]
@@ -75,9 +75,9 @@ The implementation uses a shared database-backed job queue and transactional sta
 
 ### Execution plane
 
-Ollama provides local model serving. The diagnostic harness implements a bounded tool-calling procedure over configured model endpoints and an explicit tool allowlist. The native Codex harness runs the maintained CLI in a separate service with a fixed agent and provider binding, its own small durable execution ledger and no control-plane database, artifact or operator credentials.
+Ollama provides local model serving. The diagnostic harness implements a bounded tool-calling procedure over configured model endpoints and an explicit tool allowlist. Fixed native services support Codex, Claude Code and OpenCode, with explicit provider and credential bindings, their own small durable execution ledger and no control-plane database, artifact or operator credentials. New subscription and Go launchers produce answers in fresh task directories with native tools denied; they do not yet provide a repository editing session.
 
-The agent's `max_steps` setting bounds iterations in the diagnostic `tool-agent` harness. Native Codex retains its own internal task loop; Sovite bounds that execution with service and job timeouts, lease renewal and cancellation. Sovite does not enforce a native CLI turn count.
+The agent's `max_steps` setting bounds iterations in the diagnostic `tool-agent` harness. Native CLIs retain their own internal task loops; Sovite bounds execution with service and job timeouts, lease renewal, bounded output and process-group cancellation. Sovite does not enforce a native CLI turn count.
 
 An external agent can implement the HTTP task contract and retain its own internal harness. It receives a task identity, fixed agent identity, configuration revision and task input. Configuration-selected endpoints, authentication references and cancellation behavior remain explicit. Completed output returns to the private worker; the public caller never receives the external agent's internal task interface.
 
@@ -107,9 +107,11 @@ The release accepts strict `PlatformBundle` schemas `sovite.platform/v1alpha1` a
 | Grant | Authorize particular callers and an agent at particular classes and sites |
 | Profile | Describe the composition of an installed environment |
 
-The reference class ladder is C0 public, C1 operational metadata, C2 confidential and C3 restricted production data. Tool results can raise the effective context class. The output declaration must dominate the input and tool-result classes. The model, compute and private state destinations must be cleared for that context. Each tool must also be permitted to receive the agent's arguments.
+The reference class ladder is C0 public, C1 operational metadata, C2 confidential and C3 restricted production data. An omitted job or workflow `input_class` selects the highest-ranked installed class. Tool results can raise the effective context class. The output declaration must dominate the input and tool-result classes. The model, compute and state destinations must be cleared for that context. Each tool must also be permitted to receive the agent's arguments. A destination's explicit `boundary` is `private` or `public`; omission derives private for local/private kinds and public for cloud. Restricted inference requires a private boundary as well as sufficient clearance.
 
-This release supports a reference return contract. The caller receives only a server-generated receipt and a fixed status. Typed field declassification and prose return contracts are separate future capabilities; they are not enabled by accepting a label in configuration.
+The `reference` return contract preserves the receipt and fixed-status projection. The `class-aware` contract permits content only when the declared output class fits the caller's clearance and current authority. Exact `result_readers` identities give orchestration or review roles scoped access to an artifact without operator-wide access; a receipt alone grants no such authority. Every read checks the producing job's current generation, qualification, inhibits and artifact identity, including a second authority check after storage I/O.
+
+An installed `output_contracts` entry can authorize a specific class reduction or private-to-public transfer. Its approver records a decision over an exact source artifact digest, exact output bytes, contract revision, permitted destinations and pinned evidence references. A downstream role receives only those approved bytes through the declared transfer. The API records and enforces this approval; it does not establish that a transformation is safe from an agent's class label or self-assessment. See [the API contract](API_CONTRACT.md#approved-output-and-declassification) and [delivery workflows](WORKFLOWS.md) for the concrete admission and transfer contracts.
 
 ```yaml
 apiVersion: sovite.platform/v1alpha1
@@ -161,9 +163,9 @@ Effective context is the maximum rank of the grant input, declared output and **
 
 Retention is required on every declared destination, including unreferenced destinations. For provider inference, the declaration covers both helper and upstream provider. Cache scope, lifetime and cleanup flags are qualified operational declarations, not evidence that cleanup occurs; accepting YAML does not implement or qualify a cache. No persistent context or prompt/response logging is permitted for inference.
 
-Gateway models cannot carry worker-selectable `endpoint`, `base_url`, `api_key_env`, `credential` or worker `tls_trust` configuration. Legacy `digest`, `identity_protocol` and `identity_endpoint` cannot coexist with the new gateway identity. An Ollama manifest digest is not a weight-file hash. Tool-agent bindings require Chat; native Codex requires an OpenAI-compatible Responses binding, including `agent-http` harnesses declaring the `native-codex` capability. No protocol translation is implied. Connector roles pin helper and engine images in both modes.
+Gateway models cannot carry worker-selectable `endpoint`, `base_url`, `api_key_env`, `credential` or worker `tls_trust` configuration. Legacy `digest`, `identity_protocol` and `identity_endpoint` cannot coexist with the new gateway identity. An Ollama manifest digest is not a weight-file hash. Tool-agent bindings require Chat; the local Codex route requires an OpenAI-compatible Responses binding, including `agent-http` harnesses declaring the `native-codex` capability. The separate `codex-subscription` route uses native ChatGPT authentication and exact model selection. No protocol translation is implied. Connector roles pin helper and engine images in both modes.
 
-The migration reader accepts direct Ollama/OpenAI-compatible endpoints in v1alpha2 **development mode only**, using the legacy identity fields. New gateway identity/deadline fields without a connection are rejected. Enforced v1alpha2 requires gateway connections on every binding, including disabled or unused bindings. v1alpha1 behavior is preserved.
+The migration reader accepts direct Ollama/OpenAI-compatible endpoints in v1alpha2 **development mode only**, using the legacy identity fields. New gateway identity/deadline fields without a connection are rejected. Enforced v1alpha2 requires gateway connections for those local/generic bindings. Explicit `codex-subscription`, `claude-subscription` and `opencode-go` bindings are also supported in self-hosted enforced installations with public-boundary destinations and the corresponding native or Go adapter. They declare provider/model service identity and do not claim verified immutable model weights. The narrower service-only hosting envelope still permits internal model-gateway connections only. See [subscription authentication and native limits](API_CONTRACT.md#native-authentication-and-provider-selection).
 
 Availability waiting uses the strict bundle-wide rule: when any v1alpha2 model declares a gateway connection, **every** grant must provide `availability_wait_seconds`, including disabled grants and grants targeting a development legacy binding. Omitted `on_outage` is treated as queue for this validation requirement, without inserting a value. There is no fallback or provisioning action.
 
@@ -179,7 +181,7 @@ Binding state is separate from bundle `models[].enabled` and observed availabili
 
 The public receipt is independent from the private job identity. It is not a bearer capability for reading the artifact. Receipt lookups authenticate the caller and recheck current authority. The operator interface requires a separate role and can access private results inside the approved operator environment.
 
-The receipt interface implements an explicit MCP method and tool allowlist. It does not expose private task-result methods, resources, sampling, arbitrary notifications or model-generated errors. Reference-only behavior applies to all supported outward result paths. A transport task handle is not assumed to be a safe receipt: task protocols can carry full results and other payloads.
+The MCP interface implements an explicit method and tool allowlist, including class-aware task projections and the scoped `read_result` tool. It does not expose arbitrary resources, sampling, notifications or model-generated errors. Reference contracts retain the original two-field receipt/status projection. Content release requires the installed class-aware or scoped-reader authority; an external provider's task handle is never treated as a Sovite read credential.
 
 Each enforcement point has its own duty. Application checks bind identity and current grants. The artifact store holds private bodies. The native service isolates its execution identity from the control plane. Kubernetes network rules constrain reachable destinations. Qualification verifies trusted evidence over declared and runtime bindings. These duties complement one another; a signature does not enforce networking and a network rule does not authorize a receipt.
 
@@ -189,11 +191,11 @@ Bounded statuses still carry information through existence and timing. Receipt-o
 
 ## End-to-end operating workflows
 
-### Native caller delegates private work
+### Native caller delegates classified work
 
 The caller submits a task under an allowed grant. Admission checks identity, current class constraints, runtime inhibits and qualification. The control plane creates an idempotent durable job and a separate receipt. A worker claims it in the configured pool and rechecks authority before outbound model or tool requests.
 
-The agent runs against the private model and declared tools. The worker persists the full artifact and its content hash. A transaction then rechecks current authority, records the public projection and appends audit events. Only after that transaction can an available receipt be observed. The operator opens the full artifact through the private API.
+The agent runs against the installed model and declared tools under the permitted information boundary. The worker persists the full artifact and its content hash. A transaction then rechecks current authority, records the result projection and appends audit events. Only after that transaction can an available result be observed. Operators can open the artifact through the operator API; callers and scoped readers receive content only through their currently authorized result contract. Class reduction or a private-to-public workflow transfer requires a recorded output approval over the exact content.
 
 The recorded event means release was authorized and persisted. It does not assert that a remote client received a particular network response.
 

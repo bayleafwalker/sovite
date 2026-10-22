@@ -1,0 +1,597 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:sovite:delivery-workflow:v1alpha1",
+  "title": "DeliveryWorkflow",
+  "$defs": {
+    "revision_ref": {
+      "type": "object",
+      "required": [
+        "owner",
+        "resource_id",
+        "revision",
+        "content_digest"
+      ],
+      "properties": {
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\s\\x00-\\x1f\\x7f](?:[^\\x00-\\x1f\\x7f]*[^\\s\\x00-\\x1f\\x7f])?$(?!\\n)"
+        },
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\s\\x00-\\x1f\\x7f](?:[^\\x00-\\x1f\\x7f]*[^\\s\\x00-\\x1f\\x7f])?$(?!\\n)"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\s\\x00-\\x1f\\x7f](?:[^\\x00-\\x1f\\x7f]*[^\\s\\x00-\\x1f\\x7f])?$(?!\\n)"
+        },
+        "content_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$(?!\\n)"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "id",
+    "mode",
+    "planner",
+    "roles",
+    "implementation",
+    "completion",
+    "transfers"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "sovite.dev/v1alpha1"
+    },
+    "kind": {
+      "const": "DeliveryWorkflow"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16000,
+      "pattern": "\\S"
+    },
+    "mode": {
+      "enum": [
+        "coordinated",
+        "direct"
+      ]
+    },
+    "planner": {
+      "type": "object",
+      "required": [
+        "mode",
+        "finite"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "external",
+            "none"
+          ]
+        },
+        "finite": {
+          "const": true
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+        },
+        "required_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "uniqueItems": true,
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "output_contract": {
+          "const": "requirements-release"
+        },
+        "interaction": {
+          "enum": [
+            "interactive",
+            "decision-records"
+          ]
+        },
+        "discovery_roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "uniqueItems": true,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "roles": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 37,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "grant"
+        ],
+        "properties": {
+          "grant": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "input_class": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "requirements-driven"
+        }
+      },
+      "additionalProperties": false
+    },
+    "decomposition": {
+      "type": "object",
+      "required": [
+        "unit",
+        "dependencies"
+      ],
+      "properties": {
+        "unit": {
+          "const": "coherent-sections"
+        },
+        "dependencies": {
+          "const": "explicit"
+        }
+      },
+      "additionalProperties": false
+    },
+    "product_decisions": {
+      "type": "object",
+      "required": [
+        "blocked_work",
+        "unaffected_work",
+        "target"
+      ],
+      "properties": {
+        "blocked_work": {
+          "const": "pause"
+        },
+        "unaffected_work": {
+          "const": "continue"
+        },
+        "target": {
+          "enum": [
+            "interactive",
+            "decision-records"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "inline",
+        "holistic"
+      ],
+      "properties": {
+        "model_diversity": {
+          "enum": [
+            "preferred",
+            "required",
+            "none"
+          ]
+        },
+        "inline": {
+          "type": "object",
+          "required": [
+            "independent",
+            "acceptance_basis",
+            "derive_before_candidate",
+            "max_substantive_failures",
+            "nits_nonblocking_after_pass"
+          ],
+          "properties": {
+            "independent": {
+              "const": true
+            },
+            "acceptance_basis": {
+              "const": "requirements"
+            },
+            "derive_before_candidate": {
+              "const": true
+            },
+            "max_substantive_failures": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "description": "Escalate on this many reviews with substantive failures, including the initial review if it fails."
+            },
+            "nits_nonblocking_after_pass": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2,
+              "description": "Nits become nonblocking from this review pass; this does not relax substantive acceptance."
+            }
+          },
+          "additionalProperties": false
+        },
+        "holistic": {
+          "type": "object",
+          "required": [
+            "independent",
+            "scope"
+          ],
+          "properties": {
+            "independent": {
+              "const": true
+            },
+            "scope": {
+              "const": "candidate"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "escalation": {
+      "type": "object",
+      "required": [
+        "target"
+      ],
+      "properties": {
+        "target": {
+          "enum": [
+            "block_queue",
+            "interactive_orchestrator"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "completion": {
+      "type": "object",
+      "required": [
+        "route"
+      ],
+      "properties": {
+        "route": {
+          "enum": [
+            "return",
+            "human_review",
+            "interactive_orchestrator",
+            "merge"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "domains": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "procedures",
+          "required_evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "procedures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/revision_ref"
+            },
+            "uniqueItems": true,
+            "maxItems": 100
+          },
+          "required_evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "stage",
+                "description"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+                },
+                "stage": {
+                  "enum": [
+                    "implementation",
+                    "inline_review",
+                    "holistic_review",
+                    "completion"
+                  ]
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16000,
+                  "pattern": "\\S"
+                }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "maxItems": 32
+    },
+    "transfers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "from_role",
+          "target"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "from_role": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "target": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "role"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "role"
+                  },
+                  "role": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "destination"
+                ],
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "repository-candidate",
+                      "vuoro-finding"
+                    ]
+                  },
+                  "destination": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          },
+          "output_contract": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          }
+        },
+        "additionalProperties": false
+      },
+      "maxItems": 200
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "coordinated"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "review",
+          "escalation",
+          "decomposition",
+          "product_decisions"
+        ],
+        "properties": {
+          "roles": {
+            "required": [
+              "orchestrator",
+              "implementer",
+              "inline_reviewer",
+              "holistic_reviewer"
+            ]
+          },
+          "completion": {
+            "properties": {
+              "route": {
+                "enum": [
+                  "human_review",
+                  "interactive_orchestrator",
+                  "merge"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "direct"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "planner": {
+            "properties": {
+              "mode": {
+                "const": "none"
+              }
+            }
+          },
+          "roles": {
+            "required": [
+              "implementer"
+            ],
+            "maxProperties": 1
+          },
+          "completion": {
+            "properties": {
+              "route": {
+                "enum": [
+                  "return",
+                  "human_review",
+                  "interactive_orchestrator"
+                ]
+              }
+            }
+          }
+        },
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "review"
+              ]
+            },
+            {
+              "required": [
+                "decomposition"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "planner": {
+            "properties": {
+              "mode": {
+                "const": "external"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "planner": {
+            "required": [
+              "role",
+              "required_inputs",
+              "output_contract",
+              "interaction"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "planner": {
+            "properties": {
+              "mode": {
+                "const": "none"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "planner": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "role"
+                  ]
+                },
+                {
+                  "required": [
+                    "required_inputs"
+                  ]
+                },
+                {
+                  "required": [
+                    "output_contract"
+                  ]
+                },
+                {
+                  "required": [
+                    "interaction"
+                  ]
+                },
+                {
+                  "required": [
+                    "discovery_roles"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

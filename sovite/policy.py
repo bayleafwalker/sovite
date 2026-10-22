@@ -17,6 +17,9 @@ from urllib.parse import urlsplit
 import yaml
 from jsonschema import Draft202012Validator
 
+from .flow import (FlowError, check_destination, check_role_input, resolve_input_class,
+                   validate_output_contracts)
+
 
 class PolicyError(ValueError):
     """A bounded, caller-safe denial. Details belong in operator validation."""
@@ -36,8 +39,26 @@ class PolicyError(ValueError):
 
 ID = {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\n)"}
 TEXT = {"type": "string", "maxLength": 16000}
+REF_TEXT = {"type": "string", "minLength": 1, "maxLength": 2048,
+            "pattern": r"^[^\s\x00-\x1f\x7f](?:[^\x00-\x1f\x7f]*[^\s\x00-\x1f\x7f])?$(?!\n)"}
 DIGEST = {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$(?!\n)"}
 REFS = {"type": "array", "items": ID, "uniqueItems": True, "maxItems": 100}
+ENV_NAME = {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,95}$"}
+NATIVE_HARNESSES = {"native-codex", "native-claude", "native-opencode"}
+SUBSCRIPTION_HARNESSES = {"codex-subscription": "native-codex", "claude-subscription": "native-claude"}
+SUBSCRIPTION_HOSTS = {"codex-subscription": {"chatgpt.com", "auth.openai.com"},
+                      "claude-subscription": {"api.anthropic.com"}}
+GO_ENDPOINT = "https://opencode.ai/inference/go/openai/v1"
+
+
+def native_harness_kind(harness: dict) -> str | None:
+    """Resolve a fixed native runtime without accepting caller-selected executables."""
+    if harness["kind"] in NATIVE_HARNESSES:
+        return harness["kind"]
+    matches = NATIVE_HARNESSES.intersection(harness.get("capabilities", [])) if harness["kind"] == "agent-http" else set()
+    if len(matches) > 1:
+        raise PolicyError("invalid_bundle", "An external harness must name exactly one native runtime capability.")
+    return next(iter(matches), None)
 
 
 def obj(required: list[str], properties: dict) -> dict:
@@ -49,20 +70,28 @@ def named(required: list[str], properties: dict) -> dict:
     return obj(["id", *required], {"id": ID, "name": TEXT, "description": TEXT, **properties})
 
 
+REVISION_REF_SCHEMA = obj(
+    ["owner", "resource_id", "revision", "content_digest"],
+    {"owner": REF_TEXT, "resource_id": REF_TEXT, "revision": REF_TEXT,
+     "content_digest": DIGEST},
+)
+
+
 DEFINITIONS = {
     "data_classes": named(["rank"], {"rank": {"type": "integer", "minimum": 0, "maximum": 100}}),
     "destinations": named(["clearance", "kind"], {
         "clearance": ID, "kind": {"enum": ["local", "private", "cloud"]},
+        "boundary": {"enum": ["private", "public"]},
         "allowed_hosts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 253}, "uniqueItems": True},
     }),
     "models": named(["adapter", "model", "destination"], {
-        "adapter": {"enum": ["demo", "ollama", "openai-compatible"]},
+        "adapter": {"enum": ["demo", "ollama", "openai-compatible", "codex-subscription", "claude-subscription", "opencode-go"]},
         "endpoint": {"type": "string", "minLength": 1, "maxLength": 2048},
         "model": {"type": "string", "minLength": 1, "maxLength": 512},
         "digest": DIGEST, "destination": ID,
         "wire_api": {"enum": ["chat", "responses"]},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
-        "identity_protocol": {"enum": ["ollama"]},
+        "identity_protocol": {"enum": ["ollama", "native-subscription", "provider-service"]},
         "identity_endpoint": {"type": "string", "maxLength": 2048},
         "api_key_env": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,95}$"},
         "tls_trust": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
@@ -78,13 +107,17 @@ DEFINITIONS = {
         }),
     }),
     "harnesses": named(["kind"], {
-        "kind": {"enum": ["demo", "tool-agent", "native-codex", "agent-http"]},
+        "kind": {"enum": ["demo", "tool-agent", "native-codex", "native-claude", "native-opencode", "agent-http"]},
         "image": TEXT, "digest": DIGEST, "version": TEXT,
         "capabilities": REFS, "endpoint": TEXT,
         "cancel_endpoint": TEXT,
         "api_key_env": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,95}$"},
         "executable": {"type": "string", "minLength": 1, "maxLength": 512},
         "idempotent": {"type": "boolean"},
+        "authentication": obj(["mode"], {
+            "mode": {"const": "subscription"},
+            "credential_file_env": ENV_NAME, "credential_env": ENV_NAME,
+        }),
     }),
     "tools": named(["kind", "input_class", "output_class", "destination", "allowed_operations"], {
         "kind": {"enum": ["http-json", "kubernetes-read"]},
@@ -114,7 +147,9 @@ DEFINITIONS = {
         "agent": ID, "callers": REFS, "input_class": ID, "output_class": ID,
         "compute": ID, "state_destination": ID, "telemetry_destination": ID,
         "telemetry_class": ID, "receipt_class": ID, "caller_clearance": ID,
-        "return_contract": {"const": "reference"}, "enabled": {"type": "boolean"},
+        "return_contract": {"enum": ["reference", "class-aware"]}, "enabled": {"type": "boolean"},
+        "result_readers": REFS,
+        "workflow_only": {"type": "boolean"},
         "on_outage": {"const": "queue"},
         "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
@@ -134,6 +169,14 @@ SCHEMA = {
             "metadata": obj(["name", "display_name"], {"name": ID, "display_name": TEXT,
                               "description": TEXT, "version": TEXT}),
             "mode": {"enum": ["development", "enforced"]},
+            "restricted_class": ID,
+            "output_contracts": {"type": "array", "maxItems": 100, "items": named(
+                ["source_class", "output_class", "destinations", "approvers", "procedure_ref"], {
+                    "source_class": ID, "output_class": ID,
+                    "destinations": {**REFS, "minItems": 1},
+                    "approvers": {**REFS, "minItems": 1},
+                    "procedure_ref": REVISION_REF_SCHEMA,
+                })},
             "default_profile": ID,
             **{key: {"type": "array", "items": definition, "maxItems": 1000}
                for key, definition in DEFINITIONS.items()},
@@ -236,8 +279,9 @@ def validate_bundle(bundle: dict) -> dict:
             _fail(f"{source}: unresolved {section} reference {key}")
         return idx[section][key]
 
-    if v2:
+    if "restricted_class" in bundle:
         ref("data_classes", bundle["restricted_class"], "restricted_class")
+    if v2:
         for role in bundle["connector_roles"]:
             ref("destinations", role["destination"], role["id"])
 
@@ -259,10 +303,32 @@ def validate_bundle(bundle: dict) -> dict:
                 _fail(f"{dst['id']}: destination hosts must be exact hosts; no wildcard egress")
     for model in bundle["models"]:
         dest = ref("destinations", model["destination"], model["id"])
+        subscription = model["adapter"] in SUBSCRIPTION_HARNESSES
+        go = model["adapter"] == "opencode-go"
+        if subscription:
+            if model.get("identity_protocol") != "native-subscription":
+                _fail(f"{model['id']}: subscription models require explicit native-subscription identity semantics")
+            if any(field in model for field in ("endpoint", "api_key_env", "digest", "identity_endpoint", "tls_trust", "wire_api", "connection", "identity")):
+                _fail(f"{model['id']}: subscription model selection cannot carry API routing, API credentials or a weights digest")
+            if dest["kind"] != "cloud" or dest.get("boundary", "public") != "public":
+                _fail(f"{model['id']}: native subscription inference requires a declared cloud destination")
+        elif model.get("identity_protocol") == "native-subscription":
+            _fail(f"{model['id']}: native-subscription identity requires a subscription adapter")
+        if go:
+            if model.get("identity_protocol") != "provider-service" or model.get("digest") or model.get("identity_endpoint"):
+                _fail(f"{model['id']}: OpenCode Go requires provider-service identity, not an immutable weights digest")
+            if model.get("endpoint", "").rstrip("/") not in {GO_ENDPOINT, GO_ENDPOINT + "/chat/completions"}:
+                _fail(f"{model['id']}: OpenCode Go requires its declared Go service endpoint")
+            if not model.get("api_key_env") or model.get("wire_api", "chat") != "chat" or dest["kind"] != "cloud" or dest.get("boundary", "public") != "public":
+                _fail(f"{model['id']}: OpenCode Go requires an explicit Go key, chat API and cloud destination")
+        elif model.get("identity_protocol") == "provider-service":
+            _fail(f"{model['id']}: provider-service identity is supported only for the OpenCode Go adapter")
         if v2:
             if any(dest["retention"][field] for field in ("prompt_logging", "response_logging", "persistent_context")):
                 _fail(f"{model['id']}: inference retention requires prompt_logging, response_logging and persistent_context false (including upstream providers)")
             if "connection" in model:
+                if model["adapter"] not in {"ollama", "openai-compatible"}:
+                    _fail(f"{model['id']}: this adapter does not support a model-gateway connection")
                 role = ref("connector_roles", model["connection"]["enrollment_role"], model["id"])
                 # EXACT_BINDING: the helper role cannot redirect the declared placement.
                 if role["destination"] != model["destination"]:
@@ -283,10 +349,14 @@ def validate_bundle(bundle: dict) -> dict:
                 if any(model[field] > model["timeout_seconds"] for field in ("first_token_timeout_seconds", "cancel_bound_seconds")):
                     _fail(f"{model['id']}: first-token timeout and cancel bound cannot exceed timeout_seconds")
                 continue
-            if bundle["mode"] == "enforced":
+            if bundle["mode"] == "enforced" and not (subscription or go):
                 _fail(f"{model['id']}: enforced v1alpha2 requires a model-gateway connection; direct endpoints are development-only")
             if any(field in model for field in ("identity", "first_token_timeout_seconds", "cancel_bound_seconds")):
                 _fail(f"{model['id']}: gateway identity and deadlines require a model-gateway connection")
+        if subscription:
+            if bundle["mode"] == "enforced" and not SUBSCRIPTION_HOSTS[model["adapter"]].issubset(dest.get("allowed_hosts", [])):
+                _fail(f"{model['id']}: enforced subscription inference requires its fixed service hosts in the destination allowlist")
+            continue
         if model["adapter"] != "demo":
             if not model.get("endpoint"):
                 _fail(f"{model['id']}: a serving endpoint is required")
@@ -296,16 +366,19 @@ def validate_bundle(bundle: dict) -> dict:
                 _fail(f"{model['id']}: endpoint is outside its declared destination hosts")
             if model.get("tls_trust") and any(urlsplit(url).scheme != "https" for url in (model["endpoint"], model.get("identity_endpoint", model["endpoint"]))):
                 _fail(f"{model['id']}: a pinned TLS trust anchor requires HTTPS endpoints")
-        if bundle["mode"] == "enforced" and (model["adapter"] == "demo" or not model.get("digest")):
+        if go and bundle["mode"] == "enforced" and not dest.get("allowed_hosts"):
+            _fail(f"{model['id']}: enforced OpenCode Go requires exact destination hosts")
+        if bundle["mode"] == "enforced" and not go and (model["adapter"] == "demo" or not model.get("digest")):
             _fail(f"{model['id']}: enforced installations require a real model with a content digest")
         if model.get("identity_endpoint"):
             _endpoint(model["identity_endpoint"], model["id"], local=dest["kind"] != "cloud")
             hosts = dest.get("allowed_hosts", [])
             if hosts and urlsplit(model["identity_endpoint"]).hostname not in hosts:
                 _fail(f"{model['id']}: identity endpoint is outside its declared destination hosts")
-        if bundle["mode"] == "enforced" and model["adapter"] != "ollama" and model.get("identity_protocol") != "ollama":
+        if bundle["mode"] == "enforced" and not go and model["adapter"] != "ollama" and model.get("identity_protocol") != "ollama":
             _fail(f"{model['id']}: this release cannot verify a content digest through a generic provider API")
     for harness in bundle["harnesses"]:
+        native_harness_kind(harness)
         if harness["kind"] == "agent-http":
             if not harness.get("endpoint"):
                 _fail(f"{harness['id']}: agent-http requires an endpoint")
@@ -348,12 +421,27 @@ def validate_bundle(bundle: dict) -> dict:
             _fail(f"{agent['id']}: synthetic harness and model must be paired explicitly")
         if harness["kind"] == "demo" and agent["tools"]:
             _fail(f"{agent['id']}: synthetic evaluation cannot access real tools")
-        if harness["kind"] == "native-codex" and model["adapter"] not in {"ollama", "openai-compatible"}:
+        native = native_harness_kind(harness)
+        if model["adapter"] in SUBSCRIPTION_HARNESSES:
+            if native != SUBSCRIPTION_HARNESSES[model["adapter"]]:
+                _fail(f"{agent['id']}: subscription models require their matching native harness")
+            authentication = harness.get("authentication", {})
+            required = "credential_file_env" if native == "native-codex" else "credential_env"
+            if set(authentication) != {"mode", required} or authentication.get("mode") != "subscription":
+                _fail(f"{agent['id']}: subscription authentication requires exactly mode and {required}")
+        elif "authentication" in harness:
+            _fail(f"{agent['id']}: subscription credentials cannot be used with API model routing")
+        if native and agent["tools"]:
+            _fail(f"{agent['id']}: native harnesses do not translate declared HTTP tools into native tool authority")
+        if native == "native-codex" and model["adapter"] not in {"ollama", "openai-compatible", "codex-subscription"}:
             _fail(f"{agent['id']}: native Codex requires a supported model endpoint")
+        if native == "native-claude" and model["adapter"] != "claude-subscription":
+            _fail(f"{agent['id']}: native Claude requires explicit Claude subscription model routing")
+        if native == "native-opencode" and model["adapter"] != "opencode-go":
+            _fail(f"{agent['id']}: native OpenCode requires explicit OpenCode Go model routing")
         if v2 and harness["kind"] == "tool-agent" and model.get("wire_api", "chat") != "chat":
             _fail(f"{agent['id']}: tool-agent requires wire_api chat")
-        native = harness["kind"] == "native-codex" or (harness["kind"] == "agent-http" and "native-codex" in harness.get("capabilities", []))
-        if v2 and native and (model["adapter"] != "openai-compatible" or model.get("wire_api") != "responses"):
+        if v2 and native == "native-codex" and model["adapter"] != "codex-subscription" and (model["adapter"] != "openai-compatible" or model.get("wire_api") != "responses"):
             _fail(f"{agent['id']}: native Codex requires openai-compatible wire_api responses")
     for grant in bundle["grants"]:
         if v2 and any("connection" in model for model in bundle["models"]):
@@ -386,10 +474,19 @@ def validate_bundle(bundle: dict) -> dict:
             if ranks[dest["clearance"]] < context_rank:
                 _fail(f"{grant['id']}: {destination} cannot receive the resolved context class")
             receiving(dest, context_rank, grant["id"])
+            try:
+                check_destination(bundle, dest, next(c for c, rank in ranks.items() if rank == context_rank))
+            except FlowError as exc:
+                _fail(f"{grant['id']}: {exc}")
         for tool in tools:
             if ranks[tool["input_class"]] < context_rank:
                 _fail(f"{grant['id']}: {tool['id']} cannot receive this agent's arguments")
             receiving(idx["destinations"][tool["destination"]], context_rank, grant["id"])
+            try:
+                check_destination(bundle, idx["destinations"][tool["destination"]],
+                                  next(c for c, rank in ranks.items() if rank == context_rank))
+            except FlowError as exc:
+                _fail(f"{grant['id']}: {exc}")
         telemetry = ref("destinations", grant["telemetry_destination"], grant["id"])
         telemetry_class = grant.get("telemetry_class", min(ranks, key=ranks.get))
         if ranks[telemetry["clearance"]] < ranks[telemetry_class]:
@@ -401,6 +498,10 @@ def validate_bundle(bundle: dict) -> dict:
             _fail(f"{grant['id']}: caller cannot receive even the bounded receipt")
     if bundle.get("default_profile"):
         ref("profiles", bundle["default_profile"], "default_profile")
+    try:
+        validate_output_contracts(bundle)
+    except FlowError as exc:
+        _fail(str(exc))
     return copy.deepcopy(bundle)
 
 
@@ -458,19 +559,24 @@ def resolve_recipe(bundle: dict, grant_id: str) -> dict:
     return copy.deepcopy(recipe)
 
 
-def authorize_job(bundle: dict, grant_id: str, caller_id: str, input_class: str,
-                  *, is_operator: bool = False) -> dict:
+def authorize_job(bundle: dict, grant_id: str, caller_id: str, input_class: str | None,
+                  *, is_operator: bool = False, workflow_bound: bool = False) -> dict:
     recipe = resolve_recipe(bundle, grant_id)
     grant = recipe["grant"]
     if not grant.get("enabled", True):
         raise PolicyError("grant_disabled")
     if not is_operator and caller_id not in grant["callers"]:
         raise PolicyError("caller_denied")
-    ranks = {item["id"]: item["rank"] for item in bundle["data_classes"]}
-    if input_class not in ranks or ranks[input_class] > ranks[grant["input_class"]]:
-        raise PolicyError("class_denied")
-    if grant["return_contract"] != "reference":
+    if grant.get("workflow_only", False) and not workflow_bound:
+        raise PolicyError("workflow_binding_required")
+    try:
+        selected = resolve_input_class(bundle, input_class)
+        check_role_input(bundle, grant_id, selected)
+    except FlowError as exc:
+        raise PolicyError(exc.code) from exc
+    if grant["return_contract"] not in {"reference", "class-aware"}:
         raise PolicyError("unsupported_contract")
+    recipe["input_class"] = selected
     return recipe
 
 

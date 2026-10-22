@@ -97,7 +97,7 @@ class Worker:
                 if model.get("max_concurrency") and running[model.get("id")] >= model["max_concurrency"]:
                     continue  # Leave it queued; a slow model must not hold workers other models could use.
                 try:
-                    self.platform.authorize(session, row.grant_id, row.caller, generation=row.generation, is_operator=row.resolved.get("submission_role") == "operator")
+                    self.platform.authorize_existing_job(session, row)
                 except PlatformError as exc:
                     row.status, row.error_code, row.updated_at, row.finished_at = "blocked", exc.code, now, now
                     self.platform.db.audit(session, self.id, "task.dispatch_denied", row.id, {"code": exc.code})
@@ -120,7 +120,7 @@ class Worker:
             if not row or row.status != "running" or row.lease_owner != self.id or row.cancel_requested or row.lease_until < time.time():
                 return False
             try:
-                self.platform.authorize(session, row.grant_id, row.caller, generation=row.generation, is_operator=row.resolved.get("submission_role") == "operator")
+                self.platform.authorize_existing_job(session, row)
             except PlatformError:
                 return False
             now = time.time()
@@ -161,7 +161,7 @@ class Worker:
             now = time.time()
             denied = None
             try:
-                self.platform.authorize(session, row.grant_id, row.caller, generation=row.generation, is_operator=row.resolved.get("submission_role") == "operator")
+                self.platform.authorize_existing_job(session, row)
             except PlatformError as exc:
                 denied = exc.code
             if artifact:

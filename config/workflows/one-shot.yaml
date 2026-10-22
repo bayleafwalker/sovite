@@ -1,0 +1,17 @@
+apiVersion: sovite.dev/v1alpha1
+kind: DeliveryWorkflow
+id: one-shot
+description: A bounded single-session implementation that returns its result without planner or review
+  sessions.
+mode: direct
+planner:
+  mode: none
+  finite: true
+roles:
+  implementer:
+    grant: delivery-implement
+implementation:
+  mode: requirements-driven
+completion:
+  route: return
+transfers: []

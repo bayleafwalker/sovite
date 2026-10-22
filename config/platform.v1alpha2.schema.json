@@ -59,6 +59,102 @@
         "enforced"
       ]
     },
+    "restricted_class": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+    },
+    "output_contracts": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "source_class",
+          "output_class",
+          "destinations",
+          "approvers",
+          "procedure_ref"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 16000
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 16000
+          },
+          "source_class": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "output_class": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+            },
+            "uniqueItems": true,
+            "maxItems": 100,
+            "minItems": 1
+          },
+          "approvers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+            },
+            "uniqueItems": true,
+            "maxItems": 100,
+            "minItems": 1
+          },
+          "procedure_ref": {
+            "type": "object",
+            "required": [
+              "owner",
+              "resource_id",
+              "revision",
+              "content_digest"
+            ],
+            "properties": {
+              "owner": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "^[^\\s\\x00-\\x1f\\x7f](?:[^\\x00-\\x1f\\x7f]*[^\\s\\x00-\\x1f\\x7f])?$(?!\\n)"
+              },
+              "resource_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "^[^\\s\\x00-\\x1f\\x7f](?:[^\\x00-\\x1f\\x7f]*[^\\s\\x00-\\x1f\\x7f])?$(?!\\n)"
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "^[^\\s\\x00-\\x1f\\x7f](?:[^\\x00-\\x1f\\x7f]*[^\\s\\x00-\\x1f\\x7f])?$(?!\\n)"
+              },
+              "content_digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$(?!\\n)"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "default_profile": {
       "type": "string",
       "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
@@ -127,6 +223,12 @@
               "local",
               "private",
               "cloud"
+            ]
+          },
+          "boundary": {
+            "enum": [
+              "private",
+              "public"
             ]
           },
           "allowed_hosts": {
@@ -257,7 +359,10 @@
             "enum": [
               "demo",
               "ollama",
-              "openai-compatible"
+              "openai-compatible",
+              "codex-subscription",
+              "claude-subscription",
+              "opencode-go"
             ]
           },
           "endpoint": {
@@ -291,7 +396,9 @@
           },
           "identity_protocol": {
             "enum": [
-              "ollama"
+              "ollama",
+              "native-subscription",
+              "provider-service"
             ]
           },
           "identity_endpoint": {
@@ -463,6 +570,8 @@
               "demo",
               "tool-agent",
               "native-codex",
+              "native-claude",
+              "native-opencode",
               "agent-http"
             ]
           },
@@ -506,6 +615,26 @@
           },
           "idempotent": {
             "type": "boolean"
+          },
+          "authentication": {
+            "type": "object",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "subscription"
+              },
+              "credential_file_env": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{1,95}$"
+              },
+              "credential_env": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{1,95}$"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -798,9 +927,24 @@
             "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
           },
           "return_contract": {
-            "const": "reference"
+            "enum": [
+              "reference",
+              "class-aware"
+            ]
           },
           "enabled": {
+            "type": "boolean"
+          },
+          "result_readers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+            },
+            "uniqueItems": true,
+            "maxItems": 100
+          },
+          "workflow_only": {
             "type": "boolean"
           },
           "on_outage": {
@@ -860,10 +1004,6 @@
         "additionalProperties": false
       },
       "maxItems": 1000
-    },
-    "restricted_class": {
-      "type": "string",
-      "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
     },
     "connector_roles": {
       "type": "array",

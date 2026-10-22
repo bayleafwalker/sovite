@@ -1,4 +1,4 @@
-"""Separately deployable native Codex service: no platform DB or object-store access."""
+"""Separately deployable fixed native harness: no platform DB or object-store access."""
 from __future__ import annotations
 
 import asyncio
@@ -16,11 +16,13 @@ from fastapi.responses import JSONResponse
 
 from .adapters import AdapterRunner, RuntimeFailure
 from .db import canonical
-from .policy import load_bundle, resolve_recipe
+from .hosting import compile_bundle, load_envelope
+from .policy import load_bundle, native_harness_kind, resolve_recipe
 
 
 def create_app() -> FastAPI:
-    bundle, generation = load_bundle(os.environ.get("SOVITE_BUNDLE_PATH", "config/platform.ollama.yaml"))
+    bundle, _ = load_bundle(os.environ.get("SOVITE_BUNDLE_PATH", "config/platform.ollama.yaml"))
+    bundle, generation = compile_bundle(bundle, load_envelope(os.environ.get("SOVITE_HOSTING_ENVELOPE") or None))
     agent_id = os.environ.get("SOVITE_HARNESS_AGENT_ID", "code-review")
     token = os.environ.get("SOVITE_HARNESS_TOKEN", "")
     if len(token) < 24:
@@ -29,9 +31,13 @@ def create_app() -> FastAPI:
     if not grants:
         raise ValueError("Configured native harness agent has no grant")
     recipe = resolve_recipe(bundle, grants[0]["id"])
+    recipe["generation"] = generation
+    native_kind = native_harness_kind(recipe["harness"])
+    if native_kind is None:
+        raise ValueError("Native service requires exactly one configured native harness capability")
     if recipe["tools"]:
-        raise ValueError("Native service does not translate HTTP tool bindings into Codex tools; use separately configured native MCP integration")
-    if recipe["model"].get("wire_api") != "responses":
+        raise ValueError("Native service does not translate HTTP tool bindings into native tools")
+    if native_kind == "native-codex" and recipe["model"]["adapter"] != "codex-subscription" and recipe["model"].get("wire_api") != "responses":
         raise ValueError("Native service requires an explicit Responses provider")
     state_root = Path(os.environ.get("SOVITE_HARNESS_STATE_PATH", ".state/native-harness"))
     state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -56,7 +62,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health/ready")
     async def ready():
-        executable = recipe["harness"].get("executable", "codex")
+        executable = recipe["harness"].get("executable", {"native-codex": "codex", "native-claude": "claude", "native-opencode": "opencode"}[native_kind])
         if not shutil.which(executable):
             return JSONResponse({"status": "unavailable", "code": "native_runtime_unavailable"}, status_code=503)
         return {"status": "ready", "scope": "Native binary and fixed configuration only; provider compatibility requires a real request"}
@@ -97,7 +103,7 @@ def create_app() -> FastAPI:
                     queued = conn.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
                     if queued["state"] == "cancelled":
                         return JSONResponse({"code": "cancelled"}, status_code=409)
-                operation = asyncio.create_task(runner.native_codex(recipe, task_input["task"], task_id, isolated=True))
+                operation = asyncio.create_task(runner.run_native(recipe, task_input["task"], task_id, isolated=True))
                 active_tasks[task_id] = operation
                 result = await asyncio.wait_for(operation, timeout=int(recipe["grant"].get("timeout_seconds", 300)))
             with connect() as conn:

@@ -1,6 +1,6 @@
 # Operating Sovite Platform
 
-The installed platform is the unit of assessment: the console, control API, durable queue, independent workers, private results, public receipts, authority controls, qualification records and recovery behavior operate together. The synthetic profile exercises that entire workflow with labeled synthetic inference. The Ollama and native profiles use actual serving and harness processes. Production authority is enabled only for a concrete deployment whose evidence applies to its current generation and runtime binding.
+The installed platform is the unit of assessment: the console, control API, durable queue, independent workers, classified results, scoped result access, authority controls, qualification records and recovery behavior operate together. The synthetic profile exercises that entire workflow with labeled synthetic inference. The Ollama and native profiles use actual serving and harness processes. Production authority is enabled only for a concrete deployment whose evidence applies to its current generation and runtime binding.
 
 ## Installation profiles
 
@@ -111,7 +111,11 @@ The signing input contains the current generation, selected profile, evidence sc
 
 `sovite runtime-binding` reports the nonsecret runtime settings fingerprint used for signing. Run signing commands with the same database, artifact endpoint, origin, security settings and `SOVITE_DEPLOYMENT_BINDING` as the installation. The Helm review records the latter value. Configuration changes invalidate old evidence rather than inheriting a green status.
 
-Operators can inhibit a grant immediately from the console. This blocks dispatch and public release and requests cancellation of active work. Resume clears the runtime inhibit only when the current desired grant and qualification still authorize it. A blocked or cancelled task can retain a private artifact for investigation; the public MCP caller receives a fixed receipt/status projection and never a private result URL or provider task ID.
+Operators can inhibit a grant immediately from the console. This blocks dispatch and content release and requests cancellation of active work. Resume clears the runtime inhibit only when the current desired grant and qualification still authorize it. A blocked or cancelled task can retain an artifact for operator investigation. Reference contracts expose only fixed receipt/status projections; class-aware contracts and exact `result_readers` permit content only while the output class and current producing-job authority allow it. MCP never returns an artifact-store URL or provider task ID as a read credential.
+
+Choose job and workflow input classes deliberately: omission selects the highest installed class, so lower-class public model routes require an explicit compatible input. Restricted inference remains private even if a cloud destination advertises a high clearance. Install public subscription/Go routes only with exact provider identities, credential references and qualified egress; see [native provider configuration](API_CONTRACT.md#native-authentication-and-provider-selection). A fixed native service must load the same bundle and, when used, the same `SOVITE_HOSTING_ENVELOPE` as the platform so both bind the identical configuration revision. The service-only hosted profile continues to permit internal model-gateway connections only.
+
+For a class reduction or private-to-public workflow transfer, an authorized approver must first perform the installed output contract's procedure and record approval of the exact source digest and output bytes with pinned evidence references. Transfer requests name that durable release and the bound transfer; they cannot append new task text. Current source authority, output contract, receiving role and destination are rechecked at use. An output class label or a completed model call does not constitute declassification approval.
 
 ## Backup, restore and export
 

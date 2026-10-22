@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import secrets
+import json
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any
 
 from sqlalchemy import select, update
@@ -18,6 +20,7 @@ from .storage import ArtifactStore
 
 TERMINAL = {"completed", "failed", "cancelled", "blocked"}
 PUBLIC_STATUS = {"queued": "pending", "retry_wait": "pending", "running": "working", "completed": "available", "failed": "unavailable", "cancelled": "unavailable", "blocked": "unavailable"}
+_REAUTHORIZING = ContextVar("sovite_job_reauthorization", default=frozenset())
 
 
 class PlatformError(Exception):
@@ -133,7 +136,7 @@ class Platform:
                 raise PlatformError("hosting_changed", "The active configuration requires current hosting policy and qualification", 403) from exc
         return row.bundle, generation
 
-    def authorize(self, session, grant_id: str, caller: str, input_class: str | None = None, generation: str | None = None, is_operator: bool = False) -> dict:
+    def authorize(self, session, grant_id: str, caller: str, input_class: str | None = None, generation: str | None = None, is_operator: bool = False, *, workflow_bound: bool = False) -> dict:
         bundle, active_generation = self.active(session)
         if generation is not None and generation != active_generation:
             raise PlatformError("revision_superseded", "The task's configuration revision is no longer active")
@@ -141,7 +144,7 @@ class Platform:
         if not grant:
             raise PlatformError("grant_unavailable", "The requested grant is unavailable", 403)
         try:
-            recipe = policy.authorize_job(bundle, grant_id, caller, input_class or grant["input_class"], is_operator=is_operator)
+            recipe = policy.authorize_job(bundle, grant_id, caller, input_class, is_operator=is_operator, workflow_bound=workflow_bound)
         except policy.PolicyError as exc:
             raise PlatformError(getattr(exc, "code", "policy_denied"), "The current flow contract does not permit this task", 403) from exc
         state = session.get(GrantState, grant_id)
@@ -152,17 +155,164 @@ class Platform:
         recipe["generation"] = active_generation
         return recipe
 
-    def submit(self, grant_id: str, task: str, caller: str, idempotency_key: str, input_class: str | None = None, is_operator: bool = False) -> Job:
-        if not task.strip() or len(task.encode()) > self.settings.max_request_bytes:
-            raise PlatformError("invalid_task", "Task content is empty or exceeds the configured limit", 422)
-        if not idempotency_key or len(idempotency_key) > 160:
-            raise PlatformError("invalid_idempotency_key", "An idempotency key of 1..160 characters is required", 422)
-        request_digest = digest({"grant_id": grant_id, "task": task, "input_class": input_class})
-        key = digest({"caller": caller, "key": idempotency_key})
+    def authorize_existing_job(self, session, row: Job) -> dict:
+        """Recheck the job and any approved source chain at every owner boundary."""
+        seen = _REAUTHORIZING.get()
+        if row.id in seen or len(seen) >= 128:
+            raise PlatformError("invalid_source_chain", "Output source chain is cyclic or exceeds its bound", 409)
+        token = _REAUTHORIZING.set(seen | {row.id})
+        try:
+            binding = row.resolved.get("workflow_binding")
+            selected = None
+            if binding is not None:
+                selected = self._check_workflow_binding(session, binding, row.resolved.get("workflow_role"))
+                if selected["grant_id"] != row.grant_id or selected["input_class"] != row.resolved.get("input_class"):
+                    raise PlatformError("workflow_binding_mismatch", "The job no longer matches its workflow role")
+            recipe = self.authorize(session, row.grant_id, row.caller,
+                input_class=row.resolved.get("input_class", row.resolved["grant"]["input_class"]),
+                generation=row.generation, is_operator=row.resolved.get("submission_role") == "operator",
+                workflow_bound=selected is not None)
+            source_release = row.resolved.get("source_release")
+            if selected is not None and source_release:
+                from .output_contracts import transfer_content
+                expected = transfer_content(self, session, binding, row.resolved["workflow_role"],
+                    row.resolved.get("transfer_id"), source_release)
+                if row.task != expected:
+                    raise PlatformError("transfer_mismatch", "The job content differs from its approved output transfer")
+            elif selected is not None and selected["requires_output_release"]:
+                raise PlatformError("output_release_required", "The role has no approved output transfer", 403)
+            return recipe
+        finally:
+            _REAUTHORIZING.reset(token)
+
+    def workflow_installation_id(self) -> str:
+        envelope = load_envelope(self.settings.hosting_envelope_path)
+        installed = envelope["installation_id"] if envelope else self.settings.installation_id
+        if envelope and self.settings.installation_id and installed != self.settings.installation_id:
+            raise PlatformError("installation_mismatch", "Installation identity differs from the hosting envelope", 409)
+        if not installed:
+            raise PlatformError("installation_identity_required", "Set SOVITE_INSTALLATION_ID before binding workflows", 409)
+        return installed
+
+    def bind_workflow(self, document: dict, requirements_ref: dict, session_policy_ref: dict,
+                      expected_generation: str, *, input_class: str | None = None,
+                      actor: str = "operator") -> dict:
+        from .workflows import compile_workflow
+        self.policy_role(actor, "author")
+        with self.db.sessions.begin() as session:
+            self.db.authority_lock(session)
+            bundle, generation = self.active(session)
+            if expected_generation != generation:
+                raise PlatformError("revision_superseded", "The expected installation generation is no longer active")
+            binding = compile_workflow(document, bundle, requirements_ref=requirements_ref,
+                session_policy_ref=session_policy_ref, installation_id=self.workflow_installation_id(),
+                generation=generation, input_class=input_class)
+            # A hash establishes integrity, not the owner's selection.
+            key = "workflow_" + binding["binding_digest"].removeprefix("sha256:")
+            existing = session.get(MetadataRow, key)
+            if existing is None:
+                session.add(MetadataRow(key=key, value={"binding": binding, "actor": actor,
+                                                       "bound_at": time.time()}))
+                self.db.audit(session, actor, "workflow.bound", binding["binding_digest"],
+                    {"workflow_revision": binding["workflow_revision"], "generation": generation,
+                     "input_class": binding["input_class"]})
+            elif existing.value.get("binding") != binding:
+                raise PlatformError("workflow_binding_mismatch", "The stored workflow binding failed integrity verification")
+            return binding
+
+    def _check_workflow_binding(self, session, binding: dict, role: str) -> dict:
+        from .workflows import compile_workflow, delivery_role_names, WorkflowError
+        bundle, generation = self.active(session)
+        if binding.get("bundle_generation") != generation:
+            raise PlatformError("revision_superseded", "The workflow installation generation is no longer active")
+        try:
+            rebuilt = compile_workflow(binding["definition"], bundle,
+                requirements_ref=binding["requirements_ref"], session_policy_ref=binding["session_policy_ref"],
+                installation_id=self.workflow_installation_id(), generation=generation,
+                input_class=binding["input_class"])
+            if rebuilt != binding or role not in delivery_role_names(rebuilt["definition"]):
+                raise ValueError("Binding mismatch or external authoring role")
+        except (KeyError, TypeError, ValueError, WorkflowError) as exc:
+            raise PlatformError("workflow_binding_mismatch", "The workflow binding or delivery role does not match the installed definition", 409) from exc
+        key = "workflow_" + rebuilt["binding_digest"].removeprefix("sha256:")
+        installed = session.get(MetadataRow, key)
+        if installed is None or installed.value.get("binding") != rebuilt:
+            raise PlatformError("workflow_not_bound", "An author must bind this exact workflow before role submission", 403)
+        return rebuilt["roles"][role]
+
+    def submit_workflow_role(self, binding: dict, role: str, task: str, caller: str,
+                             idempotency_key: str, *, is_operator: bool = False,
+                             source_release: str | None = None, transfer_id: str | None = None) -> Job:
+        try:
+            grant = binding["roles"][role]["grant_id"]
+            input_class = binding["roles"][role]["input_class"]
+        except (KeyError, TypeError) as exc:
+            raise PlatformError("workflow_binding_mismatch", "Unknown workflow role", 422) from exc
+        return self.submit(grant, task, caller, idempotency_key, input_class, is_operator,
+            expected_generation=binding.get("bundle_generation"), workflow_binding=binding,
+            workflow_role=role, source_release=source_release, transfer_id=transfer_id)
+
+    def submit(self, grant_id: str, task: str, caller: str, idempotency_key: str, input_class: str | None = None, is_operator: bool = False,
+               *, expected_generation: str | None = None, workflow_binding: dict | None = None,
+               workflow_role: str | None = None, source_release: str | None = None,
+               transfer_id: str | None = None) -> Job:
+        try:
+            valid_task = (isinstance(task, str) and (bool(task.strip()) or source_release is not None)
+                          and len(task.encode("utf-8")) <= self.settings.max_request_bytes)
+        except UnicodeError:
+            valid_task = False
+        if not valid_task:
+            raise PlatformError("invalid_task", "Task content must be valid UTF-8, nonempty and within the configured limit", 422)
+        try:
+            valid_key = (isinstance(idempotency_key, str) and 1 <= len(idempotency_key) <= 160
+                         and bool(idempotency_key.encode("utf-8")))
+        except UnicodeError:
+            valid_key = False
+        if not valid_key:
+            raise PlatformError("invalid_idempotency_key", "A valid UTF-8 idempotency key of 1..160 characters is required", 422)
+        request = {"grant_id": grant_id, "task": task, "input_class": input_class}
+        if workflow_binding is not None:
+            request.update(workflow_binding=workflow_binding, workflow_role=workflow_role,
+                           source_release=source_release, transfer_id=transfer_id)
+        if expected_generation is not None:
+            request["expected_generation"] = expected_generation
+        try:
+            request_digest = digest(request)
+            key = digest({"caller": caller, "key": idempotency_key})
+        except (ValueError, TypeError, RecursionError):
+            raise PlatformError("invalid_request", "The task request must contain valid UTF-8 values", 422) from None
         try:
             with self.db.sessions.begin() as session:
                 self.db.authority_lock(session)
-                recipe = self.authorize(session, grant_id, caller, input_class, is_operator=is_operator)
+                if workflow_binding is not None:
+                    selected = self._check_workflow_binding(session, workflow_binding, workflow_role)
+                    if selected["grant_id"] != grant_id or selected["input_class"] != input_class:
+                        raise PlatformError("workflow_binding_mismatch", "Role input and grant differ from the binding")
+                    if source_release is not None:
+                        if task.strip():
+                            raise PlatformError("unclassified_addition", "A released transfer must be submitted without additional task content", 422)
+                        from .output_contracts import transfer_content
+                        task = transfer_content(self, session, workflow_binding, workflow_role, transfer_id, source_release)
+                    elif selected["requires_output_release"]:
+                        raise PlatformError("output_release_required", "This role requires an approved output transfer", 403)
+                    elif transfer_id is not None:
+                        raise PlatformError("output_release_required", "A transfer requires its approved output release", 422)
+                    else:
+                        task = json.dumps({"role": workflow_role,
+                            "workflow_revision": workflow_binding["workflow_revision"],
+                            "requirements_ref": workflow_binding["requirements_ref"],
+                            "session_policy_ref": workflow_binding["session_policy_ref"],
+                            "instructions": workflow_binding["definition"], "input": task},
+                            ensure_ascii=False, separators=(",", ":"))
+                elif source_release is not None or transfer_id is not None:
+                    raise PlatformError("workflow_binding_required", "Output transfers require a bound workflow role", 422)
+                recipe = self.authorize(session, grant_id, caller, input_class, generation=expected_generation, is_operator=is_operator,
+                                        workflow_bound=workflow_binding is not None)
+                if len(task.encode()) > self.settings.max_request_bytes:
+                    raise PlatformError("invalid_task", "Task and workflow context exceed the configured limit", 422)
+                if workflow_binding is not None:
+                    recipe.update(workflow_binding=workflow_binding, workflow_role=workflow_role,
+                                  source_release=source_release, transfer_id=transfer_id)
                 recipe["submission_role"] = "operator" if is_operator else "caller"
                 existing = session.scalar(select(Job).where(Job.idempotency_key == key))
                 if existing:
@@ -196,7 +346,7 @@ class Platform:
             if row is None:
                 raise PlatformError("not_found", "Receipt not found", 404)
             try:
-                self.authorize(session, row.grant_id, caller, generation=row.generation)
+                self.authorize_existing_job(session, row)
             except PlatformError:
                 # Never return a formerly permitted result after current authority changes.
                 return {"receipt": row.receipt, "status": "unavailable"}

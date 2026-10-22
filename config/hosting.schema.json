@@ -121,6 +121,12 @@
               "cloud"
             ]
           },
+          "boundary": {
+            "enum": [
+              "private",
+              "public"
+            ]
+          },
           "allowed_hosts": {
             "type": "array",
             "items": {
@@ -227,6 +233,8 @@
               "demo",
               "tool-agent",
               "native-codex",
+              "native-claude",
+              "native-opencode",
               "agent-http"
             ]
           },
@@ -270,6 +278,26 @@
           },
           "idempotent": {
             "type": "boolean"
+          },
+          "authentication": {
+            "type": "object",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "subscription"
+              },
+              "credential_file_env": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{1,95}$"
+              },
+              "credential_env": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{1,95}$"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false

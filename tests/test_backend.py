@@ -140,7 +140,7 @@ def test_configuration_change_blocks_existing_jobs_and_does_not_clear_inhibit(se
     assert platform.get_job(first.id).status == "blocked"
     assert platform.public_status(first.receipt, first.caller)["status"] == "unavailable"
     with pytest.raises(PlatformError) as denied:
-        platform.submit("change-assessment", "x", "operations", "r2")
+        platform.submit("change-assessment", "x", "operations", "r2", input_class="C2")
     assert denied.value.code == "grant_inhibited"
 
 
@@ -546,7 +546,7 @@ def test_model_concurrency_limit_lets_other_models_overtake(tmp_path):
     platform.initialize()
     first = platform.submit("incident-forensics", "task", "cloud-codex", "a")
     second = platform.submit("incident-forensics", "task", "cloud-codex", "b")
-    other = platform.submit("change-assessment", "task", "operations", "c")
+    other = platform.submit("change-assessment", "task", "operations", "c", input_class="C2")
     a, b, c = Worker(platform), Worker(platform), Worker(platform)
     assert a.claim().id == first.id
     assert b.claim().id == other.id  # The queued slow-model job waits; it does not block the fast lane.
