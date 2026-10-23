@@ -125,6 +125,34 @@ class ExecutionAuthority(Base):
     deadline: Mapped[float] = mapped_column(Float)
 
 
+class WorkerExecutionLease(Base):
+    __tablename__ = "worker_execution_leases"
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+    workload_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    fence: Mapped[str] = mapped_column(String(64), nullable=False)
+    generation: Mapped[str] = mapped_column(String(80), nullable=False)
+    phase: Mapped[str] = mapped_column(String(16), nullable=False)
+    lease_until: Mapped[float] = mapped_column(Float, nullable=False)
+    execution_deadline: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class WorkerExecutionOperation(Base):
+    __tablename__ = "worker_execution_operations"
+    workload_id: Mapped[str] = mapped_column(String(160), primary_key=True, nullable=False)
+    instance_id: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+    operation_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fence: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class HelperEnrollment(Base):
     __tablename__ = "helper_enrollments"
     id: Mapped[str] = mapped_column(String(160), primary_key=True)
@@ -198,10 +226,11 @@ class SetupDraft(Base):
 
 
 MIGRATIONS = (
-    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts"})),
+    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations"})),
     (2, (BindingState.__table__,)),
     (3, (ExecutionAuthority.__table__, HelperEnrollment.__table__, HelperSession.__table__, RequestLedger.__table__)),
     (4, (SetupPrincipal.__table__, SetupDraft.__table__)),
+    (5, (WorkerExecutionLease.__table__, WorkerExecutionOperation.__table__)),
 )
 
 

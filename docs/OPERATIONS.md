@@ -356,23 +356,41 @@ in the bundle, but grants, destinations and hosted content cannot use those clas
 
 After explicit database migration, `sovite init` leaves a new hosted installation
 awaiting activation. Authors submit `{"bundle": ...}` to `POST /api/bundles` or
-run `sovite compile path/to/bundle.yaml` using their token in
-`SOVITE_ADMIN_TOKEN`. An activator calls `POST /api/bundles/{generation}/activate`
-or runs `sovite activate GENERATION` with its token in `SOVITE_ADMIN_TOKEN`.
-Hosted mode refuses `reload`; compilation and activation must be separate steps.
-The API server requires all role tokens. A hosted CLI command loads only its
-role's configured token: `compile` needs `SOVITE_AUTHOR_TOKEN`, while `activate`
-needs `SOVITE_ACTIVATOR_TOKEN`. Present that token in `SOVITE_ADMIN_TOKEN`;
-neither command needs the other role's token or the operator token. Other online
-administrative CLI commands use `SOVITE_OPERATOR_TOKEN`. An author has no
-activation or operational artifact access. The operator can inhibit/cancel and
-inspect private operational state, but its token cannot author or activate hosted
-policy. Bearer credentials and cookie sessions follow the existing auth scheme;
-cookie mutations require the exact configured Origin. CLI and direct database
-access are outside the role model: whoever holds database credentials is trusted
-and can rewrite configuration and authority. Keep those credentials on trusted
-administrative hosts; use the HTTP API for tenant role enforcement. Standalone
-configuration changes remain Git/CLI only; bundle mutation HTTP routes do not exist.
+run `sovite compile path/to/bundle.yaml` with `SOVITE_AUTHOR_TOKEN`. An activator
+calls `POST /api/bundles/{generation}/activate` or runs
+`sovite activate GENERATION` with `SOVITE_ACTIVATOR_TOKEN`. Both hosted CLI
+commands are authenticated clients of the running control service: they send one
+bounded HTTPS request, need no database credential, and never read
+`SOVITE_HOSTING_ENVELOPE`, whose authority stays with the serving process.
+
+Point them at the service explicitly with `SOVITE_CONTROL_URL`: a fixed HTTPS
+origin with an optional port and no credentials, path, query or fragment. Set
+`SOVITE_CONTROL_CA_FILE` only to add a private CA; ordinary certificate and
+hostname validation stays enabled and system trust is used otherwise. The bundle
+path is the positional argument, else `SOVITE_BUNDLE_PATH`, else
+`config/platform.local.yaml`. Compilation requires an HTTP 201 response and
+activation 200. Other statuses, redirects, malformed, encoded or oversized
+responses, TLS/transport failures and missing configuration exit 1 with bounded
+diagnostics that never include the selected token or response text. There are no
+automatic retries. If an activation request loses transport, the outcome is
+unknown: inspect the current server state before retrying, because the server may
+already have activated that generation. Do not assume rollback. A server denial
+remains a denial.
+
+Hosted mode refuses `reload` before any runtime or database work; compilation and
+activation must be separate steps. The API server requires all role tokens. A
+hosted CLI command loads only its role's configured token, so neither command
+needs the other role's token or the operator token. Other online administrative
+CLI commands use `SOVITE_OPERATOR_TOKEN`. An author has no activation or
+operational artifact access. The operator can inhibit/cancel and inspect private
+operational state, but its token cannot author or activate hosted policy. Bearer
+credentials and cookie sessions follow the existing auth scheme; cookie mutations
+require the exact configured Origin. Database owners and direct database access
+remain trusted and can rewrite configuration and authority; this client boundary
+does not by itself split database roles or isolate those owners. Keep database
+credentials on trusted administrative hosts and use the HTTP API for tenant role
+enforcement. Standalone configuration changes remain Git/CLI only; bundle
+mutation HTTP routes do not exist.
 
 Every destination's `retention` object, including its in-memory cache bounds and
 cleanup flags, must exactly match the host-owned envelope, even for unused and

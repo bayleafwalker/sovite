@@ -68,7 +68,7 @@ Use `scripts/install_kubernetes.py` with an explicit context, the platform bundl
 
 Merge the stanza in `config/codex.mcp.toml` into the caller's user-level Codex configuration, set its scoped caller-token environment variable, and use the deployed MCP URL. The cloud caller retains its native model, tools and harness. Sovite exposes delegated work under installed grants and data-class boundaries.
 
-The caller sees `begin_task`, `task_status` and `read_result`. A receipt is an independent server-created identifier, not a bearer capability. A `reference` contract returns receipt/status only; `class-aware` permits output only within the caller's clearance. Explicit `result_readers` give coordinator and reviewer identities scoped content access without operator-wide authority. Every content release rechecks current producing-job authority and artifact integrity. Operator tokens are rejected by MCP.
+The caller sees `list_candidates`, `begin_task`, `task_status` and `read_result`. Discovery lists only caller-visible grants; detailed metadata requires the installed discovery-class clearance. Its labelled observations are not reservations or live account/capacity checks. Preferences stay with the coordinator. A receipt is an independent server-created identifier, not a bearer capability. A `reference` contract returns receipt/status only; `class-aware` permits output only within the caller's clearance. Explicit `result_readers` give coordinator and reviewer identities scoped content access without operator-wide authority. Every content release rechecks current producing-job authority and artifact integrity. Operator tokens are rejected by MCP. See [caller discovery and attempt lineage](docs/CALLER-DISCOVERY.md).
 
 ## Configuration and runtime boundaries
 
@@ -132,6 +132,8 @@ The release is a complete implementation for whole-platform assessment. It does 
 No production credentials, private keys, runtime databases or model weights are included in the source distribution.
 
 ## Vuoro private workflow integration
+
+Release 0.1.17 sends hosted compilation and activation through the authenticated control API, without local database access. It bounds transport errors and preserves uncertain activation outcomes.
 
 Python owner release 0.1.16 adds a local-only task/receipt catalog and rejects
 explicitly truncated model responses. See [the integration contract](docs/integrations/vuoro-private-workflow.md)

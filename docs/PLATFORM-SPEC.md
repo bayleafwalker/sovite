@@ -44,6 +44,15 @@ Some layers remain coupled by their interfaces. A model's tool behavior affects 
 
 Model weights remain in the serving system's managed cache or provisioned model volume. Workload images use normal container packaging. The first release records those bindings and verifies supported model identities; it does not provide a second general-purpose OCI registry implementation.
 
+## Caller discovery and external preferences
+
+Caller-scoped discovery exposes installed candidate declarations and labelled current
+policy facts under an installed metadata class and caller clearance. It creates no
+reservation or live-account qualification. Preferences and spending decisions remain
+with the coordinator; a declared interactive authentication path does not establish
+human presence or effect authority. Attempt lineage records provenance separately
+from authorized artifact reuse. See [the concrete contract](CALLER-DISCOVERY.md).
+
 ## Release architecture
 
 ```mermaid

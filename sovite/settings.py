@@ -53,6 +53,8 @@ class Settings:
     installation_id: str = ""
 
     def __post_init__(self):
+        if set(self.caller_tokens) & {"operator", "author", "activator"}:
+            raise ValueError("Caller identities must not reuse administrative role names")
         if self.installation_id and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", self.installation_id):
             raise ValueError("SOVITE_INSTALLATION_ID must be an installation identifier of 1..160 characters")
         if type(self.authority_retention_days) is not int or self.authority_retention_days < 1:

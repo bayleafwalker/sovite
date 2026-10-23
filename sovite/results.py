@@ -47,6 +47,8 @@ def _row(platform: Platform, session, receipt: str, identity: str, *, reader: bo
     row = session.scalar(query)
     if row is None:
         raise PlatformError("not_found", "Receipt not found", 404)
+    if not reader and row.resolved.get("submission_role", "caller") != "caller":
+        raise PlatformError("not_found", "Receipt not found", 404)
     if reader and identity not in row.resolved["grant"].get("result_readers", []):
         # Do not reveal receipt existence to an unrelated principal.
         raise PlatformError("not_found", "Receipt not found", 404)

@@ -118,12 +118,25 @@ server-side session mechanism. Compilation stores a draft only; activation
 requires an activator in hosted mode, including initial activation. An operator
 cannot use its operational token to bypass that policy boundary. Protect the
 runtime filesystem, database, process environment and trust configuration from
-tenants. CLI and direct database access are outside the role model: whoever holds
-database credentials is trusted and can rewrite authority. Hosted CLI commands
-load only their own role token; they do not provide isolation from that database
-authority. Hosted `reload` is refused; use author compilation followed by
-`activate GENERATION` with the activator credential. Standalone bundle changes
-remain Git/CLI only and expose no bundle mutation HTTP routes.
+tenants. Direct database access is outside the role model: whoever holds database
+credentials is trusted and can rewrite configuration and authority. Hosted
+`compile` and `activate` are authenticated clients of the control API
+(`POST /api/bundles` and `POST /api/bundles/{generation}/activate`). They need
+only `SOVITE_AUTHOR_TOKEN` or `SOVITE_ACTIVATOR_TOKEN` plus an explicit
+`SOVITE_CONTROL_URL`, never a database credential, and they do not read the
+hosting envelope. The service therefore enforces the author/activator boundary
+for those two commands even when the caller can reach the database. This slice
+does not split database roles or isolate database owners; the control service and
+every other administrative path still trust them. Requests use one bounded HTTPS
+request with ordinary TLS certificate and hostname validation (an optional
+`SOVITE_CONTROL_CA_FILE` adds a private CA), no redirects, no environment proxies
+and no retries. Diagnostics never include the selected token, URL credentials,
+bundle content or response text. An activation whose transport fails is reported
+as an unknown outcome that requires inspecting server state before retrying.
+Hosted `reload` is refused before any runtime or database access; use author
+compilation followed by `activate GENERATION` with the activator credential.
+Standalone bundle changes remain Git/CLI only and expose no bundle mutation HTTP
+routes.
 
 The hosting envelope includes complete destination retention declarations;
 compilation requires exact equality, including logging, persistent context and

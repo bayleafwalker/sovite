@@ -9,6 +9,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from cryptography.hazmat.primitives import serialization
@@ -16,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 
-from sovite import cli, policy
+from sovite import cli, control_client, policy
 from sovite.api import create_app
 from sovite.db import BundleRevision, MetadataRow, Qualification, canonical
 from sovite.hosting import SCHEMA, DESTINATION, compile_bundle, envelope_binding, load_envelope
@@ -37,8 +38,7 @@ ACTIVATOR = "activator-00000000000000000000000"
 CALLER = "caller-00000000000000000000000000"
 
 
-@pytest.fixture
-def hosted(tmp_path):
+def build_hosted(tmp_path):
     bundle = policy.load_bundle(ROOT / "config/platform.local.yaml")[0]
     bundle.update(apiVersion="sovite.platform/v1alpha2", mode="enforced", restricted_class="C3")
     for destination in bundle["destinations"]:
@@ -79,6 +79,20 @@ def hosted(tmp_path):
     generation = platform.compile(bundle, "author")
     platform.activate(generation, "activator")
     return settings, platform, bundle, envelope
+
+
+@pytest.fixture
+def hosted(tmp_path):
+    return build_hosted(tmp_path)
+
+
+def control_transport(client):
+    """Forward control-client requests into an in-process application instance."""
+    def handle(request):
+        headers = {key: value for key, value in request.headers.items() if key.lower() not in {"host", "content-length"}}
+        response = client.request(request.method, str(request.url), content=request.read(), headers=headers)
+        return httpx.Response(response.status_code, headers=list(response.headers.items()), content=response.content)
+    return httpx.MockTransport(handle)
 
 
 def evidence(settings, generation, role):
@@ -654,26 +668,33 @@ def cli_env(monkeypatch, settings):
 def test_review_2b_cli_only_author_credentials_cannot_activate(hosted, monkeypatch, capsys):
     settings, platform, bundle, _ = hosted
     cli_env(monkeypatch, settings)
+    monkeypatch.setenv("SOVITE_CONTROL_URL", "https://control.example")
     monkeypatch.setenv("SOVITE_AUTHOR_TOKEN", AUTHOR)
     monkeypatch.setenv("SOVITE_ADMIN_TOKEN", AUTHOR)
     bundle["metadata"]["version"] = "author-draft"
     Path(settings.bundle_path).write_text(yaml.safe_dump(bundle))
     before = platform.active()[1]
-    monkeypatch.setattr(sys, "argv", ["sovite", "compile"])
-    cli.main()
-    generation = json.loads(capsys.readouterr().out)["generation"]
-    assert generation != before and platform.active()[1] == before
-    monkeypatch.setattr(sys, "argv", ["sovite", "activate", generation])
-    with pytest.raises(SystemExit) as error:
+    with TestClient(create_app(settings, platform)) as client:
+        monkeypatch.setattr(control_client, "_client", lambda *, verify, transport=None: httpx.Client(
+            transport=control_transport(client), trust_env=False, follow_redirects=False, verify=False))
+        monkeypatch.setattr(sys, "argv", ["sovite", "compile"])
         cli.main()
-    assert error.value.code == 1 and platform.active()[1] == before
-    capsys.readouterr()
-    monkeypatch.delenv("SOVITE_AUTHOR_TOKEN")
-    monkeypatch.setenv("SOVITE_ACTIVATOR_TOKEN", ACTIVATOR)
-    monkeypatch.setenv("SOVITE_ADMIN_TOKEN", ACTIVATOR)
-    cli.main()
-    assert json.loads(capsys.readouterr().out)["generation"] == generation
-    assert platform.active()[1] == generation
+        generation = json.loads(capsys.readouterr().out)["generation"]
+        assert generation != before and platform.active()[1] == before
+        # The selected role variable is authoritative: an author token there is refused
+        # by the server rather than falling back to the configured activator token.
+        monkeypatch.setenv("SOVITE_ACTIVATOR_TOKEN", AUTHOR)
+        monkeypatch.setattr(sys, "argv", ["sovite", "activate", generation])
+        with pytest.raises(SystemExit) as error:
+            cli.main()
+        assert error.value.code == 1 and platform.active()[1] == before
+        capsys.readouterr()
+        monkeypatch.delenv("SOVITE_AUTHOR_TOKEN")
+        monkeypatch.setenv("SOVITE_ACTIVATOR_TOKEN", ACTIVATOR)
+        monkeypatch.setenv("SOVITE_ADMIN_TOKEN", ACTIVATOR)
+        cli.main()
+        assert json.loads(capsys.readouterr().out)["generation"] == generation
+        assert platform.active()[1] == generation
 
 
 def test_review_3_standalone_outputs_preserved(tmp_path, monkeypatch, capsys):

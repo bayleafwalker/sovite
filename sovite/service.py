@@ -24,9 +24,10 @@ _REAUTHORIZING = ContextVar("sovite_job_reauthorization", default=frozenset())
 
 
 class PlatformError(Exception):
-    def __init__(self, code: str, message: str, status: int = 409):
+    def __init__(self, code: str, message: str, status: int = 409, *, receipt: str | None = None):
         super().__init__(message)
         self.code, self.message, self.status = code, message, status
+        self.receipt = receipt
 
 
 class Platform:
@@ -162,6 +163,12 @@ class Platform:
             raise PlatformError("invalid_source_chain", "Output source chain is cyclic or exceeds its bound", 409)
         token = _REAUTHORIZING.set(seen | {row.id})
         try:
+            prior = row.resolved.get("previous_attempt")
+            if prior is not None:
+                from .attempts import previous
+                if previous(self, session, prior.get("receipt"), row.caller,
+                            role=row.resolved.get("submission_role", "caller"), recorded=prior) != prior:
+                    raise PlatformError("previous_attempt_unavailable", "Previous attempt no longer matches its recorded identity", 409)
             binding = row.resolved.get("workflow_binding")
             selected = None
             if binding is not None:
@@ -242,7 +249,8 @@ class Platform:
 
     def submit_workflow_role(self, binding: dict, role: str, task: str, caller: str,
                              idempotency_key: str, *, is_operator: bool = False,
-                             source_release: str | None = None, transfer_id: str | None = None) -> Job:
+                             source_release: str | None = None, transfer_id: str | None = None,
+                             previous_attempt: str | None = None, selection_reason: str | None = None) -> Job:
         try:
             grant = binding["roles"][role]["grant_id"]
             input_class = binding["roles"][role]["input_class"]
@@ -250,12 +258,16 @@ class Platform:
             raise PlatformError("workflow_binding_mismatch", "Unknown workflow role", 422) from exc
         return self.submit(grant, task, caller, idempotency_key, input_class, is_operator,
             expected_generation=binding.get("bundle_generation"), workflow_binding=binding,
-            workflow_role=role, source_release=source_release, transfer_id=transfer_id)
+            workflow_role=role, source_release=source_release, transfer_id=transfer_id,
+            previous_attempt=previous_attempt, selection_reason=selection_reason)
 
     def submit(self, grant_id: str, task: str, caller: str, idempotency_key: str, input_class: str | None = None, is_operator: bool = False,
                *, expected_generation: str | None = None, workflow_binding: dict | None = None,
                workflow_role: str | None = None, source_release: str | None = None,
-               transfer_id: str | None = None) -> Job:
+               transfer_id: str | None = None, previous_attempt: str | None = None,
+               selection_reason: str | None = None) -> Job:
+        from .attempts import previous, validate_metadata
+        validate_metadata(previous_attempt, selection_reason)
         try:
             valid_task = (isinstance(task, str) and (bool(task.strip()) or source_release is not None)
                           and len(task.encode("utf-8")) <= self.settings.max_request_bytes)
@@ -271,6 +283,10 @@ class Platform:
         if not valid_key:
             raise PlatformError("invalid_idempotency_key", "A valid UTF-8 idempotency key of 1..160 characters is required", 422)
         request = {"grant_id": grant_id, "task": task, "input_class": input_class}
+        if previous_attempt is not None:
+            request["previous_attempt"] = previous_attempt
+        if selection_reason is not None:
+            request["selection_reason"] = selection_reason
         if workflow_binding is not None:
             request.update(workflow_binding=workflow_binding, workflow_role=workflow_role,
                            source_release=source_release, transfer_id=transfer_id)
@@ -284,6 +300,15 @@ class Platform:
         try:
             with self.db.sessions.begin() as session:
                 self.db.authority_lock(session)
+                existing = session.scalar(select(Job).where(Job.idempotency_key == key))
+                if existing:
+                    same_role = existing.resolved.get("submission_role", "caller") == ("operator" if is_operator else "caller")
+                    if not same_role or existing.request_digest != request_digest:
+                        raise PlatformError("idempotency_conflict", "This idempotency key was already used for a different request",
+                                            receipt=existing.receipt if same_role else None)
+                    # Receipt recovery never re-admits or executes work. The result
+                    # projection independently rechecks current release authority.
+                    return existing
                 if workflow_binding is not None:
                     selected = self._check_workflow_binding(session, workflow_binding, workflow_role)
                     if selected["grant_id"] != grant_id or selected["input_class"] != input_class:
@@ -308,17 +333,18 @@ class Platform:
                     raise PlatformError("workflow_binding_required", "Output transfers require a bound workflow role", 422)
                 recipe = self.authorize(session, grant_id, caller, input_class, generation=expected_generation, is_operator=is_operator,
                                         workflow_bound=workflow_binding is not None)
+                prior = previous(self, session, previous_attempt, caller, role="operator" if is_operator else "caller")
+                if prior is not None:
+                    recipe["previous_attempt"] = prior
+                recipe["selection"] = {"grant_id": grant_id, "model_id": recipe["model"]["id"],
+                    "harness_id": recipe["harness"]["id"], "generation": recipe["generation"],
+                    "reason": selection_reason, "reason_source": "caller" if selection_reason is not None else "not_supplied"}
                 if len(task.encode()) > self.settings.max_request_bytes:
                     raise PlatformError("invalid_task", "Task and workflow context exceed the configured limit", 422)
                 if workflow_binding is not None:
                     recipe.update(workflow_binding=workflow_binding, workflow_role=workflow_role,
                                   source_release=source_release, transfer_id=transfer_id)
                 recipe["submission_role"] = "operator" if is_operator else "caller"
-                existing = session.scalar(select(Job).where(Job.idempotency_key == key))
-                if existing:
-                    if existing.request_digest != request_digest:
-                        raise PlatformError("idempotency_conflict", "This idempotency key was already used for a different request")
-                    return existing
                 row = Job(id=uuid.uuid4().hex, receipt="rcpt_" + secrets.token_urlsafe(24), idempotency_key=key, request_digest=request_digest, caller=caller, grant_id=grant_id, generation=recipe["generation"], resolved=recipe, task=task, status="queued", attempts=0, next_attempt_at=time.time())
                 session.add(row)
                 self.db.audit(session, caller, "task.accepted", row.id, {"grant_id": grant_id, "generation": row.generation})
@@ -327,9 +353,11 @@ class Platform:
         except IntegrityError:
             with self.db.sessions() as session:
                 existing = session.scalar(select(Job).where(Job.idempotency_key == key))
-                if existing and existing.request_digest == request_digest:
+                same_role = existing is not None and existing.resolved.get("submission_role", "caller") == ("operator" if is_operator else "caller")
+                if same_role and existing.request_digest == request_digest:
                     return existing
-            raise PlatformError("idempotency_conflict", "This idempotency key was already used")
+                raise PlatformError("idempotency_conflict", "This idempotency key was already used",
+                                    receipt=existing.receipt if same_role else None)
 
     def get_job(self, job_id: str, session=None) -> Job:
         if session is None:

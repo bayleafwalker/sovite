@@ -36,6 +36,9 @@ class NewJob(StrictBody):
     task: str = Field(min_length=1, max_length=65536)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
     input_class: str | None = Field(default=None, min_length=1, max_length=96)
+    expected_generation: str | None = Field(default=None, pattern=r"^sha256:[a-f0-9]{64}$")
+    previous_attempt: str | None = Field(default=None, min_length=1, max_length=256)
+    selection_reason: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class Reason(StrictBody):
@@ -64,6 +67,8 @@ class WorkflowJob(StrictBody):
     idempotency_key: str = Field(min_length=1, max_length=160)
     source_release: str | None = Field(default=None, min_length=1, max_length=80)
     transfer_id: str | None = Field(default=None, min_length=1, max_length=96)
+    previous_attempt: str | None = Field(default=None, min_length=1, max_length=256)
+    selection_reason: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class OutputApproval(StrictBody):
@@ -153,7 +158,10 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     @app.exception_handler(PlatformError)
     async def platform_error(request: Request, exc: PlatformError):
-        return JSONResponse({"detail": {"code": exc.code, "message": exc.message}}, status_code=exc.status)
+        detail = {"code": exc.code, "message": exc.message}
+        if exc.receipt is not None:
+            detail["receipt"] = exc.receipt
+        return JSONResponse({"detail": detail}, status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
@@ -247,7 +255,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         if auth[1] not in {"caller", "operator"}:
             raise PlatformError("forbidden", "A configured caller or operator is required", 403)
         row = platform.submit_workflow_role(body.binding, body.role, body.task, auth[0], body.idempotency_key,
-            is_operator=auth[1] == "operator", source_release=body.source_release, transfer_id=body.transfer_id)
+            is_operator=auth[1] == "operator", source_release=body.source_release, transfer_id=body.transfer_id,
+            previous_attempt=body.previous_attempt, selection_reason=body.selection_reason)
         return job_dict(row, detail=True) if auth[1] == "operator" else result_status(platform, row.receipt, auth[0])
 
     @app.post("/api/output-releases", status_code=201)
@@ -390,7 +399,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     @app.post("/api/jobs", status_code=201)
     async def new_job(body: NewJob, auth=Depends(operator)):
-        return job_dict(platform.submit(body.grant_id, body.task, auth[0], body.idempotency_key or secrets.token_urlsafe(24), body.input_class, is_operator=True), detail=True)
+        return job_dict(platform.submit(body.grant_id, body.task, auth[0], body.idempotency_key or secrets.token_urlsafe(24), body.input_class, is_operator=True,
+            expected_generation=body.expected_generation, previous_attempt=body.previous_attempt, selection_reason=body.selection_reason), detail=True)
 
     @app.get("/api/jobs/{job_id}")
     async def job(job_id: str, auth=Depends(operator)):
@@ -483,7 +493,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             return reply({})
         if method == "tools/list":
             return reply({"tools": [
-                {"name": "begin_task", "description": "Begin a task under a configured grant. Results follow its output class and return contract; omitted input_class selects the installation's most restrictive class.", "inputSchema": {"type": "object", "properties": {"grant_id": {"type": "string"}, "task": {"type": "string"}, "idempotency_key": {"type": "string"}, "input_class": {"type": "string"}}, "required": ["grant_id", "task", "idempotency_key"], "additionalProperties": False}, "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}},
+                {"name": "list_candidates", "description": "List only your installed execution candidates, declared capabilities and labelled policy observations. Capacity and interactive authentication are not verified; actual admission rechecks current authority. Preferences remain with the caller.", "inputSchema": {"type": "object", "properties": {"input_class": {"type": "string", "minLength": 1, "maxLength": 96}}, "additionalProperties": False}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
+                {"name": "begin_task", "description": "Begin a task under a configured grant. Results follow its output class and return contract; omitted input_class selects the installation's most restrictive class.", "inputSchema": {"type": "object", "properties": {"grant_id": {"type": "string"}, "task": {"type": "string"}, "idempotency_key": {"type": "string"}, "input_class": {"type": "string"}, "expected_generation": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}, "previous_attempt": {"type": "string", "minLength": 1, "maxLength": 256}, "selection_reason": {"type": "string", "minLength": 1, "maxLength": 500}}, "required": ["grant_id", "task", "idempotency_key"], "additionalProperties": False}, "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}},
                 {"name": "task_status", "description": "Read receipt status and verified content when the installed class-aware grant clears this caller.", "inputSchema": {"type": "object", "properties": {"receipt": {"type": "string"}}, "required": ["receipt"], "additionalProperties": False}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
                 {"name": "read_result", "description": "Read a private result using the grant's explicit reader scope; receipt possession alone grants no access.", "inputSchema": {"type": "object", "properties": {"receipt": {"type": "string", "minLength": 1, "maxLength": 256}}, "required": ["receipt"], "additionalProperties": False}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
             ]})
@@ -495,10 +506,17 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         if not isinstance(arguments, dict):
             return rpc_error(-32602, "Invalid parameters")
         try:
-            if name == "begin_task":
-                if set(arguments) - {"grant_id", "task", "idempotency_key", "input_class"} or not all(isinstance(arguments.get(field), str) for field in ("grant_id", "task", "idempotency_key")) or ("input_class" in arguments and not isinstance(arguments["input_class"], str)):
+            if name == "list_candidates":
+                if set(arguments) - {"input_class"} or ("input_class" in arguments and (not isinstance(arguments["input_class"], str) or not 1 <= len(arguments["input_class"]) <= 96)):
                     return rpc_error(-32602, "Invalid parameters")
-                row = platform.submit(arguments["grant_id"], arguments["task"], auth[0], arguments["idempotency_key"], arguments.get("input_class"))
+                from .discovery import list_candidates
+                result = list_candidates(platform, auth[0], arguments.get("input_class"))
+            elif name == "begin_task":
+                if set(arguments) - {"grant_id", "task", "idempotency_key", "input_class", "expected_generation", "previous_attempt", "selection_reason"} or not all(isinstance(arguments.get(field), str) for field in ("grant_id", "task", "idempotency_key")) or any(field in arguments and not isinstance(arguments[field], str) for field in ("input_class", "expected_generation", "previous_attempt", "selection_reason")):
+                    return rpc_error(-32602, "Invalid parameters")
+                row = platform.submit(arguments["grant_id"], arguments["task"], auth[0], arguments["idempotency_key"], arguments.get("input_class"),
+                    expected_generation=arguments.get("expected_generation"), previous_attempt=arguments.get("previous_attempt"),
+                    selection_reason=arguments.get("selection_reason"))
                 from .results import result_status
                 result = result_status(platform, row.receipt, auth[0])
             elif name == "task_status":
@@ -513,7 +531,13 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                 result = scoped_read(platform, arguments["receipt"], auth[0])
             else:
                 return rpc_error(-32602, "Tool not supported")
-        except PlatformError:
+        except PlatformError as exc:
+            if exc.code in {"previous_attempt_unfinished", "previous_effect_uncertain", "idempotency_conflict"}:
+                error = {"code": exc.code}
+                if exc.receipt is not None:
+                    error["receipt"] = exc.receipt
+                return reply({"content": [{"type": "text", "text": exc.message}],
+                              "structuredContent": {"error": error}, "isError": True})
             return reply({"content": [{"type": "text", "text": "Task unavailable or not permitted."}], "isError": True})
         return reply({"content": [{"type": "text", "text": json.dumps(result, separators=(",", ":"))}], "structuredContent": result, "isError": False})
 

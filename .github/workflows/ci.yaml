@@ -10,7 +10,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r requirements.lock && pip install --no-deps --no-build-isolation -e .
+      - run: pip install -r requirements.lock && pip install -e '.[test]'
       - run: python -m pytest
       - uses: azure/setup-helm@v4.3.0
         with:
