@@ -93,6 +93,18 @@ def main():
     for name in ("validate", "compile", "reload"):
         command = commands.add_parser(name)
         command.add_argument("path", nargs="?")
+    workflow = commands.add_parser("workflow", help="Validate or bind a delivery workflow without activating or dispatching it")
+    workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
+    workflow_validate = workflow_commands.add_parser("validate")
+    workflow_validate.add_argument("path")
+    workflow_compile = workflow_commands.add_parser("compile")
+    workflow_compile.add_argument("path")
+    workflow_compile.add_argument("--bundle", required=True)
+    workflow_compile.add_argument("--installation-id", required=True)
+    workflow_compile.add_argument("--requirements-ref", required=True, help="JSON revision reference, not requirements content")
+    workflow_compile.add_argument("--session-policy-ref", required=True, help="JSON revision reference, not dispatch authority")
+    workflow_compile.add_argument("--input-class", help="Defaults to the most restrictive class in the bundle")
+    workflow_compile.add_argument("--output", help="Write the immutable binding to a new JSON file")
     activate = commands.add_parser("activate", help="Activate an already compiled generation")
     activate.add_argument("generation")
     keys = commands.add_parser("keys")
@@ -117,6 +129,28 @@ def main():
     recovery.add_argument("--reason", required=True)
     args = parser.parse_args()
     try:
+        if args.command == "workflow":
+            from .workflows import compile_workflow, load_workflow
+            definition, revision = load_workflow(args.path)
+            if args.workflow_command == "validate":
+                emit({"valid": True, "workflow_revision": revision, "mode": definition["mode"],
+                      "scope": "Workflow definition only; no installed capability or execution is asserted"})
+                return
+            envelope = load_envelope(os.environ.get("SOVITE_HOSTING_ENVELOPE") or None)
+            if envelope and args.installation_id != envelope["installation_id"]:
+                raise ValueError("Installation identity does not match the hosting envelope")
+            bundle, generation = compile_bundle(policy.load_bundle(args.bundle)[0], envelope)
+            binding = compile_workflow(definition, bundle, installation_id=args.installation_id,
+                generation=generation, requirements_ref=load_json(args.requirements_ref),
+                session_policy_ref=load_json(args.session_policy_ref), input_class=args.input_class)
+            payload = json.dumps(binding, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+            if args.output:
+                destination = Path(args.output)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("x", encoding="utf-8") as output:
+                    output.write(payload)
+            sys.stdout.write(payload)
+            return
         if args.command == "db":
             settings = Settings.from_database_env()
             db = Database(settings.database_url, schema=settings.database_schema)

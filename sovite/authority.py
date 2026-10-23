@@ -254,8 +254,7 @@ class Authority:
         if job.cancel_requested:
             fail("cancelled")
         # 4: grant/caller/generation/qualification are current, never a cached recipe.
-        recipe = self.platform.authorize(session, job.grant_id, job.caller, generation=job.generation,
-                                         is_operator=job.resolved.get("submission_role") == "operator")
+        recipe = self.platform.authorize_existing_job(session, job)
         # 5: recompile context clearance as well as binding runtime inhibit.
         from .policy import PolicyError, validate_bundle
         bundle, _ = self.platform.active(session)

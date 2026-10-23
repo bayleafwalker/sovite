@@ -1,0 +1,15 @@
+==> Linting /projects/dev/sovite-discovery-20261023/deploy/helm/sovite
+[INFO] Chart.yaml: icon is recommended
+
+1 chart(s) linted, 0 chart(s) failed
+{
+  "resources": 22,
+  "workloads": [
+    "sovite-control",
+    "sovite-ollama",
+    "sovite-worker",
+    "sovite-postgres",
+    "sovite-garage"
+  ],
+  "scope": "Helm rendering and structural invariants only; no cluster or model execution"
+}

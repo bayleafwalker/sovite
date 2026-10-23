@@ -1,8 +1,8 @@
 # Sovite Platform
 
-**Provision a complete private model and agent platform, while keeping models, serving, harnesses, agent definitions, compute and state independently configurable.**
+**Provision a model and agent platform across private and public boundaries, with explicit data classes, authority and independently configurable models, harnesses, agents, compute and state.**
 
-Sovite provides the control plane, operator console, durable work queue, configuration contracts, private results, caller-bound receipts, qualification records and operational controls. It adopts Ollama for local inference, the native Codex CLI for the isolated coding harness, PostgreSQL for deployment state, and Garage or another S3-compatible service for private artifacts.
+Sovite provides the control plane, operator console, durable work queue, configuration contracts, classified results, scoped result access, caller-bound receipts, qualification records and operational controls. It adopts Ollama for local inference, the native Codex CLI for the isolated coding harness, PostgreSQL for deployment state, and Garage or another S3-compatible service for private artifacts.
 
 The installation is the unit of assessment. The release includes a usable console and operating workflows, deployment profiles and recovery tools. The synthetic adapter provides repeatable exercises of the same application; real inference has separate configuration and cannot silently fall back to it.
 
@@ -11,9 +11,9 @@ The name is provisional. Sovite refers to the fitting between parts. This releas
 ## Included workflows
 
 - Register independent models, harnesses, agent packages, tools, destinations and compute pools through a validated configuration bundle.
-- Submit private work from the operator console or the receipt-only MCP endpoint used by a native cloud caller.
+- Submit classified work from the operator console or a native caller through MCP.
 - Bind each task to its exact configuration generation and compute pool; inspect queue state, attempts, cancellations and results.
-- Keep complete outputs in private storage and return only an opaque receipt plus a bounded status to callers.
+- Keep artifacts in approved storage; release content only under the installed output class, result contract and current reader authority. Reference contracts preserve receipt-only behavior.
 - Inhibit a grant immediately, stop new dispatch, recheck current authority during execution and prevent release after revocation.
 - Validate and activate configuration revisions, issue signed qualifications, inspect their actual scope and expiry, and verify the audit chain.
 - Install on a local Python environment, Docker Compose or Kubernetes. Export operational state, back up the Compose installation and restore with all grants inhibited.
@@ -66,16 +66,16 @@ Use `scripts/install_kubernetes.py` with an explicit context, the platform bundl
 
 ## Connect an existing native caller
 
-Merge the stanza in `config/codex.mcp.toml` into the caller's user-level Codex configuration, set its scoped caller-token environment variable, and use the deployed MCP URL. The cloud caller retains its native model, tools and harness. Sovite is a delegated private work capability exposed through MCP.
+Merge the stanza in `config/codex.mcp.toml` into the caller's user-level Codex configuration, set its scoped caller-token environment variable, and use the deployed MCP URL. The cloud caller retains its native model, tools and harness. Sovite exposes delegated work under installed grants and data-class boundaries.
 
-The caller sees `begin_task` and `task_status`. A receipt is an independent server-created identifier, bound to the authenticated caller. It cannot be exchanged for a private result. Operator credentials are rejected by the public MCP surface; operator-submitted jobs stay in the private operator workflow.
+The caller sees `list_candidates`, `begin_task`, `task_status` and `read_result`. Discovery lists only caller-visible grants; detailed metadata requires the installed discovery-class clearance. Its labelled observations are not reservations or live account/capacity checks. Preferences stay with the coordinator. A receipt is an independent server-created identifier, not a bearer capability. A `reference` contract returns receipt/status only; `class-aware` permits output only within the caller's clearance. Explicit `result_readers` give coordinator and reviewer identities scoped content access without operator-wide authority. Every content release rechecks current producing-job authority and artifact integrity. Operator tokens are rejected by MCP. See [caller discovery and attempt lineage](docs/CALLER-DISCOVERY.md).
 
 ## Configuration and runtime boundaries
 
 | Layer | Configuration | Implementation |
 | --- | --- | --- |
-| Model and serving binding | `models` | Ollama and OpenAI-compatible endpoints; separate protocol selection and model identity |
-| Harness package | `harnesses` | Native Codex service, bounded diagnostic harness, external agent HTTP adapter, explicit synthetic adapter |
+| Model and serving binding | `models` | Local/gateway bindings and explicit Codex/Claude subscription or OpenCode Go routes; content identity and hosted service identity remain distinct |
+| Harness package | `harnesses` | Fixed native Codex, Claude Code and OpenCode services, bounded tool harness, external agent HTTP adapter and explicit synthetic adapter |
 | Agent package | `agents` | Harness/model references, instructions, tool allowlist and a step limit for the bounded tool harness |
 | Compute placement | `compute` | Worker pool identity and local/Kubernetes placement |
 | Data placement | `destinations`, `data_classes` | Clearance checks across inference, execution, tools, state and bounded telemetry |
@@ -83,6 +83,30 @@ The caller sees `begin_task` and `task_status`. A receipt is an independent serv
 | Durable operating state | Database and artifact backend | Jobs, leases, configurations, qualifications, sessions, inhibits, audit and private results |
 
 Configuration and runtime controls have separate write paths. A reviewed bundle determines desired authority; an operator inhibit only reduces that authority. Clearing an inhibit does not override a disabled or unqualified grant. Replacing a bundle blocks work bound to the superseded generation.
+
+## Delivery definitions and data boundaries
+
+An omitted job or workflow `input_class` selects the highest installed class. Inputs at or above the restricted threshold require private-boundary inference. Lower classes can use public services only where the grant and destination permit them. Each destination declares a private/public boundary; a high clearance does not make a public subscription provider private.
+
+Provider-owned delivery workflows bind requirements and session-policy revisions to installed role grants. The binding checks every role and declared transfer before admission. Private-to-public transfer or class reduction requires an installed output contract and a recorded approval over the exact source artifact and released bytes. The provider controller still owns discovery, planning, session scheduling, acceptance review, semantic repair and merge decisions. Vuoro consumes work/authority/evidence records; the definitions do not reinstate a Vuoro runtime recipe compiler or implement a delivery scheduler. Direct mode supports a one-session path. See [delivery workflows](docs/WORKFLOWS.md) and [the API contract](docs/API_CONTRACT.md).
+
+## Subscription models and OpenCode Go
+
+The native routes use explicit operator-provisioned authentication and exact configured model selection. They never discover ambient credentials or switch to an API-key account when a subscription route fails.
+
+| Route | Native capability | Authentication and selection |
+| --- | --- | --- |
+| Codex ChatGPT subscription | `native-codex` | `codex-subscription` model with `identity_protocol: native-subscription`; harness `authentication: {mode: subscription, credential_file_env: SOVITE_CODEX_AUTH_FILE}` selects one protected ChatGPT auth.json. |
+| Claude subscription | `native-claude` | `claude-subscription` model with `identity_protocol: native-subscription`; harness `authentication: {mode: subscription, credential_env: SOVITE_CLAUDE_OAUTH_TOKEN}` selects its OAuth token. |
+| OpenCode Go | `native-opencode` | `opencode-go` model with `identity_protocol: provider-service`, `model: deepseek-v4.1-flash`, `endpoint: https://opencode.ai/inference/go/openai/v1`, `wire_api: chat` and an explicit Go-key `api_key_env`. Native OpenCode selects `opencode-go/deepseek-v4.1-flash`. |
+
+All three use public cloud destinations and declared service/model identity; they do not claim immutable hosted weights. Enforced v2 installations retain image pins, destination policy and qualification requirements. The narrower service-only hosted envelope remains restricted to internal model-gateway connections. Go also supports the bounded `tool-agent` path with Sovite's explicit tool declarations, per-job session header and an identifying User-Agent.
+
+New native launchers are answer-only: fresh home/XDG/task directories, denied native tools, explicit models and no ambient API keys, user settings or workspaces. OpenCode requires v2. Codex preserves a refreshed credential file atomically, including failure and cancellation; its local sidecar lock requires cross-host serialization and coordinated rotation by the operator. Native process-group cancellation also terminates descendants surviving their leader. These controls do not replace deployment isolation or qualification of machine-wide policy.
+
+Set `SOVITE_HARNESS_AGENT_ID`, `SOVITE_BUNDLE_PATH` and the separate `SOVITE_HARNESS_TOKEN` on each fixed native service. A hosting installation also supplies the identical `SOVITE_HOSTING_ENVELOPE`. The reference chart provisions one optional fixed native agent per release, so a multi-role package needs separately provisioned services or releases. The example is a configuration contract, not a claim that accounts, credentials, executable images or egress have been provisioned.
+
+Validation uses synthetic credentials/responses and real local subprocesses for output bounds and cancellation. No live subscription/account request or installed native CLI qualification is claimed. Upstream contracts: [Codex authentication](https://developers.openai.com/codex/auth/ci-cd-auth), [Claude Code authentication](https://code.claude.com/docs/en/authentication), [OpenCode Go](https://opencode.ai/v2/docs/console/go/) and [OpenCode v2 configuration](https://opencode.ai/v2/docs/config/).
 
 ## Verification and current readiness
 

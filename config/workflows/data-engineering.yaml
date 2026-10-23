@@ -1,0 +1,130 @@
+apiVersion: sovite.dev/v1alpha1
+kind: DeliveryWorkflow
+id: data-engineering
+description: Sandbox data artifacts with explicit semantics, independent reconciliation and execution
+  and semantic lineage.
+mode: coordinated
+planner:
+  mode: external
+  finite: true
+  role: product_planner
+  required_inputs:
+  - intent
+  - constraints
+  - decision_policy
+  output_contract: requirements-release
+  interaction: decision-records
+  discovery_roles:
+  - discovery
+roles:
+  product_planner:
+    grant: delivery-plan
+  discovery:
+    grant: delivery-discover
+  orchestrator:
+    grant: delivery-coordinate
+  implementer:
+    grant: delivery-implement
+  inline_reviewer:
+    grant: delivery-inline-review
+  holistic_reviewer:
+    grant: delivery-holistic-review
+implementation:
+  mode: requirements-driven
+decomposition:
+  unit: coherent-sections
+  dependencies: explicit
+product_decisions:
+  blocked_work: pause
+  unaffected_work: continue
+  target: decision-records
+review:
+  model_diversity: preferred
+  inline:
+    independent: true
+    acceptance_basis: requirements
+    derive_before_candidate: true
+    max_substantive_failures: 2
+    nits_nonblocking_after_pass: 2
+  holistic:
+    independent: true
+    scope: candidate
+escalation:
+  target: block_queue
+completion:
+  route: human_review
+domains:
+- id: data-engineering
+  procedures:
+  - owner: example-workspace
+    resource_id: config/workflows/procedures/data-engineering.md
+    revision: sha256:928a5984ba3c2ad73f20643077b0d32940f80f8818b478084bda1a28d86a1ebd
+    content_digest: sha256:928a5984ba3c2ad73f20643077b0d32940f80f8818b478084bda1a28d86a1ebd
+  required_evidence:
+  - id: semantic-contract
+    stage: implementation
+    description: Output grain, population, keys, units, effective and processing time, correction rules
+      and unresolved owner decisions, tied to the requirements release.
+  - id: executed-sandbox-artifacts
+    stage: implementation
+    description: Identified sandbox artifacts and an executed run with code, input snapshot, configuration
+      and environment identities; include replay behavior required by the contract.
+  - id: lineage
+    stage: implementation
+    description: Execution lineage and affected-field semantic lineage covering inputs, joins, exclusions,
+      calculations and the decisions explaining them.
+  - id: independent-reconciliation
+    stage: inline_review
+    description: Independent expected populations and totals compared with observed output; explain
+      exclusions and agreed tolerances without reusing the transformation as its own control.
+  - id: assembled-data-outcome
+    stage: holistic_review
+    description: Candidate-wide grain, join multiplicity, cutoff, population and consumer compatibility
+      checks with aggregate control totals.
+  - id: sandbox-handoff
+    stage: completion
+    description: A reviewable candidate and reconciled sandbox outcome; state separately what production
+      deployment and business acceptance still require.
+transfers:
+- id: implementation
+  from_role: orchestrator
+  target:
+    kind: role
+    role: implementer
+- id: inline-review
+  from_role: implementer
+  target:
+    kind: role
+    role: inline_reviewer
+- id: reimplementation
+  from_role: inline_reviewer
+  target:
+    kind: role
+    role: implementer
+- id: inline-outcome
+  from_role: inline_reviewer
+  target:
+    kind: role
+    role: orchestrator
+- id: holistic-review
+  from_role: orchestrator
+  target:
+    kind: role
+    role: holistic_reviewer
+- id: holistic-outcome
+  from_role: holistic_reviewer
+  target:
+    kind: role
+    role: orchestrator
+- id: repository-candidate
+  from_role: orchestrator
+  target:
+    kind: repository-candidate
+    destination: repository-candidates
+  output_contract: publish-candidate
+- id: vuoro-finding
+  from_role: holistic_reviewer
+  target:
+    kind: vuoro-finding
+    destination: vuoro-findings
+  output_contract: publish-finding

@@ -50,8 +50,13 @@ class Settings:
     deployment_binding: str = ""
     setup_api_enabled: bool = False
     setup_installation_id: str = ""
+    installation_id: str = ""
 
     def __post_init__(self):
+        if set(self.caller_tokens) & {"operator", "author", "activator"}:
+            raise ValueError("Caller identities must not reuse administrative role names")
+        if self.installation_id and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", self.installation_id):
+            raise ValueError("SOVITE_INSTALLATION_ID must be an installation identifier of 1..160 characters")
         if type(self.authority_retention_days) is not int or self.authority_retention_days < 1:
             raise ValueError("authority retention days must be a positive integer")
         if self.authority_token and (len(self.authority_token) < 24 or self.authority_token in [self.operator_token, self.author_token, self.activator_token, *self.caller_tokens.values()]):
@@ -119,6 +124,7 @@ class Settings:
             deployment_binding=env.get("SOVITE_DEPLOYMENT_BINDING", ""),
             setup_api_enabled=truth("SETUP_API_ENABLED", False),
             setup_installation_id=env.get("SOVITE_SETUP_INSTALLATION_ID", ""),
+            installation_id=env.get("SOVITE_INSTALLATION_ID", ""),
         )
         if result.artifact_backend not in {"filesystem", "s3"}:
             raise ValueError("artifact backend must be filesystem or s3")

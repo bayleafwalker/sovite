@@ -1,0 +1,114 @@
+apiVersion: sovite.dev/v1alpha1
+kind: DeliveryWorkflow
+id: software-delivery
+description: Requirement-driven software delivery with finite product planning, independent reviews
+  and a human review handoff.
+mode: coordinated
+planner:
+  mode: external
+  finite: true
+  role: product_planner
+  required_inputs:
+  - intent
+  - constraints
+  - decision_policy
+  output_contract: requirements-release
+  interaction: decision-records
+  discovery_roles:
+  - discovery
+roles:
+  product_planner:
+    grant: delivery-plan
+  discovery:
+    grant: delivery-discover
+  orchestrator:
+    grant: delivery-coordinate
+  implementer:
+    grant: delivery-implement
+  inline_reviewer:
+    grant: delivery-inline-review
+  holistic_reviewer:
+    grant: delivery-holistic-review
+implementation:
+  mode: requirements-driven
+decomposition:
+  unit: coherent-sections
+  dependencies: explicit
+product_decisions:
+  blocked_work: pause
+  unaffected_work: continue
+  target: decision-records
+review:
+  model_diversity: preferred
+  inline:
+    independent: true
+    acceptance_basis: requirements
+    derive_before_candidate: true
+    max_substantive_failures: 2
+    nits_nonblocking_after_pass: 2
+  holistic:
+    independent: true
+    scope: candidate
+escalation:
+  target: block_queue
+completion:
+  route: human_review
+domains:
+- id: software
+  procedures: []
+  required_evidence:
+  - id: outcome-checks
+    stage: implementation
+    description: Changes and focused executable checks mapped to the requirements, including observed
+      results and relevant failure cases.
+  - id: independent-acceptance
+    stage: inline_review
+    description: Acceptance criteria derived before inspecting the candidate, with outcome findings
+      and separately identified nits.
+  - id: candidate-quality
+    stage: holistic_review
+    description: Assessment of the complete candidate against its stated intention, integration behavior
+      and maintainability.
+transfers:
+- id: implementation
+  from_role: orchestrator
+  target:
+    kind: role
+    role: implementer
+- id: inline-review
+  from_role: implementer
+  target:
+    kind: role
+    role: inline_reviewer
+- id: reimplementation
+  from_role: inline_reviewer
+  target:
+    kind: role
+    role: implementer
+- id: inline-outcome
+  from_role: inline_reviewer
+  target:
+    kind: role
+    role: orchestrator
+- id: holistic-review
+  from_role: orchestrator
+  target:
+    kind: role
+    role: holistic_reviewer
+- id: holistic-outcome
+  from_role: holistic_reviewer
+  target:
+    kind: role
+    role: orchestrator
+- id: repository-candidate
+  from_role: orchestrator
+  target:
+    kind: repository-candidate
+    destination: repository-candidates
+  output_contract: publish-candidate
+- id: vuoro-finding
+  from_role: holistic_reviewer
+  target:
+    kind: vuoro-finding
+    destination: vuoro-findings
+  output_contract: publish-finding

@@ -36,6 +36,9 @@ class NewJob(StrictBody):
     task: str = Field(min_length=1, max_length=65536)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
     input_class: str | None = Field(default=None, min_length=1, max_length=96)
+    expected_generation: str | None = Field(default=None, pattern=r"^sha256:[a-f0-9]{64}$")
+    previous_attempt: str | None = Field(default=None, min_length=1, max_length=256)
+    selection_reason: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class Reason(StrictBody):
@@ -44,6 +47,38 @@ class Reason(StrictBody):
 
 class BundleDraft(StrictBody):
     bundle: dict
+
+
+class WorkflowDraft(StrictBody):
+    workflow: dict
+
+
+class WorkflowBind(WorkflowDraft):
+    requirements_ref: dict
+    session_policy_ref: dict
+    expected_generation: str = Field(pattern=r"^sha256:[a-f0-9]{64}$", min_length=71, max_length=71)
+    input_class: str | None = Field(default=None, min_length=1, max_length=96)
+
+
+class WorkflowJob(StrictBody):
+    binding: dict
+    role: str = Field(min_length=1, max_length=96)
+    task: str = Field(default="", max_length=65536)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    source_release: str | None = Field(default=None, min_length=1, max_length=80)
+    transfer_id: str | None = Field(default=None, min_length=1, max_length=96)
+    previous_attempt: str | None = Field(default=None, min_length=1, max_length=256)
+    selection_reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class OutputApproval(StrictBody):
+    source_job_id: str = Field(min_length=1, max_length=64)
+    source_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$", min_length=71, max_length=71)
+    contract_id: str = Field(min_length=1, max_length=96)
+    expected_contract_revision: str = Field(pattern=r"^sha256:[a-f0-9]{64}$", min_length=71, max_length=71)
+    expected_generation: str = Field(pattern=r"^sha256:[a-f0-9]{64}$", min_length=71, max_length=71)
+    content: str = Field(min_length=1, max_length=65536)
+    evidence_refs: list[dict] = Field(min_length=1, max_length=100)
 
 
 def token_identity(token: str, settings: Settings) -> tuple[str, str] | None:
@@ -106,6 +141,12 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                 if len(data) > limit:
                     return JSONResponse({"detail": {"code": "request_too_large", "message": "Request exceeds the configured limit"}}, status_code=413)
             request._body = bytes(data)
+            if request.url.path.startswith("/api/workflows/") or request.url.path == "/api/output-releases":
+                from .hosting import bounded_json
+                try:
+                    bounded_json(request._body, limit)
+                except ValueError:
+                    return JSONResponse({"detail": {"code": "invalid_request", "message": "The request must contain finite JSON with unique keys"}}, status_code=422)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -117,7 +158,10 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     @app.exception_handler(PlatformError)
     async def platform_error(request: Request, exc: PlatformError):
-        return JSONResponse({"detail": {"code": exc.code, "message": exc.message}}, status_code=exc.status)
+        detail = {"code": exc.code, "message": exc.message}
+        if exc.receipt is not None:
+            detail["receipt"] = exc.receipt
+        return JSONResponse({"detail": detail}, status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
@@ -136,6 +180,11 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                 with platform.db.sessions() as session:
                     row = session.get(AuthSession, hashlib.sha256(cookie.encode()).hexdigest())
                     if row and row.expires_at > time.time():
+                        enabled = (bool(settings.caller_tokens.get(row.identity)) if row.role == "caller"
+                                   else bool(getattr(settings, row.role + "_token", ""))
+                                   if row.role in {"operator", "author", "activator"} else False)
+                        if not enabled:
+                            raise PlatformError("unauthorized", "Authentication is required", 401)
                         if request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get("origin", "").rstrip("/") != settings.public_origin:
                             raise PlatformError("origin_required", "Cookie-authenticated changes require the configured origin", 403)
                         return row.identity, row.role
@@ -153,6 +202,11 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     async def author(auth=Depends(identity)) -> tuple[str, str]:
         platform.policy_role(auth[1], "author", api=True)
+        return auth
+
+    async def workflow_author(auth=Depends(identity)) -> tuple[str, str]:
+        if auth[1] != "author" and not (auth[1] == "operator" and not settings.hosting_envelope_path):
+            raise PlatformError("forbidden", "Workflow author access is required", 403)
         return auth
 
     async def activator(auth=Depends(identity)) -> tuple[str, str]:
@@ -177,6 +231,50 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     from .setup_api import install_routes as install_setup_routes
     install_setup_routes(app, platform, operator)
+
+    @app.post("/api/workflows/validate")
+    async def validate_workflow(body: WorkflowDraft, auth=Depends(workflow_author)):
+        from .workflows import validate_workflow as validate, workflow_revision, WorkflowError
+        try:
+            document = validate(body.workflow)
+            return {"valid": True, "workflow_revision": workflow_revision(document), "mode": document["mode"]}
+        except WorkflowError:
+            raise PlatformError("invalid_workflow", "The workflow does not match the delivery contract", 422) from None
+
+    @app.post("/api/workflows/bind")
+    async def bind_workflow(body: WorkflowBind, auth=Depends(workflow_author)):
+        try:
+            return platform.bind_workflow(body.workflow, body.requirements_ref, body.session_policy_ref,
+                body.expected_generation, input_class=body.input_class, actor=auth[0])
+        except ValueError:
+            raise PlatformError("invalid_workflow", "The workflow cannot bind to the current installation", 422) from None
+
+    @app.post("/api/workflows/jobs", status_code=201)
+    async def workflow_job(body: WorkflowJob, auth=Depends(identity)):
+        from .results import result_status
+        if auth[1] not in {"caller", "operator"}:
+            raise PlatformError("forbidden", "A configured caller or operator is required", 403)
+        row = platform.submit_workflow_role(body.binding, body.role, body.task, auth[0], body.idempotency_key,
+            is_operator=auth[1] == "operator", source_release=body.source_release, transfer_id=body.transfer_id,
+            previous_attempt=body.previous_attempt, selection_reason=body.selection_reason)
+        return job_dict(row, detail=True) if auth[1] == "operator" else result_status(platform, row.receipt, auth[0])
+
+    @app.post("/api/output-releases", status_code=201)
+    async def approve_output(body: OutputApproval, auth=Depends(identity)):
+        from .output_contracts import approve_output as approve
+        if auth[1] not in {"caller", "operator"}:
+            raise PlatformError("forbidden", "A configured caller or operator is required", 403)
+        try:
+            return approve(platform, **body.model_dump(), actor=auth[0], is_operator=auth[1] == "operator")
+        except ValueError:
+            raise PlatformError("invalid_output", "The approval does not match the output contract", 422) from None
+
+    @app.get("/api/output-releases/{release_id}")
+    async def released_output(release_id: str, auth=Depends(identity)):
+        from .output_contracts import read_output
+        if auth[1] not in {"caller", "operator"}:
+            raise PlatformError("forbidden", "A configured caller or operator is required", 403)
+        return read_output(platform, release_id, auth[0], is_operator=auth[1] == "operator")
 
     @app.get("/health/live")
     async def liveness():
@@ -251,7 +349,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                 counts[state] = session.scalar(select(func.count()).select_from(Job).where(Job.status == state)) or 0
             workers = [{"id": row.id, "updated_at": row.updated_at, "job_id": row.job_id, "healthy": row.updated_at > time.time() - 120} for row in session.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.updated_at.desc()).limit(100))]
             qualified = is_qualified(session, settings, generation, bundle.get("default_profile", "local"))
-        return {"name": bundle.get("metadata", {}).get("display_name", settings.display_name), "mode": bundle.get("mode"), "generation": generation, "counts": counts, "workers": workers, "qualified": qualified, "qualification_required": settings.require_qualification, "audit": platform.db.verify_audit(), "storage": {"backend": settings.artifact_backend}, "security": {"public_origin": settings.public_origin, "secure_cookies": settings.secure_cookies}, "capabilities": {"receipt_only_mcp": True, "private_artifacts": True, "signed_qualification": True, "native_harness": "Configured separately; catalog presence is not readiness", "automatic_model_fallback": False, "config_updates": "Git/CLI; bounded setup proposals enabled" if settings.setup_api_enabled else "Git/CLI only", "live_cluster_verification": False}}
+        return {"name": bundle.get("metadata", {}).get("display_name", settings.display_name), "mode": bundle.get("mode"), "generation": generation, "counts": counts, "workers": workers, "qualified": qualified, "qualification_required": settings.require_qualification, "audit": platform.db.verify_audit(), "storage": {"backend": settings.artifact_backend}, "security": {"public_origin": settings.public_origin, "secure_cookies": settings.secure_cookies}, "capabilities": {"receipt_only_mcp": False, "class_aware_results": True, "scoped_result_reader": True, "private_artifacts": True, "signed_qualification": True, "native_harness": "Configured separately; catalog presence is not readiness", "automatic_model_fallback": False, "config_updates": "Git/CLI; bounded setup proposals enabled" if settings.setup_api_enabled else "Git/CLI only", "live_cluster_verification": False}}
 
     @app.get("/api/catalog")
     async def catalog(auth=Depends(operator)):
@@ -301,7 +399,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     @app.post("/api/jobs", status_code=201)
     async def new_job(body: NewJob, auth=Depends(operator)):
-        return job_dict(platform.submit(body.grant_id, body.task, auth[0], body.idempotency_key or secrets.token_urlsafe(24), body.input_class, is_operator=True), detail=True)
+        return job_dict(platform.submit(body.grant_id, body.task, auth[0], body.idempotency_key or secrets.token_urlsafe(24), body.input_class, is_operator=True,
+            expected_generation=body.expected_generation, previous_attempt=body.previous_attempt, selection_reason=body.selection_reason), detail=True)
 
     @app.get("/api/jobs/{job_id}")
     async def job(job_id: str, auth=Depends(operator)):
@@ -368,7 +467,17 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         def rpc_error(code, message):
             return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
-        if not isinstance(params, dict) or (request_id is not None and (not isinstance(request_id, (str, int)) or isinstance(request_id, bool))):
+        valid_id = request_id is None or (
+            isinstance(request_id, (str, int)) and not isinstance(request_id, bool))
+        if isinstance(request_id, str):
+            try:
+                request_id.encode("utf-8")
+            except UnicodeError:
+                valid_id = False
+        if not valid_id:
+            request_id = None
+            return rpc_error(-32600, "Invalid request")
+        if not isinstance(params, dict):
             return rpc_error(-32600, "Invalid request")
         if method == "notifications/initialized" and "id" not in body:
             return Response(status_code=202)
@@ -376,14 +485,18 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             return JSONResponse(rpc_error(-32600, "Unsupported notification"), status_code=400)
         if method == "initialize":
             requested = params.get("protocolVersion")
+            if "protocolVersion" in params and not isinstance(requested, str):
+                return rpc_error(-32602, "Invalid parameters")
             version = requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-11-25"
-            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " receipt gateway", "version": "0.1.16"}, "instructions": "This service accepts private work and returns opaque receipts and fixed status only. Full results require a separately authorized private operator interface."})
+            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " task gateway", "version": "0.1.16"}, "instructions": "This service accepts private and public work under installed class and boundary policy. Class-aware grants return content to cleared callers; otherwise results require an explicitly scoped reader. Reference grants preserve receipt-only delivery."})
         if method == "ping":
             return reply({})
         if method == "tools/list":
             return reply({"tools": [
-                {"name": "begin_task", "description": "Begin a task under a configured flow grant; return an opaque receipt only.", "inputSchema": {"type": "object", "properties": {"grant_id": {"type": "string"}, "task": {"type": "string"}, "idempotency_key": {"type": "string"}, "input_class": {"type": "string"}}, "required": ["grant_id", "task", "idempotency_key"], "additionalProperties": False}, "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}},
-                {"name": "task_status", "description": "Read fixed receipt status. This never returns task output or a result URL.", "inputSchema": {"type": "object", "properties": {"receipt": {"type": "string"}}, "required": ["receipt"], "additionalProperties": False}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
+                {"name": "list_candidates", "description": "List only your installed execution candidates, declared capabilities and labelled policy observations. Capacity and interactive authentication are not verified; actual admission rechecks current authority. Preferences remain with the caller.", "inputSchema": {"type": "object", "properties": {"input_class": {"type": "string", "minLength": 1, "maxLength": 96}}, "additionalProperties": False}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
+                {"name": "begin_task", "description": "Begin a task under a configured grant. Results follow its output class and return contract; omitted input_class selects the installation's most restrictive class.", "inputSchema": {"type": "object", "properties": {"grant_id": {"type": "string"}, "task": {"type": "string"}, "idempotency_key": {"type": "string"}, "input_class": {"type": "string"}, "expected_generation": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}, "previous_attempt": {"type": "string", "minLength": 1, "maxLength": 256}, "selection_reason": {"type": "string", "minLength": 1, "maxLength": 500}}, "required": ["grant_id", "task", "idempotency_key"], "additionalProperties": False}, "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}},
+                {"name": "task_status", "description": "Read receipt status and verified content when the installed class-aware grant clears this caller.", "inputSchema": {"type": "object", "properties": {"receipt": {"type": "string"}}, "required": ["receipt"], "additionalProperties": False}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
+                {"name": "read_result", "description": "Read a private result using the grant's explicit reader scope; receipt possession alone grants no access.", "inputSchema": {"type": "object", "properties": {"receipt": {"type": "string", "minLength": 1, "maxLength": 256}}, "required": ["receipt"], "additionalProperties": False}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
             ]})
         if method != "tools/call":
             return rpc_error(-32601, "Method not supported")
@@ -393,18 +506,38 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         if not isinstance(arguments, dict):
             return rpc_error(-32602, "Invalid parameters")
         try:
-            if name == "begin_task":
-                if set(arguments) - {"grant_id", "task", "idempotency_key", "input_class"} or not all(isinstance(arguments.get(field), str) for field in ("grant_id", "task", "idempotency_key")) or ("input_class" in arguments and not isinstance(arguments["input_class"], str)):
+            if name == "list_candidates":
+                if set(arguments) - {"input_class"} or ("input_class" in arguments and (not isinstance(arguments["input_class"], str) or not 1 <= len(arguments["input_class"]) <= 96)):
                     return rpc_error(-32602, "Invalid parameters")
-                row = platform.submit(arguments["grant_id"], arguments["task"], auth[0], arguments["idempotency_key"], arguments.get("input_class"))
-                result = platform.public_status(row.receipt, auth[0])
+                from .discovery import list_candidates
+                result = list_candidates(platform, auth[0], arguments.get("input_class"))
+            elif name == "begin_task":
+                if set(arguments) - {"grant_id", "task", "idempotency_key", "input_class", "expected_generation", "previous_attempt", "selection_reason"} or not all(isinstance(arguments.get(field), str) for field in ("grant_id", "task", "idempotency_key")) or any(field in arguments and not isinstance(arguments[field], str) for field in ("input_class", "expected_generation", "previous_attempt", "selection_reason")):
+                    return rpc_error(-32602, "Invalid parameters")
+                row = platform.submit(arguments["grant_id"], arguments["task"], auth[0], arguments["idempotency_key"], arguments.get("input_class"),
+                    expected_generation=arguments.get("expected_generation"), previous_attempt=arguments.get("previous_attempt"),
+                    selection_reason=arguments.get("selection_reason"))
+                from .results import result_status
+                result = result_status(platform, row.receipt, auth[0])
             elif name == "task_status":
                 if set(arguments) != {"receipt"} or not isinstance(arguments["receipt"], str):
                     return rpc_error(-32602, "Invalid parameters")
-                result = platform.public_status(arguments["receipt"], auth[0])
+                from .results import result_status
+                result = result_status(platform, arguments["receipt"], auth[0])
+            elif name == "read_result":
+                if set(arguments) != {"receipt"} or not isinstance(arguments["receipt"], str) or not 1 <= len(arguments["receipt"]) <= 256:
+                    return rpc_error(-32602, "Invalid parameters")
+                from .results import scoped_read
+                result = scoped_read(platform, arguments["receipt"], auth[0])
             else:
                 return rpc_error(-32602, "Tool not supported")
-        except PlatformError:
+        except PlatformError as exc:
+            if exc.code in {"previous_attempt_unfinished", "previous_effect_uncertain", "idempotency_conflict"}:
+                error = {"code": exc.code}
+                if exc.receipt is not None:
+                    error["receipt"] = exc.receipt
+                return reply({"content": [{"type": "text", "text": exc.message}],
+                              "structuredContent": {"error": error}, "isError": True})
             return reply({"content": [{"type": "text", "text": "Task unavailable or not permitted."}], "isError": True})
         return reply({"content": [{"type": "text", "text": json.dumps(result, separators=(",", ":"))}], "structuredContent": result, "isError": False})
 
