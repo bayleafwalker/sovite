@@ -109,6 +109,8 @@ No production credentials, private keys, runtime databases or model weights are 
 
 ## Vuoro private workflow integration
 
+Release 0.1.17 sends hosted compilation and activation through the authenticated control API, without local database access. It bounds transport errors and preserves uncertain activation outcomes.
+
 Python owner release 0.1.16 adds a local-only task/receipt catalog and rejects
 explicitly truncated model responses. See [the integration contract](docs/integrations/vuoro-private-workflow.md)
 for identity binding, private artifact separation and the bounded C0 evaluation.
