@@ -202,8 +202,14 @@ def test_helper_tls_mtls_EXACT_BINDING_stream_boundaries_and_no_payload_logging(
 def test_BOUNDED_STOP_real_engine_stream_termination_and_ack(tmp_path, stop):
     async def scenario(peer, engine, key, expected):
         await peer.prepare(key, expected)
-        await peer.invoke(deadline=int(time.time()) + 1 if stop == 'deadline' else None)
-        assert (await peer.receive())['type'] == 'accepted'
+        # Integer Unix deadlines need a full admission interval; +1 can expire
+        # at the next clock boundary before the real helper accepts the frame.
+        sent_wall, sent_mono = time.time(), time.monotonic()
+        deadline = int(sent_wall) + 2 if stop == 'deadline' else None
+        deadline_mono = sent_mono + deadline - sent_wall if deadline is not None else None
+        await peer.invoke(deadline=deadline)
+        first = await peer.receive()
+        assert first['type'] == 'accepted', first.get('code')
         await asyncio.wait_for(engine.started.wait(), 1)
         began = time.monotonic()
         if stop == 'cancel':
@@ -219,7 +225,14 @@ def test_BOUNDED_STOP_real_engine_stream_termination_and_ack(tmp_path, stop):
             if stop != 'cancel':
                 assert message['code'] == ('permit_expired' if stop == 'permit' else 'deadline_exceeded')
         await asyncio.wait_for(engine.stopped.wait(), 3.2)
-        assert time.monotonic() - began < (3.2 if stop == 'permit' else 2)
+        stopped = time.monotonic()
+        if stop == 'deadline':
+            # The real watchdog polls every50ms; measured stop lag was26–40ms.
+            # Bound shutdown against the frozen deadline, not its floor phase.
+            assert stopped <= deadline_mono + 0.25
+            assert stopped - sent_mono <= 2.25
+        else:
+            assert stopped - began < (3.2 if stop == 'permit' else 2)
         assert len(engine.calls) == 1  # NO_TRANSPARENT_REPLAY
     async def run():
         async with pilot(tmp_path, scenario, stall=True):
