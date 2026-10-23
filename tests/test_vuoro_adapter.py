@@ -3,6 +3,10 @@ from dataclasses import replace
 from datetime import datetime, timezone, timedelta
 import json
 import pytest
+import sys
+
+if sys.version_info < (3, 12):
+    pytest.skip("Vuoro owner integration requires Python 3.12 or newer", allow_module_level=True)
 import httpx
 from sovite.vuoro_adapter import (
     LocalBinding,

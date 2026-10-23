@@ -15,7 +15,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10"]
+test = [
+  "pytest>=8,<10",
+  # Receipt-adapter integration tests use the owner's real catalog/identity API.
+  "vuoro-service @ git+https://github.com/bayleafwalker/vuoro.git@7dfa23483773d778cb2fa65a152e87b3278d437c#subdirectory=packages/vuoro-service ; python_version >= '3.12'",
+]
 
 [project.scripts]
 sovite = "sovite.cli:main"
