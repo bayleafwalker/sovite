@@ -23,10 +23,12 @@ def test_capability_refresh_tied_to_lease_across_60_seconds(authority_env, monke
             started = time.time()
             import sovite.authority as authority_module
             import sovite.worker as worker_module
+            import sovite.lease_service as lease_module
             for elapsed in (30, 61, 95):
                 now = started + elapsed
                 monkeypatch.setattr(authority_module, 'time', SimpleNamespace(time=lambda: now))
                 monkeypatch.setattr(worker_module, 'time', SimpleNamespace(time=lambda: now))
+                monkeypatch.setattr(lease_module, 'time', SimpleNamespace(time=lambda: now))
                 assert env.worker.renew(env.job.id)
                 helper_id = next(iter(env.gateway.sessions.values())).session.session_id
                 env.authority.touch(env.gateway.id, helper_id)
