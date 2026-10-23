@@ -1,6 +1,11 @@
 # Console API contract
 
-All `/api/*` endpoints except `POST /api/auth/session` require operator authorization via `Authorization: Bearer …` or the HttpOnly `sovite_session` cookie. Cookie mutations require an exact `Origin` matching `SOVITE_PUBLIC_ORIGIN`. Requests and responses are JSON. The static console and API use the same origin. No operator credential is stored in browser localStorage. Errors use `{detail:{code,message}}`; messages never contain model or tool output.
+All `/api/*` endpoints except `POST /api/auth/session` and the two hosted bundle endpoints below require operator authorization via `Authorization: Bearer …` or the HttpOnly `sovite_session` cookie. Cookie mutations require an exact `Origin` matching `SOVITE_PUBLIC_ORIGIN`. Requests and responses are JSON. The static console and API use the same origin. No operator credential is stored in browser localStorage. Errors use `{detail:{code,message}}`; messages never contain model or tool output.
+
+Hosted installations only (a `SOVITE_HOSTING_ENVELOPE` is configured on the service) expose the author/activator bundle routes. They are not operator routes, and the operator token is refused on both. `sovite compile` and `sovite activate` are clients of these routes: they use `SOVITE_CONTROL_URL` plus `SOVITE_AUTHOR_TOKEN` or `SOVITE_ACTIVATOR_TOKEN`, need no database credential, and are the only hosted CLI paths for compilation and activation.
+
+- `POST /api/bundles` body `{bundle:object}` requires the author role and returns 201 `{status:"compiled",generation:string}`. It stores a draft revision and does not change the active generation. A bundle that exceeds the current policy or hosting envelope returns 422.
+- `POST /api/bundles/{generation}/activate` takes no body, requires the activator role and returns 200 `{status:"activated",generation:string}` for the requested generation. Misuse returns 401/403/404/409/422. There is no hosted `reload`.
 
 - `POST /api/auth/session` body `{token:string}` creates a cookie and returns `{identity:"operator",role:"operator"}`. `GET /api/auth/session` returns the authenticated identity. `DELETE /api/auth/session` signs out.
 - `GET /api/overview` returns `{name,mode,generation,counts:{agents,models,harnesses,grants,jobs,running,queued,completed,blocked},workers:[{id,updated_at,job_id,healthy}],qualification_required,qualified,audit:{valid,events,head,limitation},storage:{backend},security:{public_origin,secure_cookies},capabilities:{...}}`.

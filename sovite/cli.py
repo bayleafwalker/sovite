@@ -141,11 +141,25 @@ def main():
             emit({"valid": True, "generation": generation, "mode": bundle["mode"], "grants": len(bundle["grants"]), "scope": "Declared configuration constraints only"})
             return
         hosted = bool(os.environ.get("SOVITE_HOSTING_ENVELOPE"))
+        if hosted and args.command in {"compile", "activate", "reload"}:
+            # Hosted compile and activate are authenticated API clients. They run before
+            # settings, database and Platform construction, and never read the envelope
+            # file: the serving process is the policy and role authority.
+            from . import control_client
+            if args.command == "compile":
+                emit(control_client.compile_command(args.path))
+            elif args.command == "activate":
+                emit(control_client.activate_command(args.generation))
+            else:
+                raise control_client.ControlError(
+                    "Hosted mode does not support reload: compile the bundle with an author credential, "
+                    "then activate the resulting generation with an activator credential.")
+            return
         offline = (hosted and args.command in {"keys", "runtime-binding"}) or (args.command == "qualify" and args.output)
         if offline:
             settings = Settings.from_env(require_auth=False)
         elif hosted and args.command != "serve":
-            role = {"compile": "author", "activate": "activator", "reload": "activator"}.get(args.command, "operator")
+            role = {"compile": "author", "activate": "activator"}.get(args.command, "operator")
             settings = Settings.from_env(auth_role=role)
         else:
             settings = Settings.from_env()
