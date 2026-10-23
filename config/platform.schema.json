@@ -61,6 +61,10 @@
       "type": "string",
       "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
     },
+    "discovery_class": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,95}$(?!\\n)"
+    },
     "output_contracts": {
       "type": "array",
       "maxItems": 100,

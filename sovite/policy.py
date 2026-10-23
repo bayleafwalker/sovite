@@ -170,6 +170,7 @@ SCHEMA = {
                               "description": TEXT, "version": TEXT}),
             "mode": {"enum": ["development", "enforced"]},
             "restricted_class": ID,
+            "discovery_class": ID,
             "output_contracts": {"type": "array", "maxItems": 100, "items": named(
                 ["source_class", "output_class", "destinations", "approvers", "procedure_ref"], {
                     "source_class": ID, "output_class": ID,
@@ -281,6 +282,8 @@ def validate_bundle(bundle: dict) -> dict:
 
     if "restricted_class" in bundle:
         ref("data_classes", bundle["restricted_class"], "restricted_class")
+    if "discovery_class" in bundle:
+        ref("data_classes", bundle["discovery_class"], "discovery_class")
     if v2:
         for role in bundle["connector_roles"]:
             ref("destinations", role["destination"], role["id"])

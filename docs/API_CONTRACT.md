@@ -26,13 +26,20 @@ Hosted installations only (a `SOVITE_HOSTING_ENVELOPE` is configured on the serv
 
 | Tool | Input | Result authority |
 | --- | --- | --- |
-| `begin_task` | `{grant_id,task,idempotency_key,input_class?}` | Admits a job under the caller's current grant and returns its authorized result projection. |
+| `list_candidates` | `{input_class?}` | Lists caller-visible grants; details require installed discovery-class clearance. No reservation or live-account/capacity probe. |
+| `begin_task` | `{grant_id,task,idempotency_key,input_class?,expected_generation?,previous_attempt?,selection_reason?}` | Admits under current authority and returns the installed projection. Lineage is metadata only; the rationale is private job data. |
 | `task_status` | `{receipt}` | Rechecks ownership and current authority; returns the producing job's authorized projection. |
 | `read_result` | `{receipt}` | Releases content only to an exact configured scoped reader. A producing caller uses task_status for class-aware content unless also listed in result_readers. |
 
 A `reference` grant preserves the original two-field `{receipt,status}` projection and the fixed pending/available/unavailable status vocabulary. A `class-aware` grant may include content only when `output_class` fits the current caller clearance. A receipt alone is never a bearer read credential.
 
 An exact identity in `result_readers` can read the producing job's artifact without operator-wide access. Reader membership is required in both the pinned and current grant, and the identity must remain configured. This is scoped content authority, not permission to submit the producer's work. Current producer authority, generation, qualification and inhibits are checked on release. Artifact digest and job storage identity are verified, with authority checked again after storage I/O. An absent legacy output declaration resolves to the highest installed class. Failure never releases content; provider errors and artifact bodies are excluded from audit metadata.
+
+Detailed discovery uses optional installed `discovery_class`, defaulting to the highest installed class without mutating existing bundle hashes. Each candidate's `caller_clearance` must meet it. Below clearance only `grant_id`, `return_contract` and `details: clearance_required` are returned; generation and observation details are withheld. A detailed response separates declared route/capability/class/return facts from current grant-policy/installation-qualification observations. Workflow-only routes say `bound_workflow_required`. Capacity, gateway runtime availability, live accounts, quality and prices are not probed. Every admission and later owner boundary still rechecks the actual request.
+
+`selection_reason` is optional nonempty UTF-8 text of at most 500 characters, retained only in private operator-visible `resolved.selection`, under the job's class/placement. It is absent from model input, caller status, discovery and audit details; missing rationale is explicitly `not_supplied`. `previous_attempt` is an owned receipt, at most 256 characters, recorded separately from an approved transfer. It reads no artifact and grants no content access.
+
+An exact same-role idempotent replay recovers its existing receipt before re-admission; release still rechecks current authority. A changed binding, rationale or lineage under that caller-scoped key returns `idempotency_conflict` with the owned receipt. MCP reports `previous_attempt_unfinished` and `previous_effect_uncertain` distinctly, without private output. Unknown and foreign receipts share a generic refusal. See [the discovery and retry contract](CALLER-DISCOVERY.md).
 
 ## Data class and workflow admission
 
@@ -42,7 +49,7 @@ An omitted job or workflow `input_class` selects the highest-ranked installed cl
 | --- | --- | --- |
 | `POST /api/workflows/validate` | `{workflow}` | An author, or an operator in a self-hosted installation without a hosting envelope, validates structure. It creates no runtime authority. |
 | `POST /api/workflows/bind` | `{workflow,requirements_ref,session_policy_ref,expected_generation,input_class?}` | The same author boundary selects and durably records a binding after checking every role grant, destination and transfer. |
-| `POST /api/workflows/jobs` | `{binding,role,task?,idempotency_key,source_release?,transfer_id?}` | A caller or operator submits a delivery role from an author-recorded current binding. Caller role-grant authority still applies. |
+| `POST /api/workflows/jobs` | `{binding,role,task?,idempotency_key,source_release?,transfer_id?,previous_attempt?,selection_reason?}` | A caller or operator submits a delivery role from an author-recorded current binding. Caller role-grant authority still applies. |
 
 Bindings carry pinned requirements/session-policy references, workflow revision, installation identity, bundle generation, role selections, input classes and transfer policy. A valid hash or local compilation is not an admission credential: the exact binding must have been recorded through the author boundary. External authoring roles cannot be submitted as delivery jobs. Grants marked `workflow_only: true` reject ordinary MCP and direct operator submission. Superseded generations and inhibited source/target authority fence existing and new work.
 
