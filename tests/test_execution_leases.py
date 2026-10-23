@@ -964,6 +964,13 @@ def test_known_403_dispatch_denial_blocks_candidate_but_is_not_outage(owner):
         "following eligible fixture",
         "operations",
         "following-eligible",
+        # Current-main flow admission requires an explicit class within this
+        # second grant's ceiling, rather than defaulting to the bundle maximum.
+        input_class=next(g["input_class"] for g in owner.bundle["grants"]
+                         if g["id"] == "change-assessment"),
+    )
+    assert following.resolved["input_class"] == next(
+        g["input_class"] for g in owner.bundle["grants"] if g["id"] == "change-assessment"
     )
     assert job.created_at < following.created_at
     with owner.platform.db.sessions.begin() as session:
@@ -1238,7 +1245,7 @@ def test_same_instance_old_execute_cannot_renew_or_hand_back_replacement(owner, 
     [("inhibited", "binding_inhibited"), ("disabled", "binding_disabled")],
 )
 def test_reserve_binding_denial_blocks_only_denied_candidate_and_continues(
-    owner, restriction, code
+    owner, restriction, code, monkeypatch
 ):
     bundle = copy.deepcopy(owner.bundle)
     first_agent = next(
@@ -1264,18 +1271,36 @@ def test_reserve_binding_denial_blocks_only_denied_candidate_and_continues(
         first_model["enabled"] = False  # Genuine valid authored configuration.
     generation = owner.platform.compile(bundle)
     owner.platform.activate(generation)
-    denied = submit(owner)
+    if restriction == "disabled":
+        # Current-main admission rejects disabled models before enqueue. Prove
+        # that rule, then reproduce only the prior owner's enqueue behavior
+        # for a legacy queued row; all later owner checks remain real.
+        before = snapshot(owner.platform)
+        refused("binding_disabled", submit, owner, status=403)
+        assert snapshot(owner.platform) == before
+        actual_check = policy.check_role_input
+
+        def legacy_admission_check(authored, grant_id, selected):
+            legacy = copy.deepcopy(authored)
+            next(m for m in legacy["models"] if m["id"] == first_model["id"])["enabled"] = True
+            return actual_check(legacy, grant_id, selected)
+
+        with monkeypatch.context() as legacy_setup:
+            legacy_setup.setattr(policy, "check_role_input", legacy_admission_check)
+            denied = submit(owner)
+    else:
+        denied = submit(owner)
     following = owner.platform.submit(
         "following-grant", "following eligible task", "operations", "binding-following"
     )
     assert denied.created_at < following.created_at
     with owner.platform.db.sessions() as session:
-        assert (
-            owner.platform.authorize(session, denied.grant_id, denied.caller)[
-                "generation"
-            ]
-            == generation
-        )
+        if restriction == "disabled":
+            refused("binding_disabled", owner.platform.authorize, session,
+                    denied.grant_id, denied.caller, status=403)
+        else:
+            assert owner.platform.authorize(session, denied.grant_id, denied.caller)["generation"] == generation
+        assert owner.platform.authorize_existing_job(session, following)["generation"] == generation
     if restriction == "inhibited":
         owner.platform.inhibit_binding(first_model["id"], "Reserve binding fixture")
     assert owner.platform.get_job(denied.id).cancel_requested is False
@@ -1456,9 +1481,24 @@ def _private_hash_reference_job(owner):
         == "a19aad37b3b79391fd7818f8eb049d7c586721448e5c0bdd37938aa35c89975a"
     )
     job = submit(owner, key="private-hash-vector", task=task)
-    expected = {
+    # Main's class-aware policy adds exactly these declared selection fields.
+    # Independently qualified genuine old/current submissions establish both
+    # full preimages; removing only the two additions must retain the old hash.
+    assert job.resolved["input_class"] == "C3"
+    assert job.resolved["selection"] == {
+        "generation": job.generation, "grant_id": "incident-forensics",
+        "harness_id": "assessment-harness", "model_id": "assessment-model",
+        "reason": None, "reason_source": "not_supplied",
+    }
+    legacy = {k: v for k, v in job.resolved.items() if k not in {"input_class", "selection"}}
+    previous = {
         "direct": "3b7ea048eba615fd8b0832d7d2d828054ee9f53565010796226f91c76e06734c",
         "gateway": "60f69c3279fe7d248cd3234248d272bc733d30aca5465b789de81f1e5e0cb9d0",
+    }
+    assert reference_digest(legacy) == previous[owner.model]
+    expected = {
+        "direct": "e43a6295b1320a8c3ee9f1f959af3ffd601f6ca8e1ca5f91e28be6ccd950c61b",
+        "gateway": "870e50b9c7a3b98d0ccd98a8c786ba8bb46972e5e7b6adf6089bc9d25a1e8f67",
     }
     assert reference_digest(job.resolved) == expected[owner.model]
     return job, expected[owner.model]

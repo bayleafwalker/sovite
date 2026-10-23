@@ -1,6 +1,6 @@
 # Internal execution lease owner
 
-Status: **Internal O2a owner implemented; source verification complete against the schema5 parent, integration with current main pending.**
+Status: **Internal O2a owner implemented and verified against current main; canonical landing and CI pending.**
 Accepted parent is schema5 source `62ea16d0c67d42bfd189dfe0e4e3c1e0b434b39c`.
 This unit supplies no private API, remote client, inference/native routing,
 deployment, credential removal, finite production retention or full R4/S4
@@ -225,9 +225,39 @@ binding at publication and final-lock time) reached their intended failures
 after eleven genuine PostgreSQL positive controls. The isolated database was
 removed. This is source qualification, not hosted/remote or runtime adoption.
 
-Current-main integration must preserve its workflow-aware existing-job
-reauthorization and current attempt/output behavior. Actual integrated tests
-and main CI are required before landing. Finite operation journal capacity,
+Current-main integration preserves workflow-aware existing-job reauthorization
+and current attempt/output behavior from canonical main `1c8b55b5fe724bfc0dfbdc0bfcaf0b63d2302311`.
+The integrated source passed1680 tests against disposable PostgreSQL17.11 with
+zero skips, plus176 owner pure tests. All four copied-source semantic mutants
+again reached their intended failures after eleven real PostgreSQL positive
+controls. The temporary database was removed and Helm structural validation
+passed without applying resources. Canonical main CI remains a landing gate. Finite operation journal capacity,
 instance lifecycle and tombstone/epoch policy remain blockers before remote
 adoption. No API, gateway transport, credential/network or deployment change
 is supplied by this unit.
+
+The current-main existing-job authorizer additionally reports explicit lineage
+ineligibility after enqueue: previous_attempt_unavailable404,
+previous_attempt_unfinished409 and previous_effect_uncertain409. Reserve blocks
+and audits these exact owner outcomes without an attempt, matching existing
+lineage dispatch behavior. Other non403 failures, including owner/currentness
+outages and corruption, still propagate without an idle result or queue change.
+
+The two-candidate grant-denial fixture explicitly submits the following job at
+that grant's own input-class ceiling under current-main flow admission. It does
+not inherit the bundle maximum above that ceiling; no policy, grant or dispatch
+assertion is relaxed.
+
+Current-main policy also refuses disabled models before enqueue. The reserve
+disabled-model fixture first proves that refusal/no-effect behavior, then
+explicitly simulates only historical enqueue admission in its owned fixture.
+It restores the real policy before reserve and requires denial of that legacy
+queued row plus successful selection of the independently authorized following
+job. No production authorization or dispatch assertion is bypassed.
+
+Canonical private-recipe vectors were independently requalified against main:
+its only preimage additions are explicit input_class and selection metadata.
+The tests pin the new full digest, assert both additions exactly, and also
+remove only those additions to verify each original full recipe digest.
+Generation and authored bundle bytes remain unchanged. Task UTF8 hashing and
+operation-digest vectors retain their original exact values.

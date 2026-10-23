@@ -270,7 +270,15 @@ class LeaseService:
                 try:
                     self._authorize_current(session, job, now)
                 except PlatformError as exc:
-                    if exc.status != 403:
+                    # Existing-job lineage can become ineligible after enqueue.
+                    # These owner-declared history denials are distinct from an
+                    # unavailable/corrupt current owner and may block dispatch.
+                    lineage_denial = (exc.status, exc.code) in {
+                        (404, "previous_attempt_unavailable"),
+                        (409, "previous_attempt_unfinished"),
+                        (409, "previous_effect_uncertain"),
+                    }
+                    if exc.status != 403 and not lineage_denial:
                         raise
                     job.status, job.error_code, job.updated_at, job.finished_at = "blocked", exc.code, now, now
                     self.platform.db.audit(session, self.id, "task.dispatch_denied", job.id, {"code": exc.code})
