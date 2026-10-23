@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import secrets
 import time
 import uuid
@@ -16,7 +17,7 @@ from sqlalchemy import delete, select
 from .connector.canonical import ProtocolError
 from .connector.identity import ExpectedIdentity, Verification, verify_binding, verify_connection, verify_preparation
 from .connector.protocol import BODY_LIMIT, FRESHNESS_SECONDS, PERMIT_SECONDS
-from .db import BindingState, ExecutionAuthority, HelperEnrollment, HelperSession, Job, MetadataRow, RequestLedger
+from .db import BindingState, ExecutionAuthority, HelperEnrollment, HelperSession, Job, MetadataRow, RequestLedger, WorkerExecutionLease
 from .service import PlatformError
 
 CAPABILITY_SECONDS = 60
@@ -37,20 +38,39 @@ def execution_context(job, workload):
             "lease_owner": job.lease_owner, "workload": workload}
 
 
-def issue_execution(platform, session, job):
+def check_execution_binding(platform, session, job):
+    """Revalidate a gateway binding from current owner state, without helper I/O."""
+    model = job.resolved.get("model", {})
+    if model.get("connection", {}).get("kind") != "model-gateway":
+        return None
+    binding_id = model.get("id")
+    try:
+        bundle, generation, binding, _ = Authority(platform)._binding(session, binding_id)
+    except (KeyError, TypeError, StopIteration):
+        fail("binding_context_denied", 503)
+    if generation != job.generation or binding != model:
+        fail("revision_superseded")
+    return binding
+
+
+def issue_execution(platform, session, job, *, fence: str, workload: str, now: float, deadline: float):
     if job.resolved.get("model", {}).get("connection", {}).get("kind") != "model-gateway":
-        return
-    now, capability, fence = time.time(), secrets.token_urlsafe(32), uuid.uuid4().hex
-    deadline = now + min(platform.settings.job_timeout_seconds, job.resolved["grant"].get("timeout_seconds", platform.settings.job_timeout_seconds))
+        return None
+    if not isinstance(fence, str) or len(fence) != 32 or any(c not in "0123456789abcdef" for c in fence):
+        raise ValueError("owner fence is invalid")
+    if not deadline > now:
+        raise ValueError("execution deadline is invalid")
+    capability = secrets.token_urlsafe(32)
     row = session.get(ExecutionAuthority, job.id)
     if row is None:
         row = ExecutionAuthority(job_id=job.id)
         session.add(row)
     row.fence, row.capability_digest = fence, checksum(capability)
-    row.context = execution_context(job, platform.settings.execution_workload_identity)
+    row.context = execution_context(job, workload)
     row.expires_at, row.deadline = min(deadline, now + CAPABILITY_SECONDS), deadline
     # Transient claim result only; job_dict and SQL never contain the bearer secret.
     job.execution_capability, job.execution_fence, job.execution_deadline = capability, fence, deadline
+    return {"capability": capability, "context": row.context}
 
 
 def revoke_execution(session, job_id):
@@ -61,9 +81,46 @@ def revoke_execution(session, job_id):
 
 def refresh_execution(platform, session, job, fence, now):
     row = session.get(ExecutionAuthority, job.id)
-    if (row is not None and row.fence == fence and row.capability_digest and row.expires_at > 0
-            and row.context == execution_context(job, platform.settings.execution_workload_identity)):
-        row.expires_at = min(row.deadline, now + CAPABILITY_SECONDS)
+    lease = session.get(WorkerExecutionLease, job.id)
+    if (row is None or not isinstance(fence, str) or row.fence != fence
+            or lease is None or lease.phase != "started" or lease.fence != fence
+            or lease.execution_deadline is None or lease.execution_deadline != row.deadline
+            or not isinstance(row.capability_digest, str) or not row.capability_digest
+            or isinstance(row.expires_at, bool) or not isinstance(row.expires_at, (int, float))
+            or isinstance(row.deadline, bool) or not isinstance(row.deadline, (int, float))
+            or not math.isfinite(row.expires_at) or not math.isfinite(row.deadline)
+            or not row.expires_at > now or not row.deadline > now
+            or not isinstance(row.context, dict)
+            or row.context != execution_context(job, lease.workload_id)):
+        return False
+    row.expires_at = min(row.deadline, now + CAPABILITY_SECONDS)
+    return row.expires_at > now
+
+
+def execution_authority_current(platform, session, job, lease, workload, now):
+    """Return whether a started gateway context still matches its owner lease."""
+    row = session.get(ExecutionAuthority, job.id)
+    return bool(
+        row is not None
+        and lease is not None
+        and lease.phase == "started"
+        and lease.fence == row.fence
+        and lease.workload_id == workload
+        and lease.execution_deadline is not None
+        and row.deadline == lease.execution_deadline
+        and isinstance(row.capability_digest, str)
+        and bool(row.capability_digest)
+        and isinstance(row.expires_at, (int, float))
+        and not isinstance(row.expires_at, bool)
+        and math.isfinite(row.expires_at)
+        and row.expires_at > now
+        and isinstance(row.deadline, (int, float))
+        and not isinstance(row.deadline, bool)
+        and math.isfinite(row.deadline)
+        and row.deadline > now
+        and isinstance(row.context, dict)
+        and row.context == execution_context(job, workload)
+    )
 
 
 def sweep_terminal_authority(platform, session):

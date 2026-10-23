@@ -657,3 +657,75 @@ def test_complete_model_result_records_stop_reason(setup):
     assert row.status == 'completed'
     artifact = json.loads(platform.store.get(row.artifact_key, row.artifact_sha256))
     assert artifact['finish_reason'] == 'stop'
+
+
+# O2 trusted-adapter oracles. These use the actual Worker/LeaseService with the
+# existing private SQLite Platform, without TestClient, a server or transport.
+def test_o2_worker_claim_preserves_trusted_owner_and_populates_universal_lease(setup):
+    import hashlib
+
+    from sqlalchemy import select
+    from sovite.db import WorkerExecutionLease, WorkerExecutionOperation
+
+    _, platform, _ = setup
+    submitted = platform.submit("incident-forensics", "synthetic adapter task", "operations", "o2-local-claim")
+    worker = Worker(platform)
+    job = worker.claim()
+    assert job.id == submitted.id
+    with platform.db.sessions() as session:
+        lease = session.get(WorkerExecutionLease, job.id)
+        assert lease is not None, "trusted Worker must use the same universal lease owner"
+        assert lease.phase == "started"
+        assert lease.instance_id == hashlib.sha256(worker.id.encode()).hexdigest()
+        assert lease.workload_id == platform.settings.execution_workload_identity
+        assert platform.get_job(job.id, session).lease_owner == worker.id
+        assert lease.fence == job.execution_fence
+        assert platform.get_job(job.id, session).attempts == 1
+        assert session.scalars(select(WorkerExecutionOperation)).all()
+    worker.finish(job.id, error=RuntimeFailure("upstream_rejected"))
+    with platform.db.sessions() as session:
+        assert session.get(WorkerExecutionLease, job.id).phase == "finished"
+        assert session.get(Job, job.id).lease_owner is None
+
+
+def test_o2_same_worker_old_task_cannot_borrow_replacement_fence(setup):
+    from sovite.db import WorkerExecutionLease
+
+    async def scenario():
+        _, platform, _ = setup
+        platform.submit("incident-forensics", "synthetic old task", "operations", "o2-same-worker")
+        entered, release = asyncio.Event(), asyncio.Event()
+        class HeldRunner:
+            authorization_check = None
+            async def run(self, recipe, task, job_id):
+                entered.set()
+                await release.wait()
+                return {"synthetic": True, "answer": "old execution result"}
+        worker = Worker(platform, HeldRunner())
+        old = worker.claim()
+        with platform.db.sessions() as session:
+            lease = session.get(WorkerExecutionLease, old.id)
+            assert lease is not None, "universal lease setup must precede same-instance race"
+            old_fence = lease.fence
+        running = asyncio.create_task(worker.execute(old))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            with platform.db.sessions.begin() as session:
+                session.get(Job, old.id).lease_until = time.time() - 1
+                session.get(WorkerExecutionLease, old.id).lease_until = time.time() - 1
+            worker.recover_expired()
+            replacement = worker.claim()  # Same object/worker ID, new execution.
+            assert replacement.id == old.id and replacement.execution_fence != old_fence
+            release.set()
+            await asyncio.wait_for(running, 3)
+            current = platform.get_job(old.id)
+            assert current.status == "running" and current.public_projection is None
+            assert current.artifact_key is None
+            with platform.db.sessions() as session:
+                assert session.get(WorkerExecutionLease, old.id).fence == replacement.execution_fence
+        finally:
+            release.set()
+            if not running.done():
+                running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+    asyncio.run(scenario())

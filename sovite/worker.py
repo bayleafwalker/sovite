@@ -51,23 +51,29 @@ class Worker:
     def claim(self) -> Job | None:
         return self.leases.claim()
 
-    def renew(self, job_id: str) -> bool:
-        return self.leases.renew(job_id)
+    def renew(self, job_id: str, fence: str | None = None) -> bool:
+        return self.leases.renew(job_id, fence=fence)
 
-    def hand_back(self, job_id: str):
-        return self.leases.hand_back(job_id)
+    def hand_back(self, job_id: str, fence: str | None = None):
+        return self.leases.hand_back(job_id, fence=fence)
 
-    def finish(self, job_id: str, artifact: tuple[str, str] | None = None, error: RuntimeFailure | None = None, cancelled: bool = False):
-        return self.leases.finish(job_id, artifact=artifact, error=error, cancelled=cancelled)
+    def finish(self, job_id: str, artifact: tuple[str, str] | None = None, error: RuntimeFailure | None = None, cancelled: bool = False, fence: str | None = None):
+        return self.leases.finish(job_id, artifact=artifact, error=error, cancelled=cancelled, fence=fence)
 
     async def execute(self, job: Job):
+        # The running task owns this immutable start fence for its entire life.
+        # A later same-instance reclaim must not be borrowed from the mutable map.
+        captured_fence = getattr(job, "execution_fence", None)
         self.heartbeat(job.id)
         def check_authorization():
-            if not self.renew(job.id):
+            if not self.renew(job.id, fence=captured_fence):
                 raise RuntimeFailure("authorization_revoked")
         self.runner.authorization_check = check_authorization
         operation = asyncio.create_task(self.runner.run(job.resolved, job.task, job.id))
         timeout = min(int(job.resolved["grant"].get("timeout_seconds", self.platform.settings.job_timeout_seconds)), self.platform.settings.job_timeout_seconds)
+        fixed_deadline = getattr(job, "execution_deadline", None)
+        if isinstance(fixed_deadline, (int, float)) and not isinstance(fixed_deadline, bool):
+            timeout = min(timeout, max(0, fixed_deadline - time.time()))
         deadline = time.monotonic() + timeout
         stopping = asyncio.ensure_future(self.stop.wait())
         try:
@@ -79,26 +85,26 @@ class Worker:
                     # Shutdown (rollout, drain, eviction) is not a cancellation: hand the job back.
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
-                    self.hand_back(job.id)
+                    self.hand_back(job.id, fence=captured_fence)
                     return
                 self.heartbeat(job.id)
-                if not self.renew(job.id):
+                if not self.renew(job.id, fence=captured_fence):
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
-                    self.finish(job.id, cancelled=True)
+                    self.finish(job.id, cancelled=True, fence=captured_fence)
                     return
                 if time.monotonic() >= deadline:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
-                    self.finish(job.id, error=RuntimeFailure("execution_timeout", False))
+                    self.finish(job.id, error=RuntimeFailure("execution_timeout", False), fence=captured_fence)
                     return
             result = await operation
             # Artifact commit can be retried safely, while re-executing external effects
             # after an uncertain failure is a separate decision.
             artifact = await asyncio.to_thread(self.platform.store.put, job.id, result)
-            self.finish(job.id, artifact=artifact)
+            self.finish(job.id, artifact=artifact, fence=captured_fence)
         except RuntimeFailure as exc:
-            self.finish(job.id, error=exc)
+            self.finish(job.id, error=exc, fence=captured_fence)
         except asyncio.CancelledError:
             operation.cancel()
             await asyncio.gather(operation, return_exceptions=True)
@@ -107,7 +113,7 @@ class Worker:
         except Exception:
             # Exception messages may contain URLs, response bodies, or sensitive data.
             log.error("Task %s failed with an internal adapter/storage error", job.id)
-            self.finish(job.id, error=RuntimeFailure("internal_execution_error"))
+            self.finish(job.id, error=RuntimeFailure("internal_execution_error"), fence=captured_fence)
         finally:
             stopping.cancel()
             self.runner.authorization_check = None

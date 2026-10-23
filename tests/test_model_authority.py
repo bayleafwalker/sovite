@@ -299,3 +299,21 @@ def test_CURRENT_AUTHORITY_inprocess_invalid_request_fails_closed(authority_env)
             assert failure.value.code == 'inference_request_denied'
             assert env.engine.calls == []
     asyncio.run(scenario())
+
+
+def test_o2_actual_legacy_gateway_fence_matches_universal_and_captured_workload(authority_env):
+    from sovite.db import WorkerExecutionLease
+
+    env = authority_env
+    with env.platform.db.sessions() as session:
+        lease = session.get(WorkerExecutionLease, env.job.id)
+        execution = session.get(ExecutionAuthority, env.job.id)
+        assert lease is not None, "gateway must share the universal execution owner"
+        assert lease.phase == "started"
+        assert execution.fence == lease.fence == env.job.execution_fence
+        assert execution.context["workload"] == lease.workload_id == env.settings.execution_workload_identity
+        assert execution.deadline == lease.execution_deadline
+    env.worker.hand_back(env.job.id)
+    with env.platform.db.sessions() as session:
+        assert session.get(WorkerExecutionLease, env.job.id).phase == "finished"
+        assert session.get(ExecutionAuthority, env.job.id).capability_digest == ""

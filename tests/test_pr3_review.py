@@ -42,7 +42,13 @@ def test_capability_refresh_tied_to_lease_across_60_seconds(authority_env, monke
             # Refresh remains capped by the execution deadline.
             now = started + 120
             with env.platform.db.sessions.begin() as session:
+                # Coherent synthetic original-deadline fixture, not a supported
+                # live deadline mutation or permission to extend fixed deadlines.
+                from sovite.db import WorkerExecutionLease
+                lease = session.get(WorkerExecutionLease, env.job.id)
+                assert lease is not None, "deadline clamp needs a universal lease"
                 session.get(ExecutionAuthority, env.job.id).deadline = now + 5
+                lease.execution_deadline = now + 5
             assert env.worker.renew(env.job.id)
             with env.platform.db.sessions() as session:
                 assert session.get(ExecutionAuthority, env.job.id).expires_at == now + 5
@@ -59,10 +65,21 @@ def test_capability_refresh_never_revives_revoked_or_replaced_fence(authority_en
         elif withdrawal == 'expiry': row.expires_at = 0
         else: row.fence = 'replacement-fence'
         before = row.expires_at, row.capability_digest, row.fence
-    assert env.worker.renew(env.job.id)
+    # O2 intentionally rejects a failed refresh instead of reporting a running
+    # extension. Keep the original no-resurrection predicate and inspect both
+    # canonical scheduling copies; all other PR3 tests remain unchanged.
+    from sovite.db import Job, WorkerExecutionLease
+    with env.platform.db.sessions() as session:
+        job_before = session.get(Job, env.job.id).lease_until
+        lease = session.get(WorkerExecutionLease, env.job.id)
+        assert lease is not None, "trusted gateway must have a universal lease"
+        lease_before = lease.lease_until
+    assert env.worker.renew(env.job.id) is False
     with env.platform.db.sessions() as session:
         row = session.get(ExecutionAuthority, env.job.id)
         assert (row.expires_at, row.capability_digest, row.fence) == before
+        assert session.get(Job, env.job.id).lease_until == job_before
+        assert session.get(WorkerExecutionLease, env.job.id).lease_until == lease_before
 
 
 def test_abandoned_active_ledger_rows_inhibit_instead_of_blocking_forever(authority_env):
