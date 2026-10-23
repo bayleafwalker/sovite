@@ -1,0 +1,48 @@
+{
+  "schema_version": "caller-discovery-verification/v1",
+  "source_commit": "507742e2fe9a63b513042e88f4f3babcea36b045",
+  "parent_contract": {
+    "pull_request": "https://github.com/bayleafwalker/sovite/pull/4",
+    "head_at_start": "cf336b126cb6ddcfe0a6b332b333aed23427d6e5",
+    "state": "open draft; intended class-aware/result-reader contract"
+  },
+  "current_main_reconciled": "62ea16d0c67d42bfd189dfe0e4e3c1e0b434b39c",
+  "environment": {
+    "python": "3.12.14",
+    "packages": {
+      "pytest": "9.1.1",
+      "SQLAlchemy": "2.1.5",
+      "psycopg": "3.3.6",
+      "vuoro-adapter-kit": "0.2.2",
+      "vuoro-service": "0.1.97"
+    },
+    "owner_test_dependency_commit": "7dfa23483773d778cb2fa65a152e87b3278d437c",
+    "postgres_image": "postgres:17.11-alpine",
+    "postgres_image_id": "sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24"
+  },
+  "checks": {
+    "full_tests_passed": 1311,
+    "full_tests_skipped": 0,
+    "focused_tests_passed": 43,
+    "deployment_render": "passed; 22 resources; no cluster changes",
+    "schemas": "published JSON equals runtime definitions",
+    "diff_check": "passed"
+  },
+  "dispositions": [
+    "Detailed discovery is labelled by installed discovery_class and grant clearance; conservative highest-class default preserves old hashes; minimal/no-grant callers cannot probe installed class membership.",
+    "Admission observations reuse owner authorization; gateway availability/capacity is not probed. Workflow-only candidates state bound_workflow_required. Enforced mode cannot report qualification not_required.",
+    "Lineage reads owned same-role receipt metadata, never artifacts or old source authority. New links refuse in-flight/uncertain work. Failed started non-replay-safe outcomes remain uncertain despite cancellation/revocation/timeout labels.",
+    "Gateway initial linkage requires retained confirmed-stop evidence. The owner records a positive snapshot with lineage; normal ledger retention cannot invalidate an admitted successor. Contrary live evidence and identity changes still fence execution/release.",
+    "Exact idempotent replay recovers same-role receipt before re-admission. Changed binding/rationale/lineage conflicts; MCP and HTTP return only the owned receipt. Administrative caller aliases are rejected; caller result reads cannot cross operator role.",
+    "Reasons stay private in resolved metadata and never enter model input, discovery, caller status or audit detail. Artifact reuse remains separately approved source_release/transfer_id with current source/class/destination checks.",
+    "Missing test-owner runtime dependency is now test-only, pinned at an immutable public commit; Python 3.12+ owner integration is explicit. CI installs the test extra."
+  ],
+  "limits": [
+    "No live subscription/account qualification or provider billing/quality claims.",
+    "No live Sovite deployment or merge of the broader draft into main.",
+    "Opt-in lineage does not infer equivalence across unrelated new keys with no lineage.",
+    "Declared interactive authentication support is not verified human presence or effect authority.",
+    "Hosted installs may need an explicit permitted discovery_class to expose details; no automatic metadata downgrade.",
+    "One existing Starlette/httpx deprecation warning."
+  ]
+}
