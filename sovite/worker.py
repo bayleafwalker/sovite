@@ -189,7 +189,7 @@ class RemoteWorker:
         cls._diagnostic_ids(context.instance_id, context.operation_id,
                             operation_kind, state)
 
-    def _reconcile_unknown(self, context, expected_kind: str):
+    def _reconcile_unknown(self, context, expected_kind: str, *, result_states=None):
         from .execution_client import ExecutionLookupNotFound
 
         try:
@@ -198,7 +198,8 @@ class RemoteWorker:
                     or result.get("operation_id") != context.operation_id
                     or result.get("operation_kind") != expected_kind
                     or result.get("job_id") != context.job_id
-                    or result.get("fence") != context.fence):
+                    or result.get("fence") != context.fence
+                    or (result_states is not None and result.get("result_state") not in result_states)):
                 raise RuntimeError("Execution operation lookup did not resolve the exact key")
             return result
         except ExecutionLookupNotFound:
@@ -216,50 +217,85 @@ class RemoteWorker:
         from .execution_client import ExecutionClientError, ExecutionOutcomeUnknown
 
         def complete_or_fail(context, *, outcome, result=None, error_code=None):
+            expected_states = {
+                "completed": {"completed", "cancelled", "blocked"},
+                "failed": {"failed", "cancelled", "blocked"},
+                "retryable_failure": {"retry_wait", "failed", "cancelled", "blocked"},
+                "cancelled": {"cancelled", "blocked"},
+            }[outcome]
             try:
-                return self.client.complete(context, outcome=outcome, result=result,
-                                            error_code=error_code)
+                response = self.client.complete(context, outcome=outcome, result=result,
+                                                error_code=error_code)
+                if (response.get("state") not in expected_states
+                        or response.get("job_id") != context.job_id
+                        or response.get("generation") != context.generation
+                        or response.get("fence") != context.fence):
+                    self.stop.set()
+                    raise RuntimeError("Execution completion did not confirm the requested transition")
+                return response
             except ExecutionOutcomeUnknown:
                 self._diagnostic(context, "complete", "unknown")
-                self._reconcile_unknown(context, "complete")
-                return None
+                self._reconcile_unknown(context, "complete", result_states=expected_states)
+                self._diagnostic(context, "complete", "confirmed")
+                return {"state": "confirmed"}
             except ExecutionClientError:
-                # Client-side bounds and typed owner refusals are known
-                # non-commits. Close the still-current attempt with a small,
-                # finite failure under a fresh operation key.
-                fallback = self._context(self.instance_id, job, self._operation_id())
-                try:
-                    return self.client.complete(
-                        fallback, outcome="failed", error_code="internal_execution_error"
-                    )
-                except ExecutionOutcomeUnknown:
-                    self._diagnostic(fallback, "complete", "unknown")
-                    self._reconcile_unknown(fallback, "complete")
-                    return None
+                self._diagnostic(context, "complete", "refused")
+                self.stop.set()
+                raise
 
         pull_id = self._operation_id()
         try:
             pulled = self.client.pull(self.instance_id, pull_id)
         except ExecutionOutcomeUnknown:
-            # Pull can reserve work even if its response is lost. The operation
-            # journal does not expose private task data through lookup, so stop
-            # this iteration rather than claim again under a new key.
-            self.stop.set()
             self._diagnostic_ids(self.instance_id, pull_id, "pull", "unknown")
+            try:
+                observed = self.client.lookup(self.instance_id, pull_id)
+                if (observed.get("state") != "found" or observed.get("operation_id") != pull_id
+                        or observed.get("operation_kind") != "pull"
+                        or observed.get("result_state") not in {"idle", "reserved"}):
+                    raise RuntimeError("Execution pull lookup did not resolve the exact operation")
+                if observed.get("result_state") == "idle":
+                    self._diagnostic_ids(self.instance_id, pull_id, "pull", "idle_confirmed")
+                    return False
+                # Lookup intentionally omits task/resolved; never dispatch a
+                # reservation recovered without its original pull response.
+                self._diagnostic_ids(self.instance_id, pull_id, "pull", "reservation_not_recovered")
+                self.stop.set()
+                return False
+            except Exception:
+                self._diagnostic_ids(self.instance_id, pull_id, "pull", "unresolved")
+                self.stop.set()
+                raise
+        except ExecutionClientError:
+            self._diagnostic_ids(self.instance_id, pull_id, "pull", "refused")
+            self.stop.set()
             raise
         if pulled["state"] == "idle":
+            return False
+        if pulled["state"] != "reserved" or not isinstance(pulled.get("job"), dict):
+            self._diagnostic_ids(self.instance_id, pull_id, "pull", "unexpected")
+            self.stop.set()
             return False
         job = pulled["job"]
         start_context = self._context(self.instance_id, job, self._operation_id())
         try:
             started = self.client.start(start_context)
         except ExecutionOutcomeUnknown:
-            # Start may have committed and the response may contain the only
-            # gateway capability. Status cannot recover it, so do not dispatch.
             self.stop.set()
             self._diagnostic(start_context, "start", "unknown")
+            self._reconcile_unknown(start_context, "start",
+                                    result_states={"started", "already_started"})
             raise
-        if started["state"] != "started":
+        except ExecutionClientError:
+            self.stop.set()
+            self._diagnostic(start_context, "start", "refused")
+            raise
+        if (started.get("state") != "started"
+                or started.get("job_id") != job.get("job_id")
+                or started.get("generation") != job.get("generation")
+                or started.get("fence") != job.get("fence")):
+            self.stop.set()
+            self._diagnostic(start_context, "start", "unexpected")
             return False
         context = self._context(self.instance_id, job, self._operation_id())
         # Start's bearer is never retained or returned by this worker runtime;
@@ -296,6 +332,7 @@ class RemoteWorker:
                 if observed["state"] != "current" or observed["lease_until"] is None:
                     state = observed["state"] if observed["lease_until"] is not None else "unavailable"
                     self._diagnostic(context, "status", state)
+                    self.stop.set()
                     return False
                 lease_until = float(observed["lease_until"])
                 return True
@@ -325,19 +362,37 @@ class RemoteWorker:
                     await asyncio.gather(operation, return_exceptions=True)
                     handback = self._context(self.instance_id, job, self._operation_id())
                     try:
-                        self.client.handback(handback)
+                        response = self.client.handback(handback)
+                        if (response.get("state") != "handed_back"
+                                or response.get("job_id") != handback.job_id
+                                or response.get("generation") != handback.generation
+                                or response.get("fence") != handback.fence):
+                            self._diagnostic(handback, "handback", "unexpected")
+                            self.stop.set()
+                            raise RuntimeError("Execution handback did not confirm the captured fence")
                     except ExecutionOutcomeUnknown:
                         self._diagnostic(handback, "handback", "unknown")
-                        self._reconcile_unknown(handback, "handback")
+                        self._reconcile_unknown(handback, "handback",
+                                                result_states={"handed_back"})
+                    except ExecutionClientError:
+                        self._diagnostic(handback, "handback", "refused")
+                        self.stop.set()
+                        raise
                     return True
-                state = self.client.status(context)
+                try:
+                    state = self.client.status(context)
+                except Exception:
+                    self._diagnostic(context, "status", "unavailable")
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    self.stop.set()
+                    raise
                 if state["state"] != "current" or state["lease_until"] is None:
                     status_state = state["state"] if state["lease_until"] is not None else "unavailable"
                     self._diagnostic(context, "status", status_state)
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
-                    complete = self._context(self.instance_id, job, self._operation_id())
-                    complete_or_fail(complete, outcome="cancelled")
+                    self.stop.set()
                     return True
                 lease_until = float(state["lease_until"])
                 if time.time() >= deadline:
@@ -366,7 +421,8 @@ class RemoteWorker:
             try:
                 worked = await self.run_once()
             except Exception:
-                # In particular, an unknown pull/start is not retried here.
+                # A prior pull may have reserved work or left a started fence.
+                self.stop.set()
                 log.error("Remote execution operation failed; no further work dispatched")
                 worked = False
             if not worked:
