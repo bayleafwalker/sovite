@@ -128,7 +128,12 @@ deadline. `handback` records the existing cancellation, safe retry, or
 `status` accepts the exact tuple without an operation id. It returns one of
 `current`, `superseded`, `finished`, or `expired`, with only the finite job
 status, phase, lease expiry, and fixed deadline. It does not reveal task text,
-resolved configuration, capabilities, credentials, or audit payloads.
+resolved configuration, capabilities, credentials, or audit payloads. `current`
+means the live fence also passes current authorization checks: cancellation,
+inhibition, a superseded binding, or revoked/expired gateway execution
+authority reports `superseded`. The observation holds the existing authority
+and exact job/lease row locks while it checks and projects the state; it does
+not mutate owner state or expose the reason for a non-current result.
 `lookup` accepts `{instance_id,operation_id}` and reads only that workload's
 existing operation journal; its projection includes operation kind, job/fence
 identity, and result state, never a stored response body or start capability.

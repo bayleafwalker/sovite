@@ -105,7 +105,12 @@ recorded in the [remote operation requirements](worker-execution-remote-operatio
 and [API contract](../API_CONTRACT.md).
 
 Status reports only the exact fence's state, finite Job status, phase, lease
-expiry and deadline. Handback returns `handed_back` with the owner disposition.
+expiry and deadline. `current` requires live authorization as well as a live
+lease: cancellation, inhibition, superseded binding, or withdrawn gateway
+execution authority is reported as `superseded` without exposing a reason.
+Status takes the existing authority lock and exact Job/lease row locks so its
+authorization check and projection describe one owner observation. Handback
+returns `handed_back` with the owner disposition.
 Complete accepts one bounded JSON result or a finite failure/cancellation
 outcome; Sovite writes result bytes through its own artifact store and links
 them only after final fence and authorization checks. Lookup returns journal

@@ -255,9 +255,14 @@ class RemoteExecution:
     def status(self, principal: ExecutionPrincipal, context: ExecutionContext) -> dict:
         _validate_context(context, principal)
         owner = self._owner(principal, context)
-        with self.platform.db.sessions() as session:
-            job = session.get(Job, context.job_id)
-            lease = session.get(WorkerExecutionLease, context.job_id)
+        with self.platform.db.sessions.begin() as session:
+            # Serialize this observation with authority changes and lease writes;
+            # status must describe one owner snapshot without changing it.
+            self.platform.db.authority_lock(session)
+            job = session.execute(
+                select(Job).where(Job.id == context.job_id).with_for_update()
+            ).scalar_one_or_none()
+            lease = session.get(WorkerExecutionLease, context.job_id, with_for_update=True)
             if job is None or lease is None:
                 raise PlatformError("execution_scope_denied", "Execution owner scope is not permitted", 403)
             self.leases._check_lease_finite(job, lease)
@@ -280,7 +285,20 @@ class RemoteExecution:
                 ):
                     state = "expired"
                 else:
-                    state = "current"
+                    try:
+                        self.leases._authorize_current(session, job, now)
+                    except PlatformError as exc:
+                        if exc.status >= 500:
+                            raise
+                        state = "superseded"
+                    else:
+                        gateway = job.resolved.get("model", {}).get("connection", {}).get("kind") == "model-gateway"
+                        if gateway and not execution_authority_current(
+                            self.platform, session, job, lease, principal.workload_id, now
+                        ):
+                            state = "superseded"
+                        else:
+                            state = "current"
             if job.status not in {"queued", "running", "retry_wait", "completed", "failed", "cancelled", "blocked"}:
                 raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503)
             result = {
