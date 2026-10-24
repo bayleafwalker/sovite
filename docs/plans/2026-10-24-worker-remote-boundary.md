@@ -4,6 +4,27 @@ Status: **No supported remote execution-owner or artifact-write API exists in
 this source. The Compose worker therefore still requires SQL and S3 access.**
 This note records a source boundary, not a deployment or qualification claim.
 
+## API admission gate
+
+The internal owner plan, [`2026-10-23-execution-lease-owner.md`](2026-10-23-execution-lease-owner.md),
+states that O2a supplies no private API and that the first private API waits for
+the accepted shared foundation plus real O2/F2 consumer qualification. It also
+records the internal owner candidate's canonical landing and CI as pending. This
+producer source has the internal Python `ExecutionPrincipal`, `ExecutionContext`,
+`LeaseService.reserve`, and `LeaseService.start` interfaces and owner tests, but
+no accepted external F2 request/status schema, generated worker contract/client,
+or evidence that the shared API foundation and consumer gates passed. The API
+contract document contains no worker execution route; the only current
+`/internal/authority/*` surface is for inference gateway authority.
+
+The programme queue authorizes continuing this API work after its ordered
+contract prerequisites. It does not supply the missing external fields,
+operation-journal semantics, or consumer qualification evidence. Adding routes
+now would turn internal private owner views into an unratified network contract.
+The route-absence regression in `tests/test_worker_remote_boundary.py` keeps
+this gate visible until that evidence is attached and the external contract is
+admitted.
+
 ## Current source path
 
 `Worker.claim`, renewal, shutdown handback, recovery, and finalization call the
@@ -27,7 +48,8 @@ no database or object-store credentials.
 
 ## Next implementation seam
 
-The next safe source slice needs an explicit, authenticated owner API and client
+The next safe API slice, after the admission gate above, needs an explicit,
+authenticated owner API and client
 for the existing owner methods. It must define a dedicated workload identity,
 bounded request and response schemas, operation journal/idempotency behavior,
 response-loss outcomes, and exact projections while preserving the current
