@@ -1,13 +1,12 @@
 # Worker execution remote operations: requirements
 
-Status: **candidate requirements for owner review; no API, route, or runtime is admitted.**
+Status: **P08 local API implementation candidate; not deployed or runtime-qualified.**
 
 This document operationalizes the remaining remote worker operations identified
 by [`worker-execution-v1-candidate.md`](worker-execution-v1-candidate.md):
-renew, status, handback, complete, and lookup. It is a review artifact for the
-owner and contract authors. It does not define an admitted HTTP surface or turn
-internal Python methods into wire operations. Any behavior marked **Open owner
-decision** must be decided and tested before a generated contract can freeze it.
+renew, status, handback, complete, and lookup. The P08 candidate implements
+these choices through bounded internal routes. Qualification and deployment are
+still separate work.
 
 The existing Platform jobs, queue, authorization, audit, and universal execution
 lease remain the only state authority. The identity, fence, digest, and
@@ -36,13 +35,11 @@ transaction rules below inherit the internal owner decisions in
    same-instance reclaim. An external adapter cannot call the local trusted
    Worker binding interface or choose its owner key.
 5. Every mutating operation has an authenticated owner principal and a
-   canonical operation identity. **Open owner decision:** whether all five
-   operations share the existing `(workload_id, instance_id, operation_id)`
-   journal and exact request digest convention, or whether read-only status and
-   lookup are deliberately unjournaled. If journaled, operation kind and the
-   exact validated request must be bound to the digest; same-key changed body,
-   scope, principal, or kind returns `idempotency_conflict` (409), never a
-   second transition.
+   canonical operation identity. **P08 choice:** renew, handback, and complete
+   use the existing `(workload_id, instance_id, operation_id)` journal and bind
+   operation kind plus exact validated request to its digest. Status and lookup
+   are read-only and unjournaled. Same-key changed body, scope, principal, or
+   kind returns `idempotency_conflict` (409), never a second transition.
 
 ## Response loss and idempotency
 
@@ -52,11 +49,11 @@ not evidence that the operation failed.
 
 | Operation | Required treatment of a lost response |
 | --- | --- |
-| Renew | The owner must define whether retry with the same operation identity returns the committed result or an observation of current state. It must not apply a second extension, extend a replacement fence, or revive revoked authorization. **Open owner decision:** exact replay result and whether a retry after expiry is rejected or reports the committed renewal. |
-| Status | A retry is an observation only; it cannot renew, start, reclaim, or authorize another pull. **Open owner decision:** whether status is journaled and whether a lost response needs an operation identity. |
-| Handback | A retry must not release a later reservation or change a replacement fence. It must distinguish the original handback outcome from a later recovery/reclaim. **Open owner decision:** same-key replay result and whether a new-key call against a finished/recovered fence is an observation or `execution_fenced`. |
-| Complete | The owner must not publish a second completion or attach artifacts to a replacement incarnation. Any artifact side effect must be reconciled through its own fenced, one-use boundary; a worker retry cannot infer that an external write did or did not happen. **Open owner decision:** exact duplicate result and the owner-visible state for uncertain artifact publication. |
-| Lookup | Lookup is read-only and must not create, renew, finish, or recover a job. **Open owner decision:** which historical operation records it can inspect and how unknown/expired/superseded records are represented. |
+| Renew | Same-key retry returns the committed `renewed` result without a second extension. It cannot extend a replacement fence or revive revoked authorization. A new operation against an expired/stale fence returns `execution_fenced` (409). |
+| Status | A retry is an observation only; it cannot renew, start, reclaim, or authorize another pull. It has no operation id and returns `current`, `superseded`, `finished`, or `expired` plus a bounded minimal projection. |
+| Handback | Same-key retry returns the committed disposition. A new-key call against a finished/recovered fence returns `execution_fenced`; a handback cannot release a later reservation. |
+| Complete | Same-key retry returns the committed state and result digest without storing or publishing a second result. The owner writes bounded result JSON through its existing artifact store, then rechecks the fence and current authority before linking it. A losing/stale completion may leave only an unreferenced content-addressed artifact. |
+| Lookup | Lookup reads one journal row scoped to authenticated workload, exact instance, and operation ID. Missing records return `not_found` (404); it never follows a newer fence or reveals stored request/response bodies. Rows remain under the existing owner retention behavior. |
 
 The response-loss protocol must preserve append-only audit: a committed journal
 result is not overwritten to make a retry appear fresh. If an operation is
@@ -84,9 +81,9 @@ until the open decisions are resolved and a generated schema is reviewed.
   capability. Gateway authority and both scheduling copies remain unchanged
   when renewal is refused.
 - Existing trusted renewal returns false when the exact context is stale or
-  authority is withdrawn. **Open owner decision:** wire outcome vocabulary for
-  renewed, refused, and unknown/stale scope; whether a refusal is a successful
-  observation or a typed error.
+  authority is withdrawn. **P08 choice:** successful renewal returns
+  `renewed` with the lease expiry and fixed deadline; refusal is a typed owner
+  error and does not journal a success.
 
 ### Status
 
@@ -96,9 +93,9 @@ until the open decisions are resolved and a generated schema is reviewed.
 - Status must identify, without ambiguity, whether the exact fence is current,
   finished, expired, superseded, cancelled, or unavailable. It must not imply
   that a `started` result includes a recoverable capability.
-- **Open owner decision:** allowable status fields, visibility of terminal
-  reason, and whether status on a finished or superseded fence is `execution_fenced`
-  or a bounded terminal observation.
+- **P08 choice:** the response contains only the exact tuple, lease phase,
+  finite job status, lease expiry, and deadline. Finished and superseded fences
+  are bounded observations; status does not reveal terminal reason or payload.
 
 ### Handback
 
@@ -107,30 +104,29 @@ until the open decisions are resolved and a generated schema is reviewed.
   It cannot mutate a later reservation.
 - The outcome must distinguish successful release from a stale/recovered fence;
   a late handback cannot erase recovery evidence or change the next fence.
-- **Open owner decision:** whether handback is a journaled mutation, whether
-  duplicate handback returns the original result or a terminal observation,
-  and how `safe_retry` versus `execution_uncertain` is reported. Existing
-  recovery semantics remain authoritative pending this decision.
+- **P08 choice:** handback is a journaled mutation. Its response is
+  `handed_back` with disposition `retry_wait`, `blocked`, or `cancelled`.
+  Existing replay-safety policy decides retry versus `execution_uncertain`.
 
 ### Complete
 
-- Completion is a single owner transaction that validates the exact current
-  fence, current authorization and cancellation state, then records the
-  terminal Job/lease state, sanitized runtime outcome, artifact references,
-  and append-only audit together. No independently committed owner store or
-  second queue is introduced.
-- Artifact bytes are not embedded in an unbounded completion response. Any
-  artifact write/read protocol requires a separately approved one-use fenced
-  boundary, bounded readback, relock, and currentness check. Until that contract
-  exists, completion must not claim an unverified external artifact effect.
-- Runtime errors are selected from a finite owner-approved code set and bounded
-  fields. Raw exceptions, stack traces, secrets, arbitrary output, SQL messages,
-  and artifact contents are excluded. Existing extracted RuntimeFailure
-  literals and `upstream_unavailable` / `retryable=true` are candidate evidence,
-  not a frozen wire enum.
-- **Open owner decision:** accepted terminal outcome names, error-code/status
-  map, artifact-reference schema and count/byte ceilings, handling of uncertain
-  external effects, and duplicate-completion response.
+- Completion validates the exact fence, current authorization and cancellation
+  state, then records the terminal Job/lease state, sanitized runtime outcome,
+  artifact reference, operation result, and append-only audit in the owner
+  transaction. No second queue or lease authority is introduced.
+- **P08 choice:** completed output is a JSON object sent to Sovite over the
+  authenticated request, at most 48 KiB. Sovite stores it through the existing
+  content-addressed artifact store before the state transaction; the final
+  transaction rechecks currentness before linking its key and digest. A stale
+  upload can leave an unreferenced blob but cannot publish it or alter Job state.
+- Runtime errors use the finite code set in `sovite/remote_execution.py`.
+  Raw exceptions, stack traces, secrets, arbitrary output, SQL messages, and
+  artifact contents are excluded from audit and journal projections.
+- **P08 choice:** accepted outcomes are `completed`, `failed`,
+  `retryable_failure`, and `cancelled`; the finite error-code set is enforced
+  by the API. A completed result is a JSON object up to 48 KiB stored through
+  the service's artifact store. `external_execution_uncertain` never releases
+  content and becomes `blocked`.
 
 ### Lookup
 
@@ -139,37 +135,38 @@ until the open decisions are resolved and a generated schema is reviewed.
   ID to reveal another scope or silently follow a newer fence.
 - Lookup is an observation only. It does not claim a queued job, renew a lease,
   retry completion, or make a stale fence current.
-- **Open owner decision:** supported lookup key(s), whether journal results
-  remain queryable indefinitely or require an explicit retention/tombstone
-  policy, and the response for absent, expired, pruned, and superseded records.
-  No GC, finite retention, instance ID reuse, or tombstone semantics are
-  admitted by this document. They remain adoption blockers as stated in the
-  owner plan.
+- **P08 choice:** lookup key is `(workload_id, instance_id, operation_id)`.
+  It returns a fixed metadata projection and leaves rows under existing owner
+  retention. Missing rows return `not_found`; lookup performs no GC, retry,
+  instance reuse, or tombstone transition.
 
 ## Bounded response and error data
 
-- Every request field has an explicit generated byte or character ceiling; JSON
+- Every request field has an explicit byte or character ceiling; JSON
   parsing is strict and does not coerce values, collapse omitted and `null`,
   or accept unknown fields.
-- Each response has a whole-body compact UTF-8 byte ceiling checked before
-  committing a transition whose replay depends on the response. The existing
-  reserve limit is 4 MiB inclusive; the owner must set explicit, smaller
-  ceilings for status, renew, handback, complete, and lookup. No truncation is
+- Every response is checked against the existing 4 MiB inclusive owner limit
+  before a journaled transition commits. The renew, handback, complete, status,
+  and lookup projections have fixed fields and contain no caller-controlled
+  strings except bounded identifiers and finite error codes. No truncation is
   permitted.
 - Status and lookup return only a minimal projection. They do not return
   `task`, `resolved`, bearer capabilities, credentials, or unrestricted owner
-  rows. Completion accepts bounded artifact references and a bounded sanitized
-  runtime result only after their schemas and limits are owner-approved.
+  rows. Completion accepts a bounded sanitized runtime result and finite
+  outcome only.
 - Errors use a finite code/status map and bounded machine-readable body. The
-  existing owner outcomes (`invalid_request` 422,
-  `execution_scope_denied` 403, `execution_fenced` 409,
-  `idempotency_conflict` 409, `cancelled` 409, `binding_inhibited` 403, and
-  `owner_unavailable` 503) are internal evidence, not yet a wire envelope.
+  implementation uses the existing `{detail:{code,message}}` PlatformError
+  envelope and preserves typed owner outcomes.
   Current authority/lineage outcomes must preserve their actual owner meaning.
   No raw exception text, SQL state, task/recipe, credential, or arbitrary
   stored content is serialized. An unclassified result is an error, never idle.
-- **Open owner decision:** shared maximum body size and exact finite error
-  envelope/status map, including typed stale/expired/unknown operation outcomes.
+- **P08 choice:** the global request middleware bounds bodies to
+  `SOVITE_MAX_REQUEST_BYTES` plus framing overhead; result JSON is at most 48
+  KiB. Typed errors use the existing `PlatformError` envelope and codes
+  `invalid_request` (422), `execution_scope_denied` (403),
+  `idempotency_conflict` (409), `execution_fenced` (409), `cancelled` (409),
+  `owner_unavailable` (503), `execution_payload_too_large` (413), and
+  `not_found` (404).
 
 ## Transaction boundaries
 
@@ -192,8 +189,8 @@ until the open decisions are resolved and a generated schema is reviewed.
    return/record unknown to the caller where safely possible; never guess idle
    or success.
 6. Status/lookup are read-only observations against the same authoritative
-   rows and currentness rules. Whether they need the operation journal is an
-   open owner decision; they cannot acquire side effects as a convenience.
+   rows and currentness rules. They do not use the operation journal and cannot
+   acquire side effects as a convenience.
 
 ## Acceptance histories
 
@@ -219,8 +216,8 @@ state and audit before and after each action.
 | Bounds and error redaction | At each accepted byte boundary and one byte above, test UTF-8 bodies including multibyte text. Assert inclusive/exclusive rule, rollback on oversize, no truncation, and no secret, raw exception, SQL state, task, recipe, or artifact bytes in response/error/audit journal fields. |
 | Commit failure and post-commit loss | Force a precommit failure and separately drop the response after a known commit. Assert precommit rollback leaves no transition/journal/audit; postcommit reconciliation reports the committed outcome without repeating it. |
 
-Owner review must turn each **Open owner decision** into an explicit contract
-choice and add positive, negative, lock-order, response-loss, and boundary
-histories before any operation is admitted. Passing source histories alone does
-not admit a generated API, route, client, deployment, network/credential
-cutover, or remote runtime adoption.
+The choices above are implemented on the P08 candidate. They still require
+positive, negative, lock-order, response-loss, and boundary histories against
+disposable owner databases before deployment or remote runtime adoption. This
+source implementation does not itself qualify a generated client, credential
+cutover, deployment, or live worker host.

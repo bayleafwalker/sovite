@@ -433,6 +433,7 @@ class LeaseService:
                 "fence": lease.fence, "lease_until": job.lease_until, "deadline": deadline}
             if execution is not None:
                 response["execution"] = execution
+            self._check_response_size(response)
             journal_result = {k: v for k, v in response.items() if k != "execution"}
             session.add(WorkerExecutionOperation(workload_id=principal.workload_id, instance_id=context.instance_id,
                 operation_id=context.operation_id, operation_kind="start", request_digest=request_digest,

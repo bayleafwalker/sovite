@@ -1,25 +1,21 @@
 # Worker execution wire contract candidate
 
-Status: **source proposal only; no external contract or route is admitted.**
+Status: **local P08 API implementation candidate; not deployed or runtime-qualified.**
 
-This note advances P05's F2 contract work from the owner implementation on
-`cloud/20261024/programme-08-integration-sovite-exact` at
-`cd4d672ea50dca472c87bbba49034311ff70320d`. It records the owner-backed
-request and response semantics that can be frozen without turning the internal
-Python API into a network interface. It does not authorize a worker API,
-generated package, credential removal, deployment, or runtime adoption.
+This note advances P05's F2 contract work from the owner implementation. It
+records the local request/response shapes and their limits. The P08 candidate
+adds authenticated internal worker routes over the existing owner rows; it does
+not authorize deployment, credential removal, or runtime adoption.
 
-The remaining remote operations are scoped in the companion
-[requirements document](worker-execution-remote-operations-requirements.md).
-It records owner decisions needed for renew, status, handback, complete, and
-lookup; it does not freeze their wire semantics.
+The companion [requirements document](worker-execution-remote-operations-requirements.md)
+records the selected P08 semantics for renew, status, handback, complete, and
+lookup, including bounded requests, replay behavior, and exact fencing.
 
-The admission condition remains the one in
+The implementation uses the condition in
 [`2026-10-23-execution-lease-owner.md`](../plans/2026-10-23-execution-lease-owner.md):
-the shared generated-contract foundation must be accepted, and the real O2/F2
-consumer qualification must pass. Until then, this document is a review
-artifact. The API-absence assertion in `tests/test_worker_remote_boundary.py`
-remains required.
+the shared generated-contract foundation and real O2/F2 consumer qualification
+remain required before deployment or runtime adoption. This local candidate is
+available for those checks; passing source review alone does not qualify it.
 
 ## Authenticated scope
 
@@ -99,25 +95,22 @@ re-deliver that capability.
 
 ### Renew, status, handback, complete, and lookup
 
-No remote request or response shape is frozen for these operations. Existing
-`renew`, `hand_back`, `finish`, recovery, and row inspection are internal
-owner/worker methods with transaction-local context; they do not yet provide
-operation-journaled external contracts. The route/client must not infer a
-success response from these Python return values.
+P08 exposes these operations at `/internal/execution/{renew,status,handback,
+complete,lookup}`. `renew`, `handback`, and `complete` require a new operation
+id and journal their exact request digest in the existing owner operation
+table. Same-key retries return the recorded response; changed requests conflict.
+Status and lookup are read-only, workload-scoped observations. Their precise
+body and response shapes, including completion bounds and finite errors, are
+recorded in the [remote operation requirements](worker-execution-remote-operations-requirements.md)
+and [API contract](../API_CONTRACT.md).
 
-Before defining these wire operations, the owner contract must decide and test:
-
-1. Whether renew is journaled and how a lost renew response is reconciled
-   without extending the lease twice or reviving a revoked capability.
-2. Which current owner fields status may expose for the authenticated workload
-   and exact `(instance_id, job_id, generation, fence)` scope.
-3. Whether handback is an idempotent action or an observation after unknown
-   outcome, including what it returns when recovery has already advanced the
-   fence.
-4. How complete records artifact references and sanitized runtime errors while
-   preserving the current owner transaction and uncertain external effects.
-5. How lookup distinguishes idle, not-found, expired, superseded, and unknown
-   journal state without authorizing another pull or replay.
+Status reports only the exact fence's state, finite Job status, phase, lease
+expiry and deadline. Handback returns `handed_back` with the owner disposition.
+Complete accepts one bounded JSON result or a finite failure/cancellation
+outcome; Sovite writes result bytes through its own artifact store and links
+them only after final fence and authorization checks. Lookup returns journal
+metadata without private request/response bodies. None of these operations
+returns a start capability.
 
 The candidate must preserve owner-generated fences, current authorization,
 response-loss safety, append-only audit and exact transaction boundaries. It
@@ -125,35 +118,25 @@ must not add another queue or lease authority.
 
 ## Error boundary
 
-The current owner has regression-covered outcomes including `invalid_request`
-(422), `execution_scope_denied` (403), `idempotency_conflict` (409),
-`execution_fenced` (409), `cancelled` (409), `binding_inhibited` (403), and
-`owner_unavailable` (503). Authorization and lineage checks also preserve
-current owner outcomes such as forbidden, unavailable, unfinished predecessor,
-and uncertain predecessor effects. These are internal `PlatformError` outcomes;
-they are not yet a frozen HTTP error envelope. No adapter may serialize raw
-exception text, task content, credentials, SQL state, or arbitrary stored data.
-
-The generated contract must pin a finite error-code/status map and bounded
-machine-readable body. Until then, callers must not depend on undocumented
-internal error strings or treat an unclassified response as idle.
+The route uses the existing bounded `PlatformError` body. Worker operations use
+finite codes including `invalid_request` (422), `execution_scope_denied` (403),
+`execution_fenced` (409), `idempotency_conflict` (409), `cancelled` (409),
+`owner_unavailable` (503), `execution_payload_too_large` (413), and
+`not_found` (404). No adapter serializes raw exception text, task content,
+credentials, SQL state, or arbitrary stored data.
 
 ## Admission sequence
 
-1. Accept the shared namespace/resource-root foundation and pin its exact
-   contract/generator commits in this consumer.
-2. Freeze the external task projection, authenticated identity mapping, error
-   envelope, and the remaining five operation semantics with the F2 owner.
-3. Build ordinary installed-artifact consumers from the generated contract;
+1. Pin the shared namespace/resource-root foundation and generated client
+   commits in this consumer.
+2. Build ordinary installed-artifact consumers from the generated contract;
    reject arbitrary IDs, coercions, oversized bodies, and response canaries.
-4. Qualify O2/F2 through real HTTP and the owner against disposable SQLite and
+3. Qualify O2/F2 through real HTTP and the owner against disposable SQLite and
    PostgreSQL, including response loss after commit, same/different operation
    keys, concurrent starts, current/revoked authorization, expired fences,
    handback/recovery races, and complete/lookup isolation.
-5. Only after those checks are accepted, propose the narrowly scoped routes and
-   worker credentials. Artifact writes require a separate one-use fenced
-   boundary; direct SQL/S3 access remains until then.
+4. Review the dedicated execution-token configuration and artifact response
+   bounds before runtime adoption. Deployment remains outside this candidate.
 
-The current source passes internal owner tests against disposable databases,
-but steps 1–4 are not established by this proposal. This note must not be read
-as API approval or as a claim of end-to-end worker qualification.
+This source candidate has not run the listed qualification histories and does
+not establish end-to-end worker qualification or authorize deployment.

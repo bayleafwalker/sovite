@@ -119,6 +119,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     app.state.platform = platform
     from .authority_api import install_routes
     install_routes(app, platform, settings)
+    from .execution_api import install_routes as install_execution_routes
+    install_execution_routes(app, platform, settings)
 
     @app.middleware("http")
     async def bounds_and_headers(request: Request, call_next):
@@ -141,7 +143,9 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                 if len(data) > limit:
                     return JSONResponse({"detail": {"code": "request_too_large", "message": "Request exceeds the configured limit"}}, status_code=413)
             request._body = bytes(data)
-            if request.url.path.startswith("/api/workflows/") or request.url.path == "/api/output-releases":
+            if (request.url.path.startswith("/api/workflows/")
+                or request.url.path == "/api/output-releases"
+                or request.url.path.startswith("/internal/execution/")):
                 from .hosting import bounded_json
                 try:
                     bounded_json(request._body, limit)

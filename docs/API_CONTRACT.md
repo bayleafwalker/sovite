@@ -98,6 +98,62 @@ append actor-attributed durable audit events in their state transaction.
 These routes do not implement CSR issuance or a helper renewal handshake. They
 do not return certificate material or echo certificate parsing errors.
 
+## Remote worker execution API
+
+The internal worker API exposes `POST /internal/execution/pull`, `start`,
+`renew`, `status`, `handback`, `complete`, and `lookup`. It authenticates only
+dedicated `SOVITE_EXECUTION_TOKENS`, a JSON object mapping workload identities
+to unique tokens of at least 24 characters. `compute_id` comes from the
+service's `SOVITE_COMPUTE_ID`; neither identity is accepted in request JSON.
+Execution tokens must be distinct from operator, caller, author, activator, and
+inference-authority credentials. An empty execution-token map denies every
+remote execution request.
+
+`pull` accepts exactly `{instance_id,operation_id}`. It returns `idle` or the
+existing bounded reserved job projection. `start` accepts exactly
+`{instance_id,operation_id,job_id,generation,fence}`. The first committed start
+may return the transient gateway execution capability; an exact replay returns
+`already_started` without that capability. The operation key is
+`(workload_id,instance_id,operation_id)`, bound to operation kind and canonical
+request digest.
+
+`renew` and `handback` use the same exact execution tuple plus a unique
+`operation_id`. Their responses are journaled with the state change. Repeating
+the same operation returns its original finite response; changing any request
+field or operation kind under the same key returns `idempotency_conflict`.
+`renew` can extend only a live started fence and never moves the fixed execution
+deadline. `handback` records the existing cancellation, safe retry, or
+`execution_uncertain` disposition and cannot release a replacement fence.
+
+`status` accepts the exact tuple without an operation id. It returns one of
+`current`, `superseded`, `finished`, or `expired`, with only the finite job
+status, phase, lease expiry, and fixed deadline. It does not reveal task text,
+resolved configuration, capabilities, credentials, or audit payloads.
+`lookup` accepts `{instance_id,operation_id}` and reads only that workload's
+existing operation journal; its projection includes operation kind, job/fence
+identity, and result state, never a stored response body or start capability.
+Both reads are side-effect free.
+
+`complete` accepts the exact tuple plus an operation id, an outcome from
+`completed`, `failed`, `retryable_failure`, or `cancelled`, an optional finite
+error code, and for `completed` a JSON result object no larger than 48 KiB.
+The whole HTTP body remains bounded by the configured request limit. Sovite
+stores the result through its existing artifact store, then rechecks the exact
+fence and current authority before publishing the artifact reference and
+terminal job state in the owner transaction. A failed or uncertain result
+cannot release content. `retryable_failure` is retried only when the installed
+owner policy permits and the job is replay-safe; otherwise it is failed or
+blocked as uncertain. Error codes are finite; raw exceptions, task text,
+credential data, SQL state, and artifact bytes are not written to the operation
+journal or audit event.
+
+All mutation paths acquire the existing authority lock and exact Job/lease row
+locks, append audit with the transition, and journal the committed result. A
+response loss is reconciled by retrying the same operation identity or by the
+read-only `lookup`. No operation replays a start capability, chooses a newer
+fence, or creates a second job/lease authority. The HTTP surface is a local
+candidate implementation; no deployment or runtime qualification is implied.
+
 An agent-http harness served here declares exactly one native capability: native-codex, native-claude or native-opencode. Agents have an empty declared HTTP tool list; the service does not translate HTTP bindings into native authority. Multiple fixed agents require separate services. Enforced native executables cannot run inline in the worker. The service receives no platform database, artifact-store or qualification signing credentials. `SOVITE_HARNESS_TOKEN` is separate from subscription credentials and operator/caller tokens.
 
 The ledger stores request digest and execution state. An exact completed replay returns its stored result; changed input under the same task ID is rejected. In-progress or uncertain work is not restarted. `POST /cancel` accepts `{task_id,agent_id,configuration_revision}` and requests cancellation of queued or running work. Remote cancellation is best effort; worker release authority remains independently checked.
