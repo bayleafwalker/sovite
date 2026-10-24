@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import math
 import os
@@ -78,7 +79,42 @@ def main(argv: list[str] | None = None) -> int:
         prog="sovite-remote-worker",
         description="Run the opt-in execution API worker without local SQL or artifact storage.",
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--inspect-journal", action="store_true",
+        help="read the stopped worker's bounded local journal without contacting the owner",
+    )
+    args = parser.parse_args(argv)
+
+    journal_path = os.environ.get("SOVITE_EXECUTION_JOURNAL_PATH", "")
+    if args.inspect_journal:
+        if not journal_path or not Path(journal_path).is_absolute():
+            print("SOVITE_EXECUTION_JOURNAL_PATH must be an absolute path", file=sys.stderr)
+            return 2
+        from .remote_journal import ExecutionJournal, JournalError
+
+        try:
+            record = ExecutionJournal.inspect(journal_path)
+        except JournalError as exc:
+            print(f"Execution journal inspection stopped: {exc}", file=sys.stderr)
+            return 1
+        if record is None:
+            report = {
+                "state": "empty",
+                "next_action": "worker_may_start_after_current_owner_checks",
+            }
+        else:
+            report = {
+                "state": "manual_reconciliation_required",
+                "record": record,
+                "next_action": (
+                    "use an owner-authorized lookup for this exact instance and operation; "
+                    "match the captured job and fence when present; do not retry or clear "
+                    "the record based only on this local snapshot"
+                ),
+            }
+        print(json.dumps(report, allow_nan=False, ensure_ascii=True,
+                         separators=(",", ":")))
+        return 0
 
     present = [name for name in _CONTROL_OR_STORE_ENV if os.environ.get(name)]
     if present:
@@ -92,7 +128,6 @@ def main(argv: list[str] | None = None) -> int:
     if not instance_id:
         print("SOVITE_EXECUTION_INSTANCE_ID is required", file=sys.stderr)
         return 2
-    journal_path = os.environ.get("SOVITE_EXECUTION_JOURNAL_PATH", "")
     if not journal_path or not Path(journal_path).is_absolute():
         print("SOVITE_EXECUTION_JOURNAL_PATH must be an absolute path", file=sys.stderr)
         return 2

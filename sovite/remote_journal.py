@@ -159,6 +159,39 @@ class ExecutionJournal:
             self.close()
             raise
 
+    @classmethod
+    def inspect(cls, path: str | os.PathLike):
+        """Read one stable journal snapshot without creating or changing files."""
+        raw = Path(path)
+        if not raw.is_absolute():
+            raise JournalError("Execution journal path must be absolute")
+        try:
+            if not raw.parent.is_dir() or raw.parent.resolve(strict=True) != raw.parent:
+                raise JournalError("Execution journal directory must be an existing non-symlink directory")
+        except OSError:
+            raise JournalError("Execution journal directory is unavailable") from None
+
+        lock_path = Path(str(raw) + ".lock")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(lock_path, flags)
+        except OSError:
+            raise JournalError("Execution journal lock is unavailable for read-only inspection") from None
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077 or info.st_nlink != 1):
+                raise JournalError("Execution journal lock file has unsafe ownership or permissions")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise JournalError("Execution journal is active; inspect it after the worker stops") from None
+            reader = object.__new__(cls)
+            reader.path = raw
+            return reader._read()
+        finally:
+            os.close(fd)
+
     def _open_lock(self):
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -184,7 +217,8 @@ class ExecutionJournal:
             os.close(self._lock_fd)
             self._lock_fd = None
 
-    def _check_file(self, fd):
+    @staticmethod
+    def _check_file(fd):
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or stat.S_IMODE(info.st_mode) & 0o077 or info.st_nlink != 1
