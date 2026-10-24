@@ -1,5 +1,6 @@
 import asyncio
 
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 import pytest
 from pydantic import ValidationError
@@ -54,24 +55,50 @@ def test_operator_helper_lifecycle_routes_and_transactional_audit(authority_env,
     with pytest.raises(ValidationError):
         CertificateRotation(certificate_pem="x", extra="not-accepted")
 
-    rotated = rotate_route.endpoint("admin-enrollment", CertificateRotation(
-        certificate_pem=(new_dir / "helper.pem").read_text()), auth=("operator", "operator"))
+    operator_headers = {"Authorization": "Bearer " + env.settings.operator_token}
+    caller_headers = {
+        "Authorization": "Bearer " + env.settings.caller_tokens["operations"]
+    }
+    with TestClient(env.app) as client:
+        anonymous = client.post("/api/helpers/reconcile")
+        caller = client.post("/api/helpers/reconcile", headers=caller_headers)
+        rotated_response = client.post(
+            "/api/helpers/enrollments/admin-enrollment/rotate",
+            headers=operator_headers,
+            json={"certificate_pem": (new_dir / "helper.pem").read_text()},
+        )
+        reconcile_response = client.post(
+            "/api/helpers/reconcile", headers=operator_headers
+        )
+        revoke_response = client.post(
+            "/api/helpers/enrollments/admin-enrollment/revoke",
+            headers=operator_headers,
+        )
+        failure_response = client.post(
+            "/api/helpers/enrollments/admin-enrollment/rotate",
+            headers=operator_headers,
+            json={"certificate_pem": "CERTIFICATE-SECRET-SENTINEL"},
+        )
+
+    assert anonymous.status_code == 401
+    assert caller.status_code == 403
+    assert rotated_response.status_code == 200
+    assert reconcile_response.status_code == 200
+    assert revoke_response.status_code == 200
+    assert failure_response.status_code == 422
+    assert "CERTIFICATE-SECRET-SENTINEL" not in failure_response.text
+
+    rotated = rotated_response.json()
     assert rotated["enrollment_id"] == "admin-enrollment"
     assert "certificate_pem" not in rotated
     assert "certificate" not in str(rotated).lower()
 
-    reconciled = reconcile_route.endpoint(auth=("operator", "operator"))
+    reconciled = reconcile_response.json()
     assert reconciled["certificate_issuance"] == "external_ca"
     assert reconciled["items"][0]["eligible_enrollments"] == 1
 
-    revoked = revoke_route.endpoint("admin-enrollment", auth=("operator", "operator"))
+    revoked = revoke_response.json()
     assert revoked == {"enrollment_id": "admin-enrollment", "revoked": True}
-
-    with pytest.raises(PlatformError) as failure:
-        rotate_route.endpoint("admin-enrollment", CertificateRotation(certificate_pem="CERTIFICATE-SECRET-SENTINEL"),
-                             auth=("operator", "operator"))
-    assert failure.value.code == "invalid_enrollment_certificate"
-    assert "CERTIFICATE-SECRET-SENTINEL" not in str(failure.value)
 
     with env.platform.db.sessions() as session:
         enrollment = session.get(HelperEnrollment, "admin-enrollment")
