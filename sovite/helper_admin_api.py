@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import time
+import math
+import re
 from typing import Annotated
 
 from fastapi import Depends
@@ -32,6 +34,87 @@ class EnrollmentProvision(Body):
 
 
 EnrollmentId = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")]
+HOST_CLASS_SCHEMA = "sovite.helper-host-class-evidence/v1"
+HOST_CLASS_KEYS = {
+    "schema", "id", "enrollment_role", "helper_image_digest", "engine_image_digest",
+    "engine_version", "weights_manifest_digest", "destination", "trust_tier", "retention",
+    "cancel_bound_seconds", "observed_at", "expires_at", "evidence_refs",
+}
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+EVIDENCE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$")
+HOST_CLASS_MAX_AGE = 90 * 86400
+
+
+def _expected_host_class(binding, bundle):
+    connection = binding.get("connection", {})
+    role = connection.get("enrollment_role")
+    destination = next((item for item in bundle.get("destinations", [])
+                        if item.get("id") == binding.get("destination")), None)
+    connector_role = next((item for item in bundle.get("connector_roles", [])
+                           if item.get("id") == role), None)
+    identity = binding.get("identity")
+    if not isinstance(identity, dict) or not isinstance(destination, dict) or not isinstance(connector_role, dict):
+        return None, "host_class_configuration_missing"
+    expected = {
+        "enrollment_role": role,
+        "helper_image_digest": connector_role.get("helper_image_digest"),
+        "engine_image_digest": connector_role.get("engine_image_digest"),
+        "engine_version": identity.get("engine_version"),
+        "weights_manifest_digest": identity.get("weights_manifest_digest"),
+        "destination": binding.get("destination"),
+        "trust_tier": destination.get("trust_tier"),
+        "retention": destination.get("retention"),
+        "cancel_bound_seconds": binding.get("cancel_bound_seconds"),
+    }
+    if (any(not isinstance(value, str) or not value for key, value in expected.items()
+            if key not in {"retention", "cancel_bound_seconds"})
+            or any(not isinstance(expected[key], str) or not DIGEST.fullmatch(expected[key])
+                   for key in ("helper_image_digest", "engine_image_digest", "weights_manifest_digest"))
+            or not isinstance(expected["engine_version"], str) or len(expected["engine_version"]) > 512
+            or expected["trust_tier"] not in {"operator-owned", "rented", "provider"}
+            or not isinstance(expected["retention"], dict)
+            or type(expected["cancel_bound_seconds"]) is not int
+            or not 1 <= expected["cancel_bound_seconds"] <= 3600):
+        return None, "host_class_configuration_unpinned_or_invalid"
+    return expected, None
+
+
+def _validate_host_class(record, expected, qualification, now):
+    if not isinstance(record, dict) or set(record) != HOST_CLASS_KEYS:
+        return "host_class_record_shape_invalid"
+    if record.get("schema") != HOST_CLASS_SCHEMA:
+        return "host_class_schema_unsupported"
+    identifier = record.get("id")
+    if not isinstance(identifier, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", identifier):
+        return "host_class_record_id_invalid"
+    if any(not isinstance(record.get(key), str) or not record[key] for key in
+           ("enrollment_role", "engine_version", "destination", "trust_tier")):
+        return "host_class_record_string_invalid"
+    if any(not isinstance(record.get(key), str) or not DIGEST.fullmatch(record[key]) for key in
+           ("helper_image_digest", "engine_image_digest", "weights_manifest_digest")):
+        return "host_class_record_digest_invalid"
+    if len(record["engine_version"]) > 512 or record["trust_tier"] not in {"operator-owned", "rented", "provider"}:
+        return "host_class_record_value_out_of_bounds"
+    if type(record.get("cancel_bound_seconds")) is not int or not 1 <= record["cancel_bound_seconds"] <= 3600:
+        return "host_class_record_cancel_bound_invalid"
+    retention = record.get("retention")
+    if not isinstance(retention, dict) or len(retention) > 32:
+        return "host_class_record_retention_invalid"
+    observed, expires = record.get("observed_at"), record.get("expires_at")
+    if (type(observed) not in {int, float} or type(expires) not in {int, float}
+            or not math.isfinite(observed) or not math.isfinite(expires)
+            or observed > now + 60 or expires <= now or expires <= observed
+            or expires - observed > HOST_CLASS_MAX_AGE
+            or observed > qualification.created_at or expires > qualification.expires_at):
+        return "host_class_record_time_invalid_or_stale"
+    refs = record.get("evidence_refs")
+    if (not isinstance(refs, list) or not 1 <= len(refs) <= 64
+            or any(not isinstance(ref, str) or not EVIDENCE_REF.fullmatch(ref) for ref in refs)
+            or len(refs) != len(set(refs))):
+        return "host_class_record_evidence_refs_invalid"
+    if any(record.get(key) != value for key, value in expected.items()):
+        return "host_class_record_misbound"
+    return None
 
 
 def helper_readiness(platform):
@@ -53,28 +136,28 @@ def helper_readiness(platform):
                 HelperEnrollment.binding_id == binding_id).order_by(HelperEnrollment.id)))
             sessions = list(session.scalars(select(HelperSession).where(
                 HelperSession.binding_id == binding_id).order_by(HelperSession.last_seen.desc())))
-            current = [row for row in trusted if row.profile in {bundle.get("default_profile", "local"), "all"}]
+            current = [row for row in trusted if row.profile in {bundle.get("default_profile", "local"), "all"}][:100]
+            expected_host_class, host_config_error = _expected_host_class(binding, bundle)
             host_class_evidence = []
+            host_class_errors = []
             for row in current:
                 evidence = row.payload.get("evidence", {})
-                classes = evidence.get("host_classes", []) if isinstance(evidence, dict) else []
-                if isinstance(classes, list):
-                    host_class_evidence.extend(item for item in classes if isinstance(item, dict))
-            destination = next((item for item in bundle.get("destinations", [])
-                                if item.get("id") == binding.get("destination")), {})
+                classes = evidence.get("host_classes") if isinstance(evidence, dict) else None
+                if not isinstance(classes, list) or len(classes) > 64:
+                    host_class_errors.append({"qualification_id": row.id, "code": "host_class_records_missing_or_invalid"})
+                    continue
+                for record_index, record in enumerate(classes):
+                    if expected_host_class is None:
+                        error = host_config_error
+                    else:
+                        error = _validate_host_class(record, expected_host_class, row, now)
+                    if error is None:
+                        host_class_evidence.append(record)
+                    else:
+                        host_class_errors.append({"qualification_id": row.id, "record_index": record_index, "code": error})
             connector_role = next((item for item in bundle.get("connector_roles", [])
                                    if item.get("id") == role), {})
             pins = binding.get("identity", {})
-            expected_host_class = {
-                "enrollment_role": role,
-                "helper_image_digest": connector_role.get("helper_image_digest"),
-                "engine_image_digest": connector_role.get("engine_image_digest"),
-                "weights_manifest_digest": pins.get("weights_manifest_digest"),
-                "destination": binding.get("destination"),
-                "trust_tier": destination.get("trust_tier"),
-                "retention": destination.get("retention"),
-                "cancel_bound_seconds": binding.get("cancel_bound_seconds"),
-            }
 
             enrollment_views = [{
                 "enrollment_id": row.id,
@@ -114,8 +197,7 @@ def helper_readiness(platform):
                 })
             active_sessions = [item for item in session_views if item["active"] and item["enrollment_bound"]
                                and item["identity_bound"]]
-            matching_class = any(all(item.get(key) == value for key, value in expected_host_class.items())
-                                 for item in host_class_evidence)
+            matching_class = bool(host_class_evidence)
             blockers = []
             if not binding.get("enabled", True): blockers.append("binding_disabled")
             if runtime is not None and runtime.inhibited: blockers.append("binding_inhibited")
@@ -124,7 +206,8 @@ def helper_readiness(platform):
                 blockers.append("eligible_enrollment_missing")
             if not active_sessions: blockers.append("fresh_bound_session_missing")
             if not current: blockers.append("current_trusted_qualification_missing")
-            if not matching_class: blockers.append("host_class_qualification_evidence_missing")
+            if host_config_error: blockers.append(host_config_error)
+            if not matching_class: blockers.append("host_class_qualification_evidence_missing_or_invalid")
             projections.append({
                 "binding_id": binding_id, "generation": generation, "role": role,
                 "enabled": bool(binding.get("enabled", True)),
@@ -134,6 +217,9 @@ def helper_readiness(platform):
                     "trusted_current_records": len(current),
                     "expected_host_class": expected_host_class,
                     "host_class_match": matching_class,
+                    "host_class_record_schema": HOST_CLASS_SCHEMA,
+                    "host_class_error_count": len(host_class_errors),
+                    "host_class_errors": host_class_errors[:100],
                     "evidence_records_are_authority": False,
                 },
                 "blockers": blockers,
