@@ -43,6 +43,21 @@ HOST_CLASS_KEYS = {
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 EVIDENCE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$")
 HOST_CLASS_MAX_AGE = 90 * 86400
+MAX_UNIX_TIMESTAMP = 253402300799  # 9999-12-31T23:59:59Z
+
+
+def _bounded_timestamp(value):
+    if type(value) not in {int, float}:
+        return None
+    if type(value) is int and not 0 <= value <= MAX_UNIX_TIMESTAMP:
+        return None
+    try:
+        value = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(value) or not 0 <= value <= MAX_UNIX_TIMESTAMP:
+        return None
+    return value
 
 
 def _expected_host_class(binding, bundle):
@@ -100,9 +115,9 @@ def _validate_host_class(record, expected, qualification, now):
     retention = record.get("retention")
     if not isinstance(retention, dict) or len(retention) > 32:
         return "host_class_record_retention_invalid"
-    observed, expires = record.get("observed_at"), record.get("expires_at")
-    if (type(observed) not in {int, float} or type(expires) not in {int, float}
-            or not math.isfinite(observed) or not math.isfinite(expires)
+    observed = _bounded_timestamp(record.get("observed_at"))
+    expires = _bounded_timestamp(record.get("expires_at"))
+    if (observed is None or expires is None
             or observed > now + 60 or expires <= now or expires <= observed
             or expires - observed > HOST_CLASS_MAX_AGE
             or observed > qualification.created_at or expires > qualification.expires_at):
