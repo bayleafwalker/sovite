@@ -18,13 +18,22 @@ The client makes one bounded HTTP request per invocation, disables ambient
 proxy and redirect behavior, and never retries a mutation. Transport loss,
 malformed success data, or a server failure during a mutation raises
 `ExecutionOutcomeUnknown` with the operation ID and directs the caller to
-lookup using the same instance and operation IDs. The error does not include
+lookup using the same instance and operation IDs; it exposes both fields as
+`instance_id` and `operation_id`. A lookup 404 raises
+`ExecutionLookupNotFound` with that same key and explicitly leaves the original
+outcome unknown. A missing journal row is not permission to replay the
+mutation. The error does not include
 response content, the bearer token, URL credentials, or exception text. The
 client preserves the captured job, generation, and fence and does not
-substitute a newer context. It parses bounded JSON but exact response schema
-validation remains provisional; returned values are visible to the explicit
+substitute a newer context. TLS verification cannot be disabled; a custom CA
+path is supported. Response bytes are bounded and structurally preflighted
+before parsing, duplicate JSON keys and non-finite constants are rejected, and
+all seven operation projections receive finite shape checks. Pull's task and
+resolved objects are checked as dictionaries but their private internal
+schemas remain provisional; returned values are visible to the explicit
 caller. Pull necessarily returns task and resolved execution input, which
-callers must keep out of logs.
+callers must keep out of logs. Start's `already_started` response is checked
+to contain no execution bearer.
 
 The API and client use the local P08 request shapes and the owner journal. Pull
 and start have no bearer-replay path: the first start response may contain
