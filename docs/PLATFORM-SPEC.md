@@ -151,7 +151,7 @@ The actual examples are complete validated files: `platform.local.yaml`, `platfo
 
 The JSON schemas are [`platform.schema.json`](../config/platform.schema.json) (v1alpha1) and [`platform.v1alpha2.schema.json`](../config/platform.v1alpha2.schema.json). The compiler selects by `apiVersion`; schema validation is followed by reference, placement and protocol checks.
 
-Gateway bindings are **not yet executable: requires the model gateway (Phase 1 PR 2-5)**. An enforced v1alpha2 gateway bundle can compile for validation. Every runtime adapter entry point refuses these bindings with `model_gateway_adapter_unavailable` before sending context, contacting an external harness or starting a native process. No direct endpoint substitution occurs (`EXACT_BINDING`, `PIN_BEFORE_PROMPT`). Compilation does not establish runtime identity, cancellation, availability, retention enforcement or qualification.
+Gateway bindings have a **local opt-in P08 execution candidate** for remote `tool-agent` jobs using an `openai-compatible` Chat binding. The worker sends the exact binding request through the gateway inference origin with the started job's one-time capability, job, generation, workload, fence and bounded deadline. Missing capability/configuration, unsupported harnesses and protocol errors fail closed; no direct endpoint substitution occurs (`EXACT_BINDING`, `PIN_BEFORE_PROMPT`). The default SQL/S3 worker and native harnesses still refuse gateway bindings. This source candidate does not establish runtime identity, cancellation, availability, retention enforcement, deployment or qualification.
 
 | Area | v1alpha2 declaration |
 | --- | --- |
@@ -292,9 +292,12 @@ Implementation details and verification evidence are authoritative in the accomp
 
 ## Gateway and execution authority (PR 3)
 
-Status: **not yet routed from workers (PR 4)**. `require_model_adapter()` still
-refuses `model-gateway` bindings. This component does not establish an enforced
-installation before the worker/native routing and network cutover are complete.
+Status: **local opt-in P08 route for remote tool-agent Chat; default and native
+worker routing remains absent**. The unscoped `require_model_adapter()` guard
+still refuses gateway bindings; only a per-run `AdapterRunner` carrying the
+one-time execution capability can use the inference client. This candidate
+does not establish an enforced installation before worker/native routing and
+network cutover are complete.
 
 A gateway job claim creates an execution fence and a 256-bit random capability.
 Only its SHA-256 digest is stored, in `execution_authority`; the raw capability is

@@ -421,17 +421,10 @@ class RemoteWorker:
         self._journal_write("started", start_context.operation_id, "start", job=job,
                             expected={"started"}, lease_until=lease_until, deadline=deadline)
         context = self._context(self.instance_id, job, self._operation_id())
-        # Start's bearer is never retained or returned by this worker runtime;
-        # model-gateway execution still requires a separately qualified adapter.
+        # Keep the one-time execution capability only in this process and pass
+        # it to the exact adapter invocation. It never enters the journal,
+        # diagnostics, subprocess environment, or a later start response.
         execution = started.get("execution")
-        if execution is not None:
-            # This composition does not yet bind the gateway capability to a
-            # qualified remote gateway adapter. Close the exact started fence
-            # with a finite failure instead of leaving it running to expire.
-            complete = self._context(self.instance_id, job, self._operation_id())
-            complete_or_fail(complete, outcome="failed",
-                             error_code="model_gateway_adapter_unavailable")
-            return True
 
         def renew_exact_fence():
             nonlocal lease_until
@@ -471,7 +464,10 @@ class RemoteWorker:
                 return False
 
         self.runner.authorization_check = renew_exact_fence
-        operation = asyncio.create_task(self.runner.run(job["resolved"], job["task"], job["job_id"]))
+        operation = asyncio.create_task(self.runner.run(
+            job["resolved"], job["task"], job["job_id"],
+            execution=execution, deadline=deadline, fence=job["fence"],
+        ))
         deadline = float(started["deadline"])
         try:
             while not operation.done():

@@ -46,6 +46,19 @@ the existing allow-listed environment, which excludes the execution bearer.
 This command is an explicit source candidate; existing `sovite worker` and
 embedded-worker composition remain unchanged.
 
+Gateway-backed execution in the opt-in remote worker is limited to `tool-agent`
+jobs with an `openai-compatible` Chat binding. Configure the fixed HTTPS
+inference origin with `SOVITE_INFERENCE_URL`, a distinct workload bearer with
+`SOVITE_INFERENCE_TOKEN`, and, when required, a readable
+`SOVITE_INFERENCE_CA_BUNDLE`. The runner binds the one-time gateway capability
+to the exact binding, generation, job, workload, fence and deadline returned by
+the started owner operation. It sends only the selected Chat request through
+`/inference/{binding_id}/chat`; model declarations cannot choose the URL or
+carry an upstream credential. The per-request deadline is bounded by both the
+started job deadline and the binding timeout. Unsupported harnesses, wire APIs,
+missing credentials, malformed responses and gateway errors fail closed. The
+default SQL/S3 worker and native harnesses are not routed through this client.
+
 The client makes one bounded HTTP request per invocation, disables ambient
 proxy and redirect behavior, and never retries a mutation. Transport loss,
 malformed success data, or a server failure during a mutation raises
@@ -93,15 +106,15 @@ run or edited in this slice. Existing remote-operation contract notes also
 need reconciliation against the route and current owner implementations.
 
 The journal cannot recover a lost task/context payload or the one-time gateway
-capability. Gateway execution remains unavailable in this remote composition;
-the journal does not change that limitation or qualify restart behavior across
-hosts.
+capability. A restarted process therefore cannot resume a gateway request; it
+requires exact owner reconciliation and will not repeat the model request. The
+local routing candidate does not qualify cancellation bounds, gateway reach,
+credential delivery, identity checks or cross-host restart behavior.
 
-The remote command does not route gateway-backed models, expose endpoint
-configuration through the existing worker deployment, or provide automatic
-restart reconciliation of a predecessor process. These remain source and
-qualification work. Do not infer credential cutover, worker-host acceptance,
-artifact integrity, deployment, or live qualification from the presence of
-these source APIs. Real HTTP owner races, revocation, fences, response-loss
-histories, artifact integrity, and PostgreSQL locking still require disposable
-qualification.
+The remote command routes only the exact gateway-backed tool-agent path above;
+it does not route native harnesses or change the existing worker deployment.
+Automatic restart cannot continue a predecessor process. Do not infer
+credential cutover, worker-host acceptance, artifact integrity, deployment, or
+live qualification from these source APIs. Real HTTP owner races, revocation,
+fences, response-loss histories, gateway cancellation bounds, artifact
+integrity, and PostgreSQL locking still require disposable qualification.

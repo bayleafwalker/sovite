@@ -154,6 +154,14 @@ class AdapterRunner:
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None):
         self.transport = transport
         self.authorization_check = None
+        self._gateway_inference = None
+
+    def require_model_adapter(self, model: dict) -> None:
+        if model.get("connection", {}).get("kind") == "model-gateway":
+            if self._gateway_inference is None:
+                raise RuntimeFailure("model_gateway_adapter_unavailable")
+        elif self._gateway_inference is not None:
+            raise RuntimeFailure("model_gateway_adapter_unavailable")
 
     def client(self, *, timeout=60, verify=True) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=False, trust_env=False, transport=self.transport, verify=verify)
@@ -184,28 +192,52 @@ class AdapterRunner:
         except (json.JSONDecodeError, UnicodeDecodeError):
             raise RuntimeFailure("upstream_protocol_error") from None
 
-    async def run(self, recipe: dict, task: str, job_id: str) -> dict:
+    async def run(self, recipe: dict, task: str, job_id: str, *,
+                  execution: dict | None = None, deadline: float | None = None,
+                  fence: str | None = None) -> dict:
         harness, model = recipe["harness"], recipe["model"]
-        require_model_adapter(model)
-        kind = harness["kind"]
-        if kind == "demo":
-            if model["adapter"] != "demo":
-                raise RuntimeFailure("incompatible_demo_configuration")
-            # Deliberately synthetic; useful to assess the console and release mechanism.
-            # This is neither a production diagnostic nor an implicit fallback.
-            await asyncio.sleep(float(model.get("parameters", {}).get("delay_seconds", 0.1)))
-            return {"kind": "synthetic-assessment", "synthetic": True, "task": task, "answer": "Synthetic assessment. No production system or model was contacted.", "agent_id": recipe["agent"]["id"], "model_id": model["id"], "generation": recipe["generation"], "observations": ["Result access is governed by the installed " + recipe["grant"].get("return_contract", "reference") + " contract, output class and current reader authority."]}
-        if kind in {"native-codex", "native-claude", "native-opencode"}:
-            return await self.run_native(recipe, task, job_id)
-        if kind == "agent-http":
-            return await self.agent_http(recipe, task, job_id)
-        if kind != "tool-agent":
-            raise RuntimeFailure("unsupported_harness")
-        await self.verify_model_identity(model, recipe.get("mode") == "enforced")
-        return await self.tool_agent(recipe, task, job_id)
+        self._gateway_inference = None
+        gateway_model = model.get("connection", {}).get("kind") == "model-gateway"
+        try:
+            if gateway_model:
+                if (harness.get("kind") != "tool-agent"
+                        or model.get("adapter") != "openai-compatible"
+                        or model.get("wire_api", "chat") != "chat"):
+                    raise RuntimeFailure("unsupported_model_adapter")
+                if execution is None or deadline is None or fence is None:
+                    raise RuntimeFailure("model_gateway_adapter_unavailable")
+                from .model_gateway_client import ModelGatewayInference
+
+                self._gateway_inference = ModelGatewayInference.from_environment(
+                    model=model, generation=recipe.get("generation", ""),
+                    job_id=job_id, fence=fence, deadline=deadline,
+                    execution=execution,
+                )
+            elif execution is not None:
+                raise RuntimeFailure("model_gateway_adapter_unavailable")
+            self.require_model_adapter(model)
+            kind = harness["kind"]
+            if kind == "demo":
+                if model["adapter"] != "demo":
+                    raise RuntimeFailure("incompatible_demo_configuration")
+                # Deliberately synthetic; useful to assess the console and release mechanism.
+                # This is neither a production diagnostic nor an implicit fallback.
+                await asyncio.sleep(float(model.get("parameters", {}).get("delay_seconds", 0.1)))
+                return {"kind": "synthetic-assessment", "synthetic": True, "task": task, "answer": "Synthetic assessment. No production system or model was contacted.", "agent_id": recipe["agent"]["id"], "model_id": model["id"], "generation": recipe["generation"], "observations": ["Result access is governed by the installed " + recipe["grant"].get("return_contract", "reference") + " contract, output class and current reader authority."]}
+            if kind in {"native-codex", "native-claude", "native-opencode"}:
+                return await self.run_native(recipe, task, job_id)
+            if kind == "agent-http":
+                return await self.agent_http(recipe, task, job_id)
+            if kind != "tool-agent":
+                raise RuntimeFailure("unsupported_harness")
+            if not gateway_model:
+                await self.verify_model_identity(model, recipe.get("mode") == "enforced")
+            return await self.tool_agent(recipe, task, job_id)
+        finally:
+            self._gateway_inference = None
 
     async def verify_model_identity(self, model: dict, enforced: bool = False) -> dict:
-        require_model_adapter(model)
+        self.require_model_adapter(model)
         if model["adapter"] in {"codex-subscription", "claude-subscription"}:
             if model.get("identity_protocol") != "native-subscription" or model.get("digest"):
                 raise RuntimeFailure("model_identity_protocol_unsupported")
@@ -237,7 +269,7 @@ class AdapterRunner:
         raise RuntimeFailure("model_identity_missing")
 
     async def agent_http(self, recipe: dict, task: str, job_id: str) -> dict:
-        require_model_adapter(recipe.get("model", {}))
+        self.require_model_adapter(recipe.get("model", {}))
         harness = recipe["harness"]
         endpoint = harness.get("endpoint")
         if not endpoint:
@@ -270,7 +302,7 @@ class AdapterRunner:
 
     async def tool_agent(self, recipe: dict, task: str, job_id: str) -> dict:
         agent, model = recipe["agent"], recipe["model"]
-        require_model_adapter(model)
+        self.require_model_adapter(model)
         tools = {tool["id"]: tool for tool in recipe.get("tools", [])}
         messages: list[dict] = [{"role": "system", "content": agent.get("instructions", "Complete the task using only approved tools. Report uncertainty and cite observed evidence.")}, {"role": "user", "content": task}]
         trace: list[dict] = []
@@ -290,13 +322,20 @@ class AdapterRunner:
             elif model["adapter"] in {"openai-compatible", "opencode-go"}:
                 if model.get("wire_api", "chat") != "chat":
                     raise RuntimeFailure("tool_agent_requires_chat_api")
+                if self._gateway_inference is not None and "reasoning_effort" in parameters:
+                    raise RuntimeFailure("unsupported_model_adapter")
                 payload.update({k: v for k, v in parameters.items() if k in {"temperature", "max_tokens", "top_p", "seed", "reasoning_effort"}})
                 headers = token_headers(model)
                 if model["adapter"] == "opencode-go":
                     await self.verify_model_identity(model, recipe.get("mode") == "enforced")
                     headers.update({"x-opencode-session": job_id, "User-Agent": "sovite-platform/opencode-go"})
                     payload["store"] = False
-                result = await self.request_json("POST", endpoint_url(model["endpoint"], "/chat/completions"), payload=payload, headers=headers, timeout=int(model.get("timeout_seconds", 120)), verify=model_verify(model))
+                if self._gateway_inference is not None:
+                    result = await self._gateway_inference.chat(
+                        model, payload, authorization_check=self.authorization_check,
+                    )
+                else:
+                    result = await self.request_json("POST", endpoint_url(model["endpoint"], "/chat/completions"), payload=payload, headers=headers, timeout=int(model.get("timeout_seconds", 120)), verify=model_verify(model))
                 if model["adapter"] == "opencode-go" and result.get("model") != model["model"]:
                     raise RuntimeFailure("model_identity_mismatch")
                 choices = result.get("choices", [])
@@ -465,11 +504,10 @@ class AdapterRunner:
             return await self.native_opencode(recipe, task, job_id, isolated=isolated)
         raise RuntimeFailure("unsupported_harness")
 
-    @staticmethod
-    def native_subscription_guard(recipe: dict, adapter: str, isolated: bool):
+    def native_subscription_guard(self, recipe: dict, adapter: str, isolated: bool):
         if recipe["model"]["adapter"] != adapter:
             raise RuntimeFailure("native_provider_mismatch")
-        require_model_adapter(recipe["model"])
+        self.require_model_adapter(recipe["model"])
         if recipe.get("tools"):
             raise RuntimeFailure("native_tools_unsupported")
         if recipe.get("mode", "development") == "enforced" and not isolated:
@@ -599,7 +637,7 @@ class AdapterRunner:
 
     async def native_codex(self, recipe: dict, task: str, job_id: str, *, isolated: bool = False) -> dict:
         harness, model = recipe["harness"], recipe["model"]
-        require_model_adapter(model)
+        self.require_model_adapter(model)
         if model["adapter"] != "openai-compatible" or model.get("wire_api") != "responses":
             raise RuntimeFailure("codex_requires_responses_provider")
         # Inline native execution is supported only in the explicit development

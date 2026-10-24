@@ -81,7 +81,7 @@ Rotate runtime secrets separately from qualification: changing a secret value do
 
 After restore, retain current desired configuration and trust, apply `sovite recovery-lock --reason "Restored state requires review"`, verify the audit chain and review outstanding effects before clearing inhibits. Recovered session records and private backups also belong to the private boundary. See [operating and recovery procedures](OPERATIONS.md) for the provisioned profiles and their concrete storage duties.
 
-## 7. Connector identity foundation (not yet an executable gateway route)
+## 7. Connector identity and local gateway execution candidate
 
 The connector's `helper-signed-v1` signatures establish which enrolled helper
 made the assertion, not that an uncompromised process executed those weights.
@@ -90,14 +90,17 @@ reservation and cancellation guarantees require independent qualification.
 The identity verifier checks connection challenges, exact binding/enrollment,
 request-scoped pins and epoch continuity. Development unpinned results remain
 explicitly marked. Enrollment certificate validation and current execution
-authority remain gateway responsibilities in subsequent PRs.
+authority remain gateway responsibilities and require independent operational
+qualification.
 
 The outbound mTLS WebSocket pilot accepts one fixed engine origin and inference
 operations only. It exposes no forwarding or reverse-route operation. Its generic
 HTTP adapter is development-only: HTTP stream closure cannot prove server-side
-generation termination or reserve a loaded model. Production gateway, authority,
-worker/native routing and network cutover are not implemented; gateway bindings
-still fail closed in `require_model_adapter()`. See
+generation termination or reserve a loaded model. Local gateway and authority
+source exists, and the opt-in remote worker candidate routes tool-agent Chat
+requests with a per-run capability. Default/native routing, network cutover and
+operational qualification remain open; the unscoped `require_model_adapter()`
+still fails closed. See
 [connector protocol and limitations](CONNECTOR-PROTOCOL.md).
 
 ## 8. Hosted policy and signer separation
@@ -169,6 +172,8 @@ envelope is configured. See [hosted operations](OPERATIONS.md#hosted-mode-policy
 and [the hosted contract](PLATFORM-SPEC.md#hosted-policy-envelope-and-qualification).
 
 This change adds no caller delegation/assertions, worker lease API, workspace
-artifact upload, transport gateway authority or hosted chart profile. Existing
-gateway bindings still fail closed until their execution integration is supplied;
-signing fixture evidence does not establish a production-ready hosted service.
+artifact upload, transport gateway authority or hosted chart profile. A separate
+local candidate now supplies a scoped worker execution API and remote tool-agent
+route; default workers remain fail closed until owner qualification and runtime
+adoption. Signing fixture evidence does not establish a production-ready hosted
+service.
