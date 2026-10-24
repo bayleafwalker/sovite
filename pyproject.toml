@@ -23,6 +23,7 @@ test = [
 
 [project.scripts]
 sovite = "sovite.cli:main"
+sovite-remote-worker = "sovite.remote_worker_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["sovite*"]

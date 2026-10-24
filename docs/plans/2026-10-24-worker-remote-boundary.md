@@ -1,9 +1,9 @@
 # Worker remote boundary status
 
-Status: **The source has a scoped execution-owner HTTP API and a standalone
-opt-in HTTP client. The default worker still uses SQL and S3 directly.** No
-artifact-write API or remote-worker qualification is included. This note
-records source state, not deployment or qualification.
+Status: **The source has a scoped execution-owner HTTP API, an opt-in HTTP
+client, an opt-in remote worker composition, and a standalone launch command.
+The default worker still uses SQL and S3 directly.** This note records source
+state, not deployment or qualification.
 
 ## Current source path
 
@@ -13,6 +13,17 @@ is not selected by default worker composition; callers must construct it with
 an HTTPS origin and dedicated execution token or explicitly load those from
 `SOVITE_CONTROL_URL` and `SOVITE_EXECUTION_TOKEN`. Server authentication uses
 the matching workload token configured through `SOVITE_EXECUTION_TOKENS`.
+
+`sovite-remote-worker` starts `RemoteWorker` using only the execution API
+client. It requires `SOVITE_EXECUTION_INSTANCE_ID`, `SOVITE_CONTROL_URL`, and
+`SOVITE_EXECUTION_TOKEN`, with optional bounded poll and lease interval
+settings and a mounted `SOVITE_EXECUTION_CA_BUNDLE` for private trust roots.
+Its startup path does not construct `Settings`, `Database`, or
+`Platform`; it refuses to start when local database, artifact-store, or
+administrative credential settings are present. Native subprocesses receive
+the existing allow-listed environment, which excludes the execution bearer.
+This command is an explicit source candidate; existing `sovite worker` and
+embedded-worker composition remain unchanged.
 
 The client makes one bounded HTTP request per invocation, disables ambient
 proxy and redirect behavior, and never retries a mutation. Transport loss,
@@ -45,12 +56,13 @@ ID for each new mutation and use the original ID for exact reconciliation.
 
 ## Remaining boundary
 
-`Worker.claim`, renewal, shutdown handback, recovery, and finalization still
-call `LeaseService` against `Platform.db.sessions`. `Worker.execute` calls
-`Platform.store.put` directly before fenced SQL finalization. SQL and S3 do not
-share a transaction, and this source slice adds no artifact upload/write API.
-The default Compose and Helm worker therefore still require SQL and object
-store access. Native harness composition remains separate.
+The local `Worker.claim`, renewal, shutdown handback, recovery, and finalization
+still call `LeaseService` against `Platform.db.sessions`. `Worker.execute`
+calls `Platform.store.put` directly before fenced SQL finalization. The
+opt-in `RemoteWorker` instead sends a bounded result through the owner
+`complete` operation, whose existing Platform path writes the artifact and
+fences release. The default local worker and its Compose/Helm requirements are
+unchanged. Native harness composition remains separate.
 
 The current source does not include a generated external worker contract or
 qualification evidence for real HTTP owner races, revocation, fences, or
@@ -59,7 +71,11 @@ route absence and is stale against the registered execution routes; it was not
 run or edited in this slice. Existing remote-operation contract notes also
 need reconciliation against the route and current owner implementations.
 
-Do not infer credential cutover, worker-host acceptance, artifact integrity,
-deployment, or live qualification from the presence of these source APIs. The
-next source work is generated contract/schema qualification, followed by a
-separate artifact-write boundary and an explicit worker composition change.
+The remote command does not route gateway-backed models, expose endpoint
+configuration through the existing worker deployment, or provide automatic
+restart reconciliation of a predecessor process. These remain source and
+qualification work. Do not infer credential cutover, worker-host acceptance,
+artifact integrity, deployment, or live qualification from the presence of
+these source APIs. Real HTTP owner races, revocation, fences, response-loss
+histories, artifact integrity, and PostgreSQL locking still require disposable
+qualification.
