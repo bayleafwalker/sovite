@@ -14,6 +14,27 @@ an HTTPS origin and dedicated execution token or explicitly load those from
 `SOVITE_CONTROL_URL` and `SOVITE_EXECUTION_TOKEN`. Server authentication uses
 the matching workload token configured through `SOVITE_EXECUTION_TOKENS`.
 
+The standalone CLI now requires an absolute `SOVITE_EXECUTION_JOURNAL_PATH`.
+It holds a nonblocking exclusive process lock on a companion lock file and
+uses an owner-only, atomically replaced and fsynced journal. It rejects
+symlinks, non-regular files, foreign ownership, group/world permissions,
+oversized or structurally complex JSON, duplicate keys, and non-finite
+numbers. The single-record journal contains only instance/operation/job IDs,
+operation kind, phase, expected result states, generation/fence and bounded
+lease/deadline timestamps. It never stores URLs, tokens, gateway capabilities,
+task/resolved input, runner output, or exception text.
+
+Before each pull/start/renew/handback/complete mutation the worker persists the
+exact operation key and expected outcome. Confirmed idle pulls and confirmed
+handback/complete outcomes clear the record; mutation results update the active
+fence record. On startup, pending keys are reconciled by exact owner lookup and
+status is used only to inspect a known fence. A recovered active or reserved
+fence is never resumed and never triggers another pull; the worker preserves a
+manual-reconciliation record and stops. A pull lookup that finds a reservation
+cannot recover task/context, so that reservation is left for owner expiry.
+The local journal is only a crash-recovery cache, not authority, and cannot be
+transferred across hosts as proof of ownership.
+
 `sovite-remote-worker` starts `RemoteWorker` using only the execution API
 client. It requires `SOVITE_EXECUTION_INSTANCE_ID`, `SOVITE_CONTROL_URL`, and
 `SOVITE_EXECUTION_TOKEN`, with optional bounded poll and lease interval
@@ -70,6 +91,11 @@ response-loss histories. `tests/test_worker_remote_boundary.py` still asserts
 route absence and is stale against the registered execution routes; it was not
 run or edited in this slice. Existing remote-operation contract notes also
 need reconciliation against the route and current owner implementations.
+
+The journal cannot recover a lost task/context payload or the one-time gateway
+capability. Gateway execution remains unavailable in this remote composition;
+the journal does not change that limitation or qualify restart behavior across
+hosts.
 
 The remote command does not route gateway-backed models, expose endpoint
 configuration through the existing worker deployment, or provide automatic

@@ -152,15 +152,117 @@ class RemoteWorker:
     """
 
     def __init__(self, client, instance_id: str, runner: AdapterRunner | None = None,
-                 *, poll_seconds: float = 2.0, lease_seconds: float = 90.0):
+                 *, journal, poll_seconds: float = 2.0, lease_seconds: float = 90.0):
         from .execution_client import _identifier
 
         self.client = client
         self.instance_id = _identifier(instance_id, "instance_id")
+        if journal is None or not all(hasattr(journal, name) for name in ("load", "write", "clear")):
+            raise ValueError("An exclusive execution recovery journal is required")
+        self.journal = journal
         self.runner = runner or AdapterRunner()
         self.poll_seconds = max(0.1, float(poll_seconds))
         self.lease_seconds = max(1.0, float(lease_seconds))
         self.stop = asyncio.Event()
+        self._startup_reconciled = False
+
+    def _journal_write(self, phase, operation_id, operation_kind, *, job=None,
+                       expected=(), lease_until=None, deadline=None):
+        job = job or {}
+        self.journal.write({
+            "schema_version": 1,
+            "instance_id": self.instance_id,
+            "phase": phase,
+            "operation_id": operation_id,
+            "operation_kind": operation_kind,
+            "job_id": job.get("job_id"),
+            "generation": job.get("generation"),
+            "fence": job.get("fence"),
+            "expected_result_states": sorted(expected),
+            "lease_until": lease_until,
+            "deadline": deadline,
+        })
+
+    def _startup_reconcile(self):
+        from .execution_client import ExecutionLookupNotFound
+
+        record = None
+        try:
+            record = self.journal.load()
+            if record is None:
+                self._startup_reconciled = True
+                return True
+            if record["instance_id"] != self.instance_id:
+                raise RuntimeError("Execution journal belongs to another instance")
+            self._diagnostic_ids(self.instance_id, record["operation_id"],
+                                 record["operation_kind"], "startup_reconcile")
+            result = self.client.lookup(self.instance_id, record["operation_id"])
+            if (result.get("state") != "found"
+                    or result.get("operation_id") != record["operation_id"]
+                    or result.get("operation_kind") != record["operation_kind"]):
+                raise RuntimeError("Execution journal lookup did not match its exact key")
+            if (record["job_id"] is not None
+                    and (result.get("job_id") != record["job_id"]
+                         or result.get("fence") != record["fence"])):
+                raise RuntimeError("Execution journal lookup did not match its captured fence")
+            if (record["expected_result_states"]
+                    and result.get("result_state") not in set(record["expected_result_states"])):
+                raise RuntimeError("Execution journal result is outside its recorded expectation")
+            if record["operation_kind"] == "pull":
+                if result.get("result_state") == "idle":
+                    self.journal.clear()
+                    self._startup_reconciled = True
+                    return True
+                if result.get("result_state") == "reserved":
+                    record.update(phase="manual", job_id=result.get("job_id"),
+                                  fence=result.get("fence"), expected_result_states=["reserved"])
+            elif (record["operation_kind"] in {"handback", "complete"}
+                  and record["expected_result_states"]):
+                if (result.get("job_id") != record["job_id"]
+                        or result.get("fence") != record["fence"]
+                        or result.get("result_state") not in set(record["expected_result_states"])):
+                    raise RuntimeError("Execution journal mutation has not reached its expected state")
+                # A journaled handback/complete response is the terminal result
+                # for this worker attempt, even when job scheduling retries it.
+                self.journal.clear()
+                self._startup_reconciled = True
+                return True
+            else:
+                if record["job_id"] is not None and record["generation"] is not None and record["fence"] is not None:
+                    context = self._context(self.instance_id, record, record["operation_id"])
+                    observed = self.client.status(context)
+                    self._diagnostic(context, "status", observed.get("state", "unavailable"))
+                # Active, reserved, or otherwise unresolved work is never
+                # resumed across processes. Keep an actionable record.
+            record["phase"] = "manual"
+            self.journal.write(record)
+            self.stop.set()
+            self._startup_reconciled = True
+            return False
+        except ExecutionLookupNotFound:
+            if record is not None:
+                if (record["job_id"] is not None and record["generation"] is not None
+                        and record["fence"] is not None):
+                    try:
+                        context = self._context(self.instance_id, record, record["operation_id"])
+                        observed = self.client.status(context)
+                        self._diagnostic(context, "status", observed.get("state", "unavailable"))
+                    except Exception:
+                        self._diagnostic_ids(self.instance_id, record["operation_id"],
+                                             record["operation_kind"], "status_unavailable")
+                record["phase"] = "manual"
+                self.journal.write(record)
+            self.stop.set()
+            self._diagnostic_ids(self.instance_id, record["operation_id"],
+                                 record["operation_kind"], "manual_reconciliation_required")
+            self._startup_reconciled = True
+            return False
+        except Exception:
+            # Journal and owner disagreement is not repaired by a fresh pull.
+            log.error("Remote execution journal reconciliation failed; manual reconciliation is required")
+            self.stop.set()
+            self._startup_reconciled = True
+            return False
 
     @staticmethod
     def _context(instance_id: str, job: dict, operation_id: str):
@@ -216,6 +318,9 @@ class RemoteWorker:
     async def run_once(self) -> bool:
         from .execution_client import ExecutionClientError, ExecutionOutcomeUnknown
 
+        if not self._startup_reconciled and not self._startup_reconcile():
+            return False
+
         def complete_or_fail(context, *, outcome, result=None, error_code=None):
             expected_states = {
                 "completed": {"completed", "cancelled", "blocked"},
@@ -223,6 +328,10 @@ class RemoteWorker:
                 "retryable_failure": {"retry_wait", "failed", "cancelled", "blocked"},
                 "cancelled": {"cancelled", "blocked"},
             }[outcome]
+            self._journal_write("pending_complete", context.operation_id, "complete",
+                                job={"job_id": context.job_id, "generation": context.generation,
+                                     "fence": context.fence}, expected=expected_states,
+                                lease_until=lease_until, deadline=deadline)
             try:
                 response = self.client.complete(context, outcome=outcome, result=result,
                                                 error_code=error_code)
@@ -232,11 +341,13 @@ class RemoteWorker:
                         or response.get("fence") != context.fence):
                     self.stop.set()
                     raise RuntimeError("Execution completion did not confirm the requested transition")
+                self.journal.clear()
                 return response
             except ExecutionOutcomeUnknown:
                 self._diagnostic(context, "complete", "unknown")
                 self._reconcile_unknown(context, "complete", result_states=expected_states)
                 self._diagnostic(context, "complete", "confirmed")
+                self.journal.clear()
                 return {"state": "confirmed"}
             except ExecutionClientError:
                 self._diagnostic(context, "complete", "refused")
@@ -244,6 +355,7 @@ class RemoteWorker:
                 raise
 
         pull_id = self._operation_id()
+        self._journal_write("pending_pull", pull_id, "pull", expected={"idle", "reserved"})
         try:
             pulled = self.client.pull(self.instance_id, pull_id)
         except ExecutionOutcomeUnknown:
@@ -256,6 +368,7 @@ class RemoteWorker:
                     raise RuntimeError("Execution pull lookup did not resolve the exact operation")
                 if observed.get("result_state") == "idle":
                     self._diagnostic_ids(self.instance_id, pull_id, "pull", "idle_confirmed")
+                    self.journal.clear()
                     return False
                 # Lookup intentionally omits task/resolved; never dispatch a
                 # reservation recovered without its original pull response.
@@ -271,13 +384,19 @@ class RemoteWorker:
             self.stop.set()
             raise
         if pulled["state"] == "idle":
+            self.journal.clear()
             return False
         if pulled["state"] != "reserved" or not isinstance(pulled.get("job"), dict):
             self._diagnostic_ids(self.instance_id, pull_id, "pull", "unexpected")
             self.stop.set()
             return False
         job = pulled["job"]
+        self._journal_write("reserved", pull_id, "pull", job=job,
+                            expected={"reserved"}, lease_until=job.get("lease_until"))
         start_context = self._context(self.instance_id, job, self._operation_id())
+        self._journal_write("pending_start", start_context.operation_id, "start", job=job,
+                            expected={"started", "already_started"},
+                            lease_until=job.get("lease_until"))
         try:
             started = self.client.start(start_context)
         except ExecutionOutcomeUnknown:
@@ -297,6 +416,10 @@ class RemoteWorker:
             self.stop.set()
             self._diagnostic(start_context, "start", "unexpected")
             return False
+        lease_until = float(started["lease_until"])
+        deadline = float(started["deadline"])
+        self._journal_write("started", start_context.operation_id, "start", job=job,
+                            expected={"started"}, lease_until=lease_until, deadline=deadline)
         context = self._context(self.instance_id, job, self._operation_id())
         # Start's bearer is never retained or returned by this worker runtime;
         # model-gateway execution still requires a separately qualified adapter.
@@ -310,19 +433,23 @@ class RemoteWorker:
                              error_code="model_gateway_adapter_unavailable")
             return True
 
-        lease_until = float(started["lease_until"])
-
         def renew_exact_fence():
             nonlocal lease_until
             renew_context = self._context(self.instance_id, job, self._operation_id())
+            self._journal_write("pending_renew", renew_context.operation_id, "renew", job=job,
+                                expected={"renewed"}, lease_until=lease_until, deadline=deadline)
             try:
                 response = self.client.renew(renew_context)
                 if response["state"] != "renewed":
+                    self.stop.set()
                     return False
                 lease_until = float(response["lease_until"])
+                self._journal_write("started", renew_context.operation_id, "renew", job=job,
+                                    expected={"renewed"}, lease_until=lease_until, deadline=deadline)
                 return True
             except ExecutionOutcomeUnknown:
                 self._diagnostic(renew_context, "renew", "unknown")
+                self._reconcile_unknown(renew_context, "renew", result_states={"renewed"})
                 try:
                     observed = self.client.status(context)
                 except ExecutionClientError:
@@ -335,6 +462,8 @@ class RemoteWorker:
                     self.stop.set()
                     return False
                 lease_until = float(observed["lease_until"])
+                self._journal_write("started", renew_context.operation_id, "renew", job=job,
+                                    expected={"renewed"}, lease_until=lease_until, deadline=deadline)
                 return True
             except ExecutionClientError:
                 self._diagnostic(renew_context, "renew", "refused")
@@ -361,6 +490,9 @@ class RemoteWorker:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
                     handback = self._context(self.instance_id, job, self._operation_id())
+                    self._journal_write("pending_handback", handback.operation_id, "handback",
+                                        job=job, expected={"handed_back"},
+                                        lease_until=lease_until, deadline=deadline)
                     try:
                         response = self.client.handback(handback)
                         if (response.get("state") != "handed_back"
@@ -370,10 +502,12 @@ class RemoteWorker:
                             self._diagnostic(handback, "handback", "unexpected")
                             self.stop.set()
                             raise RuntimeError("Execution handback did not confirm the captured fence")
+                        self.journal.clear()
                     except ExecutionOutcomeUnknown:
                         self._diagnostic(handback, "handback", "unknown")
                         self._reconcile_unknown(handback, "handback",
                                                 result_states={"handed_back"})
+                        self.journal.clear()
                     except ExecutionClientError:
                         self._diagnostic(handback, "handback", "refused")
                         self.stop.set()
@@ -409,6 +543,11 @@ class RemoteWorker:
             complete = self._context(self.instance_id, job, self._operation_id())
             complete_or_fail(complete, outcome="completed", result=result)
         except RuntimeFailure as exc:
+            if self.stop.is_set():
+                # A failed renewal/status or control shutdown already closed
+                # this process to new work. Keep its active journal for owner
+                # reconciliation instead of issuing another mutation.
+                return True
             complete = self._context(self.instance_id, job, self._operation_id())
             outcome = "retryable_failure" if exc.retryable else "failed"
             complete_or_fail(complete, outcome=outcome, error_code=exc.code)

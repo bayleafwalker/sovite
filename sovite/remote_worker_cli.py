@@ -47,23 +47,30 @@ def _bounded_seconds(name: str, default: float, minimum: float, maximum: float) 
 
 async def _run(
     instance_id: str,
+    journal_path: str,
     poll_seconds: float,
     lease_seconds: float,
     ca_bundle: str | None,
 ) -> None:
     from .execution_client import ExecutionClient
+    from .remote_journal import ExecutionJournal
     from .worker import RemoteWorker
 
-    worker = RemoteWorker(
-        ExecutionClient.from_env(verify=ca_bundle or True),
-        instance_id,
-        poll_seconds=poll_seconds,
-        lease_seconds=lease_seconds,
-    )
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, worker.stop.set)
-    await worker.run()
+    journal = ExecutionJournal(journal_path)
+    try:
+        worker = RemoteWorker(
+            ExecutionClient.from_env(verify=ca_bundle or True),
+            instance_id,
+            journal=journal,
+            poll_seconds=poll_seconds,
+            lease_seconds=lease_seconds,
+        )
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, worker.stop.set)
+        await worker.run()
+    finally:
+        journal.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
     if not instance_id:
         print("SOVITE_EXECUTION_INSTANCE_ID is required", file=sys.stderr)
         return 2
+    journal_path = os.environ.get("SOVITE_EXECUTION_JOURNAL_PATH", "")
+    if not journal_path or not Path(journal_path).is_absolute():
+        print("SOVITE_EXECUTION_JOURNAL_PATH must be an absolute path", file=sys.stderr)
+        return 2
     try:
         poll_seconds = _bounded_seconds("SOVITE_EXECUTION_POLL_SECONDS", 2.0, 0.1, 60.0)
         lease_seconds = _bounded_seconds("SOVITE_EXECUTION_LEASE_SECONDS", 90.0, 1.0, 3600.0)
@@ -98,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO)
     try:
-        asyncio.run(_run(instance_id, poll_seconds, lease_seconds, ca_bundle))
+        asyncio.run(_run(instance_id, journal_path, poll_seconds, lease_seconds, ca_bundle))
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
