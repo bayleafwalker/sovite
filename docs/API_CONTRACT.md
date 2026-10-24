@@ -79,6 +79,25 @@ The worker sends the following exact body to the configured agent-http service's
 
 The request uses the configured bearer token and `Idempotency-Key: durable-job-id`. Set `SOVITE_HARNESS_AGENT_ID` and `SOVITE_BUNDLE_PATH` on the fixed service. When the platform uses a hosting envelope, load the same `SOVITE_HOSTING_ENVELOPE`; the service compiles that exact generation and rejects raw-bundle or different-envelope revisions. This does not broaden the narrower service-only hosting profile, which permits internal model-gateway connections only.
 
+## Remote helper enrollment administration
+
+The operator API exposes `POST /api/helpers/enrollments/{enrollment_id}/rotate`,
+`POST /api/helpers/enrollments/{enrollment_id}/revoke`, and
+`POST /api/helpers/reconcile`. All three require the existing operator identity;
+caller and gateway credentials are not accepted. Rotation accepts a bounded
+`certificate_pem` body containing a client certificate that has already been
+issued by the separately managed helper CA. The CA and private signing key stay
+outside Sovite. Sovite validates client-certificate usage and enrollment key
+type, updates the enrollment atomically, and fences sessions using the prior
+certificate. Revocation marks the enrollment revoked and fences its active
+sessions in the same transaction. Reconciliation returns per-binding helper
+demand and fences sessions whose enrollment expired or was revoked, or whose
+binding generation/role is no longer current. Mutations and demand reconciliation
+append actor-attributed durable audit events in their state transaction.
+
+These routes do not implement CSR issuance or a helper renewal handshake. They
+do not return certificate material or echo certificate parsing errors.
+
 An agent-http harness served here declares exactly one native capability: native-codex, native-claude or native-opencode. Agents have an empty declared HTTP tool list; the service does not translate HTTP bindings into native authority. Multiple fixed agents require separate services. Enforced native executables cannot run inline in the worker. The service receives no platform database, artifact-store or qualification signing credentials. `SOVITE_HARNESS_TOKEN` is separate from subscription credentials and operator/caller tokens.
 
 The ledger stores request digest and execution state. An exact completed replay returns its stored result; changed input under the same task ID is rejected. In-progress or uncertain work is not restarted. `POST /cancel` accepts `{task_id,agent_id,configuration_revision}` and requests cancellation of queued or running work. Remote cancellation is best effort; worker release authority remains independently checked.

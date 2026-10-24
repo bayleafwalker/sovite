@@ -231,6 +231,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     from .setup_api import install_routes as install_setup_routes
     install_setup_routes(app, platform, operator)
+    from .helper_admin_api import install_routes as install_helper_admin_routes
+    install_helper_admin_routes(app, platform, operator)
 
     @app.post("/api/workflows/validate")
     async def validate_workflow(body: WorkflowDraft, auth=Depends(workflow_author)):
