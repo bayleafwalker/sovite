@@ -127,7 +127,10 @@ deadline. `handback` records the existing cancellation, safe retry, or
 
 `status` accepts the exact tuple without an operation id. It returns one of
 `current`, `superseded`, `finished`, or `expired`, with only the finite job
-status, phase, lease expiry, and fixed deadline. It does not reveal task text,
+status, phase, lease expiry, and fixed deadline. When the supplied generation
+or fence has been replaced, it retains the caller's tuple and returns `null`
+for those incarnation fields, so replacement state is never attributed to a
+stale tuple. It does not reveal task text,
 resolved configuration, capabilities, credentials, or audit payloads. `current`
 means the live fence also passes current authorization checks: cancellation,
 inhibition, a superseded binding, or revoked/expired gateway execution

@@ -105,7 +105,10 @@ recorded in the [remote operation requirements](worker-execution-remote-operatio
 and [API contract](../API_CONTRACT.md).
 
 Status reports only the exact fence's state, finite Job status, phase, lease
-expiry and deadline. `current` requires live authorization as well as a live
+expiry and deadline. If the supplied generation or fence has been replaced,
+the response retains that caller-supplied tuple and sets phase, job status,
+lease expiry, and deadline to `null`; it never labels replacement state as
+belonging to the stale tuple. `current` requires live authorization as well as a live
 lease: cancellation, inhibition, superseded binding, or withdrawn gateway
 execution authority is reported as `superseded` without exposing a reason.
 Status takes the existing authority lock and exact Job/lease row locks so its

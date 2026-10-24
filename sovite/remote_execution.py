@@ -306,10 +306,14 @@ class RemoteExecution:
                 "job_id": context.job_id,
                 "generation": context.generation,
                 "fence": context.fence,
-                "phase": lease.phase,
-                "job_status": job.status,
-                "lease_until": lease.lease_until,
-                "deadline": lease.execution_deadline,
+                # A superseded caller is entitled to the state of its own
+                # incarnation only. The locked rows may now describe its
+                # replacement, so do not project those values under the old
+                # caller-supplied fence.
+                "phase": lease.phase if tuple_matches else None,
+                "job_status": job.status if tuple_matches else None,
+                "lease_until": lease.lease_until if tuple_matches else None,
+                "deadline": lease.execution_deadline if tuple_matches else None,
             }
             self.leases._check_response_size(result)
             return result
@@ -478,6 +482,8 @@ class RemoteExecution:
 
     def lookup(self, principal: ExecutionPrincipal, *, instance_id: str, operation_id: str) -> dict:
         _validate_principal(principal)
+        if principal.compute_id != self.platform.settings.compute_id:
+            raise PlatformError("execution_scope_denied", "Execution owner scope is not permitted", 403)
         if not isinstance(instance_id, str) or _INSTANCE_RE.fullmatch(instance_id) is None or not isinstance(operation_id, str) or _OPERATION_RE.fullmatch(operation_id) is None:
             raise PlatformError("invalid_request", "Execution owner request is invalid", 422)
         with self.platform.db.sessions() as session:
