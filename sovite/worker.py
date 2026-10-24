@@ -173,7 +173,25 @@ class RemoteWorker:
     def _operation_id() -> str:
         return uuid.uuid4().hex
 
+    @staticmethod
+    def _diagnostic_ids(instance_id: str, operation_id: str,
+                        operation_kind: str, state: str) -> None:
+        # Identifiers are validated at construction and by ExecutionClient;
+        # never include transport or owner exception text here.
+        log.error(
+            "Remote execution instance_id=%s operation_id=%s operation=%s state=%s; "
+            "lookup/reconciliation is required before any retry",
+            instance_id, operation_id, operation_kind, state,
+        )
+
+    @classmethod
+    def _diagnostic(cls, context, operation_kind: str, state: str) -> None:
+        cls._diagnostic_ids(context.instance_id, context.operation_id,
+                            operation_kind, state)
+
     def _reconcile_unknown(self, context, expected_kind: str):
+        from .execution_client import ExecutionLookupNotFound
+
         try:
             result = self.client.lookup(context.instance_id, context.operation_id)
             if (result.get("state") != "found"
@@ -183,9 +201,14 @@ class RemoteWorker:
                     or result.get("fence") != context.fence):
                 raise RuntimeError("Execution operation lookup did not resolve the exact key")
             return result
+        except ExecutionLookupNotFound:
+            self._diagnostic(context, expected_kind, "not_found")
+            self.stop.set()
+            raise
         except Exception:
             # Keep the original operation key available to an operator. Never
             # invent a new key and repeat a mutation whose commit is unknown.
+            self._diagnostic(context, expected_kind, "unavailable")
             self.stop.set()
             raise
 
@@ -197,6 +220,7 @@ class RemoteWorker:
                 return self.client.complete(context, outcome=outcome, result=result,
                                             error_code=error_code)
             except ExecutionOutcomeUnknown:
+                self._diagnostic(context, "complete", "unknown")
                 self._reconcile_unknown(context, "complete")
                 return None
             except ExecutionClientError:
@@ -209,6 +233,7 @@ class RemoteWorker:
                         fallback, outcome="failed", error_code="internal_execution_error"
                     )
                 except ExecutionOutcomeUnknown:
+                    self._diagnostic(fallback, "complete", "unknown")
                     self._reconcile_unknown(fallback, "complete")
                     return None
 
@@ -220,6 +245,7 @@ class RemoteWorker:
             # journal does not expose private task data through lookup, so stop
             # this iteration rather than claim again under a new key.
             self.stop.set()
+            self._diagnostic_ids(self.instance_id, pull_id, "pull", "unknown")
             raise
         if pulled["state"] == "idle":
             return False
@@ -231,6 +257,7 @@ class RemoteWorker:
             # Start may have committed and the response may contain the only
             # gateway capability. Status cannot recover it, so do not dispatch.
             self.stop.set()
+            self._diagnostic(start_context, "start", "unknown")
             raise
         if started["state"] != "started":
             return False
@@ -259,11 +286,23 @@ class RemoteWorker:
                 lease_until = float(response["lease_until"])
                 return True
             except ExecutionOutcomeUnknown:
-                observed = self.client.status(context)
+                self._diagnostic(renew_context, "renew", "unknown")
+                try:
+                    observed = self.client.status(context)
+                except ExecutionClientError:
+                    self._diagnostic(context, "status", "unavailable")
+                    self.stop.set()
+                    return False
                 if observed["state"] != "current" or observed["lease_until"] is None:
+                    state = observed["state"] if observed["lease_until"] is not None else "unavailable"
+                    self._diagnostic(context, "status", state)
                     return False
                 lease_until = float(observed["lease_until"])
                 return True
+            except ExecutionClientError:
+                self._diagnostic(renew_context, "renew", "refused")
+                self.stop.set()
+                return False
 
         self.runner.authorization_check = renew_exact_fence
         operation = asyncio.create_task(self.runner.run(job["resolved"], job["task"], job["job_id"]))
@@ -288,10 +327,13 @@ class RemoteWorker:
                     try:
                         self.client.handback(handback)
                     except ExecutionOutcomeUnknown:
+                        self._diagnostic(handback, "handback", "unknown")
                         self._reconcile_unknown(handback, "handback")
                     return True
                 state = self.client.status(context)
                 if state["state"] != "current" or state["lease_until"] is None:
+                    status_state = state["state"] if state["lease_until"] is not None else "unavailable"
+                    self._diagnostic(context, "status", status_state)
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
                     complete = self._context(self.instance_id, job, self._operation_id())
