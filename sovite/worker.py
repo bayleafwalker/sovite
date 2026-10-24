@@ -182,7 +182,27 @@ class RemoteWorker:
             raise
 
     async def run_once(self) -> bool:
-        from .execution_client import ExecutionOutcomeUnknown
+        from .execution_client import ExecutionClientError, ExecutionOutcomeUnknown
+
+        def complete_or_fail(context, *, outcome, result=None, error_code=None):
+            try:
+                return self.client.complete(context, outcome=outcome, result=result,
+                                            error_code=error_code)
+            except ExecutionOutcomeUnknown:
+                self._reconcile_unknown(context)
+                return None
+            except ExecutionClientError:
+                # Client-side bounds and typed owner refusals are known
+                # non-commits. Close the still-current attempt with a small,
+                # finite failure under a fresh operation key.
+                fallback = self._context(self.instance_id, job, self._operation_id())
+                try:
+                    return self.client.complete(
+                        fallback, outcome="failed", error_code="internal_execution_error"
+                    )
+                except ExecutionOutcomeUnknown:
+                    self._reconcile_unknown(fallback)
+                    return None
 
         pull_id = self._operation_id()
         try:
@@ -215,8 +235,8 @@ class RemoteWorker:
             # qualified remote gateway adapter. Close the exact started fence
             # with a finite failure instead of leaving it running to expire.
             complete = self._context(self.instance_id, job, self._operation_id())
-            self.client.complete(complete, outcome="failed",
-                                 error_code="model_gateway_adapter_unavailable")
+            complete_or_fail(complete, outcome="failed",
+                             error_code="model_gateway_adapter_unavailable")
             return True
 
         def renew_exact_fence():
@@ -250,7 +270,7 @@ class RemoteWorker:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
                     complete = self._context(self.instance_id, job, self._operation_id())
-                    self.client.complete(complete, outcome="cancelled")
+                    complete_or_fail(complete, outcome="cancelled")
                     return True
                 if not renew_exact_fence():
                     operation.cancel()
@@ -258,17 +278,11 @@ class RemoteWorker:
                     return True
             result = await operation
             complete = self._context(self.instance_id, job, self._operation_id())
-            try:
-                self.client.complete(complete, outcome="completed", result=result)
-            except ExecutionOutcomeUnknown:
-                self._reconcile_unknown(complete)
+            complete_or_fail(complete, outcome="completed", result=result)
         except RuntimeFailure as exc:
             complete = self._context(self.instance_id, job, self._operation_id())
             outcome = "retryable_failure" if exc.retryable else "failed"
-            try:
-                self.client.complete(complete, outcome=outcome, error_code=exc.code)
-            except ExecutionOutcomeUnknown:
-                self._reconcile_unknown(complete)
+            complete_or_fail(complete, outcome=outcome, error_code=exc.code)
         finally:
             self.runner.authorization_check = None
         return True

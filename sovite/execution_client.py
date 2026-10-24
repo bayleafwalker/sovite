@@ -189,6 +189,13 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
                 or not isinstance(result.get("fence"), str) or _FENCE.fullmatch(result["fence"]) is None):
             raise ValueError
 
+    def same_execution():
+        identity()
+        if (result["job_id"] != request["job_id"]
+                or result["generation"] != request["generation"]
+                or result["fence"] != request["fence"]):
+            raise ValueError
+
     state = result.get("state")
     if operation == "pull":
         if state == "idle":
@@ -210,13 +217,15 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
     if operation == "start":
         if state == "already_started":
             exact({"state", "job_id", "generation", "fence"})
-            identity()
+            same_execution()
             if any(key in result for key in ("execution", "capability")):
                 raise ValueError
             return
+        if state != "started":
+            raise ValueError
         exact({"state", "job_id", "generation", "fence", "lease_until", "deadline"}
               | ({"execution"} if "execution" in result else set()))
-        identity()
+        same_execution()
         if not _finite_number(result["lease_until"]) or not _finite_number(result["deadline"]):
             raise ValueError
         if "execution" in result:
@@ -225,10 +234,18 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
                     or not isinstance(execution["capability"], str) or not execution["capability"]
                     or not isinstance(execution["context"], dict)):
                 raise ValueError
+            context = execution["context"]
+            # The current owner projection binds generation and workload. The
+            # optional job/fence checks also prevent a future context shape
+            # from silently rebinding this bearer to another execution.
+            if (context.get("generation") != request["generation"]
+                    or ("job_id" in context and context["job_id"] != request["job_id"])
+                    or ("fence" in context and context["fence"] != request["fence"])):
+                raise ValueError
         return
     if operation == "renew":
         exact({"state", "job_id", "generation", "fence", "lease_until", "deadline"})
-        identity()
+        same_execution()
         if state != "renewed" or not _finite_number(result["lease_until"]) or not _finite_number(result["deadline"]):
             raise ValueError
         return
@@ -246,7 +263,7 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
         return
     if operation == "handback":
         exact({"state", "job_id", "generation", "fence", "disposition"})
-        identity()
+        same_execution()
         if state != "handed_back" or result["disposition"] not in {"retry_wait", "blocked", "cancelled"}:
             raise ValueError
         return
@@ -254,7 +271,7 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
         allowed = {"state", "job_id", "generation", "fence", "error_code", "artifact_sha256"}
         if set(result) - allowed or not {"state", "job_id", "generation", "fence", "error_code"} <= set(result):
             raise ValueError
-        identity()
+        same_execution()
         if (state not in {"completed", "failed", "retry_wait", "cancelled", "blocked"}
                 or (result["error_code"] is not None and
                     (not isinstance(result["error_code"], str) or _ERROR_CODE.fullmatch(result["error_code"]) is None))):
