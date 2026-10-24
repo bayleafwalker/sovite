@@ -46,6 +46,38 @@ The current worker consequently needs both database and object-store
 credentials in Compose and Helm. Native harness composition is separate and has
 no database or object-store credentials.
 
+## Reconciled owner semantics and admission boundary
+
+The internal owner source defines and verifies only the `pull` and first
+`start` operations. Their exact bodies are respectively
+`{instance_id,operation_id}` and
+`{instance_id,operation_id,job_id,generation,fence}`; the digest binds those
+fields plus the authenticated workload and compute identity. The journal key is
+`(workload_id,instance_id,operation_id)`, and same-key changes of kind or body
+are conflicts. Pull returns exactly `{state:idle}` or a bounded private
+`{state:reserved,job}` view. Start returns the first-start metadata and
+transient gateway execution material once; an exact replay returns
+`already_started` without credentials. These are Python owner interfaces, not
+an admitted HTTP contract. The internal plan records the owner transaction,
+currentness, fence, response-size, rollback, and journal invariants.
+
+No equivalent source semantics exist for a remote lease `renew`, worker
+`status`, shutdown `handback`, `complete`, or `lookup`. Existing local worker
+methods are not a sufficient wire contract. In particular, their request
+identity, same-key replay result, response-loss recovery, authorization
+projection, and terminal behavior must be reconciled with R4/F2 before route
+registration. No network routes are opened for these operations here.
+
+The remaining admission evidence is the accepted shared contract foundation
+and real O2/F2 consumer qualification named by the owner plan, including the
+external request/status schemas and generated client contract. The current
+workspace does not contain that evidence. The next owner action is to attach
+the exact accepted contract revision and qualification result, then map each
+wire operation to owner methods while preserving their existing transactions
+and journal identity. Until then, keep the route-absence regression and this
+boundary note in force. The source CI recorded in upstream notes is not rerun
+as part of this documentation update.
+
 ## Next implementation seam
 
 The next safe API slice, after the admission gate above, needs an explicit,
