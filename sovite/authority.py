@@ -144,10 +144,14 @@ def sweep_terminal_authority(platform, session):
 
 
 def _enrollment_certificate(certificate: bytes):
-    cert = x509.load_pem_x509_certificate(certificate)
+    try:
+        cert = x509.load_pem_x509_certificate(certificate)
+        client_auth = ExtendedKeyUsageOID.CLIENT_AUTH in cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    except Exception:
+        raise ValueError("valid helper client certificate required") from None
     key = cert.public_key()
     if (cert.not_valid_before_utc.timestamp() > time.time() or cert.not_valid_after_utc.timestamp() <= time.time()
-            or ExtendedKeyUsageOID.CLIENT_AUTH not in cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value):
+            or not client_auth):
         raise ValueError("valid helper client certificate required")
     if not isinstance(key, Ed25519PublicKey):
         raise ValueError("Ed25519 enrollment required")
@@ -171,7 +175,7 @@ def provision_enrollment(platform, *, enrollment_id, binding_id, installation_id
                     expires_at=expires_at, certificate_digest=certificate_digest, public_key=public_key))
 
 
-def rotate_enrollment(platform, enrollment_id: str, certificate: bytes):
+def rotate_enrollment(platform, enrollment_id: str, certificate: bytes, *, actor: str | None = None):
     """Atomically replace an enrollment certificate; existing sessions are fenced."""
     expires_at, certificate_digest, public_key = _enrollment_certificate(certificate)
     with platform.db.sessions.begin() as session:
@@ -187,10 +191,13 @@ def rotate_enrollment(platform, enrollment_id: str, certificate: bytes):
         for helper in session.scalars(select(HelperSession).where(
                 HelperSession.enrollment_id == enrollment_id, HelperSession.active == True)):
             Authority(platform)._close(session, helper)
+        if actor is not None:
+            platform.db.audit(session, actor, "helper.enrollment_rotated", enrollment_id,
+                              {"binding_id": enrollment.binding_id, "expires_at": expires_at})
         return {"enrollment_id": enrollment_id, "expires_at": expires_at}
 
 
-def revoke_enrollment(platform, enrollment_id: str):
+def revoke_enrollment(platform, enrollment_id: str, *, actor: str | None = None):
     """Revoke an enrollment and terminate its current sessions in the same transaction."""
     authority = Authority(platform)
     with platform.db.sessions.begin() as session:
@@ -202,10 +209,13 @@ def revoke_enrollment(platform, enrollment_id: str):
         for helper in session.scalars(select(HelperSession).where(
                 HelperSession.enrollment_id == enrollment_id, HelperSession.active == True)):
             authority._close(session, helper)
+        if actor is not None:
+            platform.db.audit(session, actor, "helper.enrollment_revoked", enrollment_id,
+                              {"binding_id": enrollment.binding_id})
     return {"enrollment_id": enrollment_id, "revoked": True}
 
 
-def reconcile_helper_demand(platform):
+def reconcile_helper_demand(platform, *, actor: str | None = None):
     """Return per-binding helper capacity and fence sessions with expired/revoked enrollment."""
     now = time.time()
     authority = Authority(platform)
@@ -213,6 +223,7 @@ def reconcile_helper_demand(platform):
         platform.db.authority_lock(session)
         bundle, generation = platform.active(session)
         demand = []
+        fenced_sessions = 0
         for binding in bundle.get("models", []):
             if binding.get("connection", {}).get("kind") != "model-gateway":
                 continue
@@ -227,13 +238,18 @@ def reconcile_helper_demand(platform):
                         or not binding.get("enabled", True) or (runtime and runtime.inhibited)
                         or helper.generation != generation or enrollment.role != role):
                     authority._close(session, helper)
-            eligible = [row for row in enrollments if not row.revoked and row.expires_at > now]
+                    fenced_sessions += 1
+            eligible = [row for row in enrollments if not row.revoked and row.expires_at > now
+                        and row.role == role]
             active = session.scalar(select(HelperSession.id).where(
                 HelperSession.binding_id == binding_id, HelperSession.active == True)) is not None
             demand.append({"binding_id": binding_id, "enabled": bool(binding.get("enabled", True)),
                            "eligible_enrollments": len(eligible), "active_session": active,
                            "demand": "none" if not binding.get("enabled", True) or active else
                                      ("replacement" if eligible else "enrollment")})
+        if actor is not None:
+            platform.db.audit(session, actor, "helper.demand_reconciled", "helper-enrollments",
+                              {"bindings": len(demand), "fenced_sessions": fenced_sessions})
         return demand
 
 
