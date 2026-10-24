@@ -57,9 +57,15 @@ def _valid_record(record):
         return False
     for field in ("lease_until", "deadline"):
         value = record[field]
-        if (value is not None and (type(value) not in {int, float}
-                                   or not math.isfinite(value) or abs(value) > 1_000_000_000_000)):
-            return False
+        if value is not None:
+            if type(value) is int:
+                if abs(value) > 1_000_000_000_000:
+                    return False
+            elif type(value) is float:
+                if not math.isfinite(value) or abs(value) > 1_000_000_000_000:
+                    return False
+            else:
+                return False
     if record["operation_kind"] == "pull":
         if record["phase"] == "pending_pull" and any(record[k] is not None for k in ("job_id", "generation", "fence")):
             return False
@@ -206,7 +212,7 @@ class ExecutionJournal:
             if not _valid_record(record):
                 raise ValueError
             return record
-        except (UnicodeDecodeError, ValueError, RecursionError):
+        except (UnicodeDecodeError, ValueError, RecursionError, OverflowError):
             raise JournalError("Execution journal is invalid or exceeds structural limits") from None
         finally:
             os.close(fd)
