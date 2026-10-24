@@ -178,7 +178,9 @@ class RemoteWorker:
             result = self.client.lookup(context.instance_id, context.operation_id)
             if (result.get("state") != "found"
                     or result.get("operation_id") != context.operation_id
-                    or result.get("operation_kind") != expected_kind):
+                    or result.get("operation_kind") != expected_kind
+                    or result.get("job_id") != context.job_id
+                    or result.get("fence") != context.fence):
                 raise RuntimeError("Execution operation lookup did not resolve the exact key")
             return result
         except Exception:
