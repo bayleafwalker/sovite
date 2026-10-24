@@ -1,100 +1,56 @@
 # Worker remote boundary status
 
-Status: **No supported remote execution-owner or artifact-write API exists in
-this source. The Compose worker therefore still requires SQL and S3 access.**
-This note records a source boundary, not a deployment or qualification claim.
-
-## API admission gate
-
-The internal owner plan, [`2026-10-23-execution-lease-owner.md`](2026-10-23-execution-lease-owner.md),
-states that O2a supplies no private API and that the first private API waits for
-the accepted shared foundation plus real O2/F2 consumer qualification. It also
-records the internal owner candidate's canonical landing and CI as pending. This
-producer source has the internal Python `ExecutionPrincipal`, `ExecutionContext`,
-`LeaseService.reserve`, and `LeaseService.start` interfaces and owner tests, but
-no accepted external F2 request/status schema, generated worker contract/client,
-or evidence that the shared API foundation and consumer gates passed. The API
-contract document contains no worker execution route; the only current
-`/internal/authority/*` surface is for inference gateway authority.
-
-The programme queue authorizes continuing this API work after its ordered
-contract prerequisites. It does not supply the missing external fields,
-operation-journal semantics, or consumer qualification evidence. Adding routes
-now would turn internal private owner views into an unratified network contract.
-The route-absence regression in `tests/test_worker_remote_boundary.py` keeps
-this gate visible until that evidence is attached and the external contract is
-admitted.
+Status: **The source has a scoped execution-owner HTTP API and a standalone
+opt-in HTTP client. The default worker still uses SQL and S3 directly.** No
+artifact-write API or remote-worker qualification is included. This note
+records source state, not deployment or qualification.
 
 ## Current source path
 
-`Worker.claim`, renewal, shutdown handback, recovery, and finalization call the
-owner-side `LeaseService` against `Platform.db.sessions`. The lease service's
-own contract calls it an internal extraction that cannot run without database
-authority. Its state transitions lock and update job, lease, execution
-capability, operation journal, and audit rows in owner transactions.
+`api.py` registers `/internal/execution/*`. `sovite.execution_client.ExecutionClient`
+provides explicit calls for pull/start/renew/status/handback/complete/lookup. It
+is not selected by default worker composition; callers must construct it with
+an HTTPS origin and dedicated execution token or explicitly load those from
+`SOVITE_CONTROL_URL` and `SOVITE_EXECUTION_TOKEN`. Server authentication uses
+the matching workload token configured through `SOVITE_EXECUTION_TOKENS`.
 
-There is no `/internal/execution/*` or other worker lease API in `api.py`.
-`/internal/authority/*` is a separate gateway inference-authority surface and
-does not implement worker claim/start/renew/status/handback/complete/lookup.
-`control_client.py` only implements hosted bundle compile and activation. It is
-not a worker client.
+The client makes one bounded HTTP request per invocation, disables ambient
+proxy and redirect behavior, and never retries a mutation. Transport loss,
+malformed success data, or a server failure during a mutation raises
+`ExecutionOutcomeUnknown` with the operation ID and directs the caller to
+lookup using the same instance and operation IDs. The error does not include
+response content, the bearer token, URL credentials, or exception text. The
+client preserves the captured job, generation, and fence and does not
+substitute a newer context. It parses bounded JSON but exact response schema
+validation remains provisional; returned values are visible to the explicit
+caller. Pull necessarily returns task and resolved execution input, which
+callers must keep out of logs.
 
-`Worker.execute` calls `Platform.store.put` directly. It persists the private
-object before the fenced SQL finalization transaction records the object
-reference, release projection, and audit. S3 and SQL have no shared transaction.
-The current worker consequently needs both database and object-store
-credentials in Compose and Helm. Native harness composition is separate and has
-no database or object-store credentials.
+The API and client use the local P08 request shapes and the owner journal. Pull
+and start have no bearer-replay path: the first start response may contain
+short-lived execution material, while a replay returns owner metadata without
+that material. Renew, handback, and complete are journaled; status and lookup
+are observations. Lookup is scoped to the exact instance and operation ID and
+returns fixed journal metadata. Callers should generate a distinct operation
+ID for each new mutation and use the original ID for exact reconciliation.
 
-## Reconciled owner semantics and admission boundary
+## Remaining boundary
 
-The internal owner source defines and verifies only the `pull` and first
-`start` operations. Their exact bodies are respectively
-`{instance_id,operation_id}` and
-`{instance_id,operation_id,job_id,generation,fence}`; the digest binds those
-fields plus the authenticated workload and compute identity. The journal key is
-`(workload_id,instance_id,operation_id)`, and same-key changes of kind or body
-are conflicts. Pull returns exactly `{state:idle}` or a bounded private
-`{state:reserved,job}` view. Start returns the first-start metadata and
-transient gateway execution material once; an exact replay returns
-`already_started` without credentials. These are Python owner interfaces, not
-an admitted HTTP contract. The internal plan records the owner transaction,
-currentness, fence, response-size, rollback, and journal invariants.
+`Worker.claim`, renewal, shutdown handback, recovery, and finalization still
+call `LeaseService` against `Platform.db.sessions`. `Worker.execute` calls
+`Platform.store.put` directly before fenced SQL finalization. SQL and S3 do not
+share a transaction, and this source slice adds no artifact upload/write API.
+The default Compose and Helm worker therefore still require SQL and object
+store access. Native harness composition remains separate.
 
-No equivalent source semantics exist for a remote lease `renew`, worker
-`status`, shutdown `handback`, `complete`, or `lookup`. Existing local worker
-methods are not a sufficient wire contract. In particular, their request
-identity, same-key replay result, response-loss recovery, authorization
-projection, and terminal behavior must be reconciled with R4/F2 before route
-registration. No network routes are opened for these operations here.
+The current source does not include a generated external worker contract or
+qualification evidence for real HTTP owner races, revocation, fences, or
+response-loss histories. `tests/test_worker_remote_boundary.py` still asserts
+route absence and is stale against the registered execution routes; it was not
+run or edited in this slice. Existing remote-operation contract notes also
+need reconciliation against the route and current owner implementations.
 
-The remaining admission evidence is the accepted shared contract foundation
-and real O2/F2 consumer qualification named by the owner plan, including the
-external request/status schemas and generated client contract. The current
-workspace does not contain that evidence. The next owner action is to attach
-the exact accepted contract revision and qualification result, then map each
-wire operation to owner methods while preserving their existing transactions
-and journal identity. Until then, keep the route-absence regression and this
-boundary note in force. The source CI recorded in upstream notes is not rerun
-as part of this documentation update.
-
-## Next implementation seam
-
-The next safe API slice, after the admission gate above, needs an explicit,
-authenticated owner API and client
-for the existing owner methods. It must define a dedicated workload identity,
-bounded request and response schemas, operation journal/idempotency behavior,
-response-loss outcomes, and exact projections while preserving the current
-transaction boundaries, owner-generated fences, immutable start context,
-revocation checks, and no-replay rules. The model gateway's authority token is
-not worker authentication and must not be reused for this purpose.
-
-Artifact output needs its own boundary. An owner-mediated write or a narrowly
-scoped, one-use upload grant must bind the object to the current job and fence,
-preserve digest verification, and leave final release authorization in the
-owner transaction. Until those contracts are admitted and implemented, removing
-worker SQL or S3 credentials would break execution or move authority into the
-worker. Do not mask these environment variables out of the current composition.
-
-No production migration, rollout, or cluster observation follows from this
-source review.
+Do not infer credential cutover, worker-host acceptance, artifact integrity,
+deployment, or live qualification from the presence of these source APIs. The
+next source work is generated contract/schema qualification, followed by a
+separate artifact-write boundary and an explicit worker composition change.
