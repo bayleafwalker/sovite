@@ -173,12 +173,18 @@ class RemoteWorker:
     def _operation_id() -> str:
         return uuid.uuid4().hex
 
-    def _reconcile_unknown(self, context):
+    def _reconcile_unknown(self, context, expected_kind: str):
         try:
-            return self.client.lookup(context.instance_id, context.operation_id)
+            result = self.client.lookup(context.instance_id, context.operation_id)
+            if (result.get("state") != "found"
+                    or result.get("operation_id") != context.operation_id
+                    or result.get("operation_kind") != expected_kind):
+                raise RuntimeError("Execution operation lookup did not resolve the exact key")
+            return result
         except Exception:
             # Keep the original operation key available to an operator. Never
             # invent a new key and repeat a mutation whose commit is unknown.
+            self.stop.set()
             raise
 
     async def run_once(self) -> bool:
@@ -189,7 +195,7 @@ class RemoteWorker:
                 return self.client.complete(context, outcome=outcome, result=result,
                                             error_code=error_code)
             except ExecutionOutcomeUnknown:
-                self._reconcile_unknown(context)
+                self._reconcile_unknown(context, "complete")
                 return None
             except ExecutionClientError:
                 # Client-side bounds and typed owner refusals are known
@@ -201,7 +207,7 @@ class RemoteWorker:
                         fallback, outcome="failed", error_code="internal_execution_error"
                     )
                 except ExecutionOutcomeUnknown:
-                    self._reconcile_unknown(fallback)
+                    self._reconcile_unknown(fallback, "complete")
                     return None
 
         pull_id = self._operation_id()
@@ -239,21 +245,38 @@ class RemoteWorker:
                              error_code="model_gateway_adapter_unavailable")
             return True
 
+        lease_until = float(started["lease_until"])
+
         def renew_exact_fence():
+            nonlocal lease_until
             renew_context = self._context(self.instance_id, job, self._operation_id())
             try:
                 response = self.client.renew(renew_context)
-                return response["state"] == "renewed"
+                if response["state"] != "renewed":
+                    return False
+                lease_until = float(response["lease_until"])
+                return True
             except ExecutionOutcomeUnknown:
                 observed = self.client.status(context)
-                return observed["state"] == "current"
+                if observed["state"] != "current" or observed["lease_until"] is None:
+                    return False
+                lease_until = float(observed["lease_until"])
+                return True
 
         self.runner.authorization_check = renew_exact_fence
         operation = asyncio.create_task(self.runner.run(job["resolved"], job["task"], job["job_id"]))
         deadline = float(started["deadline"])
         try:
             while not operation.done():
-                await asyncio.wait({operation}, timeout=min(self.lease_seconds / 3, self.poll_seconds))
+                now = time.time()
+                remaining = min(lease_until - now, deadline - now)
+                if remaining <= 0:
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    complete = self._context(self.instance_id, job, self._operation_id())
+                    complete_or_fail(complete, outcome="failed", error_code="execution_timeout")
+                    return True
+                await asyncio.wait({operation}, timeout=min(self.poll_seconds, max(0.05, remaining / 3)))
                 if operation.done():
                     break
                 if self.stop.is_set():
@@ -263,14 +286,21 @@ class RemoteWorker:
                     try:
                         self.client.handback(handback)
                     except ExecutionOutcomeUnknown:
-                        self._reconcile_unknown(handback)
+                        self._reconcile_unknown(handback, "handback")
                     return True
                 state = self.client.status(context)
-                if state["state"] != "current" or time.time() >= deadline:
+                if state["state"] != "current" or state["lease_until"] is None:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
                     complete = self._context(self.instance_id, job, self._operation_id())
                     complete_or_fail(complete, outcome="cancelled")
+                    return True
+                lease_until = float(state["lease_until"])
+                if time.time() >= deadline:
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    complete = self._context(self.instance_id, job, self._operation_id())
+                    complete_or_fail(complete, outcome="failed", error_code="execution_timeout")
                     return True
                 if not renew_exact_fence():
                     operation.cancel()
