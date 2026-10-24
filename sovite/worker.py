@@ -140,3 +140,149 @@ class Worker:
                     await asyncio.wait_for(self.stop.wait(), timeout=self.platform.settings.poll_seconds)
                 except asyncio.TimeoutError:
                     pass
+
+
+class RemoteWorker:
+    """Opt-in runtime composition for the authenticated execution API.
+
+    This class is deliberately not selected by ``Worker`` or application
+    startup. Callers must construct it with a configured ExecutionClient and
+    an instance identifier. Every operation closes over the fence returned by
+    pull; uncertain mutations are reconciled or abandoned without replay.
+    """
+
+    def __init__(self, client, instance_id: str, runner: AdapterRunner | None = None,
+                 *, poll_seconds: float = 2.0, lease_seconds: float = 90.0):
+        from .execution_client import _identifier
+
+        self.client = client
+        self.instance_id = _identifier(instance_id, "instance_id")
+        self.runner = runner or AdapterRunner()
+        self.poll_seconds = max(0.1, float(poll_seconds))
+        self.lease_seconds = max(1.0, float(lease_seconds))
+        self.stop = asyncio.Event()
+
+    @staticmethod
+    def _context(instance_id: str, job: dict, operation_id: str):
+        from .execution_client import ExecutionContext
+
+        return ExecutionContext(instance_id, operation_id, job["job_id"],
+                                job["generation"], job["fence"])
+
+    @staticmethod
+    def _operation_id() -> str:
+        return uuid.uuid4().hex
+
+    def _reconcile_unknown(self, context):
+        try:
+            return self.client.lookup(context.instance_id, context.operation_id)
+        except Exception:
+            # Keep the original operation key available to an operator. Never
+            # invent a new key and repeat a mutation whose commit is unknown.
+            raise
+
+    async def run_once(self) -> bool:
+        from .execution_client import ExecutionOutcomeUnknown
+
+        pull_id = self._operation_id()
+        try:
+            pulled = self.client.pull(self.instance_id, pull_id)
+        except ExecutionOutcomeUnknown:
+            # Pull can reserve work even if its response is lost. The operation
+            # journal does not expose private task data through lookup, so stop
+            # this iteration rather than claim again under a new key.
+            self.stop.set()
+            raise
+        if pulled["state"] == "idle":
+            return False
+        job = pulled["job"]
+        start_context = self._context(self.instance_id, job, self._operation_id())
+        try:
+            started = self.client.start(start_context)
+        except ExecutionOutcomeUnknown:
+            # Start may have committed and the response may contain the only
+            # gateway capability. Status cannot recover it, so do not dispatch.
+            self.stop.set()
+            raise
+        if started["state"] != "started":
+            return False
+        context = self._context(self.instance_id, job, self._operation_id())
+        # Start's bearer is never retained or returned by this worker runtime;
+        # model-gateway execution still requires a separately qualified adapter.
+        execution = started.get("execution")
+        if execution is not None:
+            # This composition does not yet bind the gateway capability to a
+            # qualified remote gateway adapter. Close the exact started fence
+            # with a finite failure instead of leaving it running to expire.
+            complete = self._context(self.instance_id, job, self._operation_id())
+            self.client.complete(complete, outcome="failed",
+                                 error_code="model_gateway_adapter_unavailable")
+            return True
+
+        def renew_exact_fence():
+            renew_context = self._context(self.instance_id, job, self._operation_id())
+            try:
+                response = self.client.renew(renew_context)
+                return response["state"] == "renewed"
+            except ExecutionOutcomeUnknown:
+                observed = self.client.status(context)
+                return observed["state"] == "current"
+
+        self.runner.authorization_check = renew_exact_fence
+        operation = asyncio.create_task(self.runner.run(job["resolved"], job["task"], job["job_id"]))
+        deadline = float(started["deadline"])
+        try:
+            while not operation.done():
+                await asyncio.wait({operation}, timeout=min(self.lease_seconds / 3, self.poll_seconds))
+                if operation.done():
+                    break
+                if self.stop.is_set():
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    handback = self._context(self.instance_id, job, self._operation_id())
+                    try:
+                        self.client.handback(handback)
+                    except ExecutionOutcomeUnknown:
+                        self._reconcile_unknown(handback)
+                    return True
+                state = self.client.status(context)
+                if state["state"] != "current" or time.time() >= deadline:
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    complete = self._context(self.instance_id, job, self._operation_id())
+                    self.client.complete(complete, outcome="cancelled")
+                    return True
+                if not renew_exact_fence():
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    return True
+            result = await operation
+            complete = self._context(self.instance_id, job, self._operation_id())
+            try:
+                self.client.complete(complete, outcome="completed", result=result)
+            except ExecutionOutcomeUnknown:
+                self._reconcile_unknown(complete)
+        except RuntimeFailure as exc:
+            complete = self._context(self.instance_id, job, self._operation_id())
+            outcome = "retryable_failure" if exc.retryable else "failed"
+            try:
+                self.client.complete(complete, outcome=outcome, error_code=exc.code)
+            except ExecutionOutcomeUnknown:
+                self._reconcile_unknown(complete)
+        finally:
+            self.runner.authorization_check = None
+        return True
+
+    async def run(self):
+        while not self.stop.is_set():
+            try:
+                worked = await self.run_once()
+            except Exception:
+                # In particular, an unknown pull/start is not retried here.
+                log.error("Remote execution operation failed; no further work dispatched")
+                worked = False
+            if not worked:
+                try:
+                    await asyncio.wait_for(self.stop.wait(), timeout=self.poll_seconds)
+                except asyncio.TimeoutError:
+                    pass
