@@ -243,7 +243,7 @@ def test_HELPER_LIFECYCLE_rotation_revocation_and_demand_are_fenced(authority_en
                                   gateway_id='test-gateway', generation=env.job.generation, challenge='n' * 64,
                                   active=True, last_seen=time.time()))
     assert reconcile_helper_demand(env.platform) == [{
-        'binding_id': env.model['id'], 'enabled': True, 'eligible_enrollments': 1,
+        'binding_id': env.model['id'], 'enabled': True, 'inhibited': False, 'eligible_enrollments': 1,
         'active_session': True, 'demand': 'none'}]
 
     (tmp_path / 'new').mkdir()
@@ -256,6 +256,16 @@ def test_HELPER_LIFECYCLE_rotation_revocation_and_demand_are_fenced(authority_en
         assert enrollment.certificate_digest != hashlib.sha256(
             (tmp_path / 'old' / 'helper.pem').read_bytes()).hexdigest()
     assert reconcile_helper_demand(env.platform)[0]['demand'] == 'replacement'
+
+    with env.platform.db.sessions.begin() as session:
+        session.add(BindingState(id=env.model['id'], inhibited=True, reason='operator stop', updated_at=time.time()))
+    inhibited_demand = reconcile_helper_demand(env.platform)[0]
+    assert inhibited_demand['eligible_enrollments'] == 1
+    assert inhibited_demand['active_session'] is False
+    assert inhibited_demand['inhibited'] is True
+    assert inhibited_demand['demand'] == 'none'
+    with env.platform.db.sessions.begin() as session:
+        session.get(BindingState, env.model['id']).inhibited = False
 
     with env.platform.db.sessions.begin() as session:
         session.add(HelperSession(id='lifecycle-session-2', binding_id=env.model['id'], enrollment_id='lifecycle-enrollment',

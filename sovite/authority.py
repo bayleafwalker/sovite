@@ -241,11 +241,13 @@ def reconcile_helper_demand(platform, *, actor: str | None = None):
                     fenced_sessions += 1
             eligible = [row for row in enrollments if not row.revoked and row.expires_at > now
                         and row.role == role]
+            inhibited = bool(runtime and runtime.inhibited)
             active = session.scalar(select(HelperSession.id).where(
                 HelperSession.binding_id == binding_id, HelperSession.active == True)) is not None
             demand.append({"binding_id": binding_id, "enabled": bool(binding.get("enabled", True)),
+                           "inhibited": inhibited,
                            "eligible_enrollments": len(eligible), "active_session": active,
-                           "demand": "none" if not binding.get("enabled", True) or active else
+                           "demand": "none" if not binding.get("enabled", True) or inhibited or active else
                                      ("replacement" if eligible else "enrollment")})
         if actor is not None:
             platform.db.audit(session, actor, "helper.demand_reconciled", "helper-enrollments",
