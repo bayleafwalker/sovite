@@ -81,15 +81,15 @@ The request uses the configured bearer token and `Idempotency-Key: durable-job-i
 
 ## Remote helper enrollment administration
 
-The operator API exposes `POST /api/helpers/enrollments/{enrollment_id}/rotate`,
+The operator API exposes `POST /api/helpers/enrollments/{enrollment_id}` to provision an enrollment, `POST /api/helpers/enrollments/{enrollment_id}/rotate`,
 `POST /api/helpers/enrollments/{enrollment_id}/revoke`, and
-`POST /api/helpers/reconcile`. All three require the existing operator identity;
-caller and gateway credentials are not accepted. Rotation accepts a bounded
+`POST /api/helpers/reconcile`. Each route requires the existing operator identity;
+caller and gateway credentials are not accepted. Provisioning accepts bounded `binding_id`, `installation_id`, `role`, and `certificate_pem` fields and returns only `{enrollment_id,provisioned:true}`. The selected active binding must declare that enrollment role. It records a client certificate that has already been issued by the separately managed helper CA. Rotation accepts a bounded
 `certificate_pem` body containing a client certificate that has already been
 issued by the separately managed helper CA. The CA and private signing key stay
 outside Sovite. Sovite validates client-certificate usage and enrollment key
-type, updates the enrollment atomically, and fences sessions using the prior
-certificate. Revocation marks the enrollment revoked and fences its active
+type, provisions the enrollment or atomically rotates its certificate, and
+fences sessions using the prior certificate. Revocation marks the enrollment revoked and fences its active
 sessions in the same transaction. Reconciliation returns per-binding helper
 demand and fences sessions whose enrollment expired or was revoked, or whose
 binding generation/role is no longer current. Mutations and demand reconciliation

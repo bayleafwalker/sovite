@@ -9,6 +9,11 @@ request and response semantics that can be frozen without turning the internal
 Python API into a network interface. It does not authorize a worker API,
 generated package, credential removal, deployment, or runtime adoption.
 
+The remaining remote operations are scoped in the companion
+[requirements document](worker-execution-remote-operations-requirements.md).
+It records owner decisions needed for renew, status, handback, complete, and
+lookup; it does not freeze their wire semantics.
+
 The admission condition remains the one in
 [`2026-10-23-execution-lease-owner.md`](../plans/2026-10-23-execution-lease-owner.md):
 the shared generated-contract foundation must be accepted, and the real O2/F2
