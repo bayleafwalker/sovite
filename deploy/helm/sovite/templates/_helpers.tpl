@@ -20,15 +20,6 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
   value: {{ .Values.database.schema | quote }}
 - name: SOVITE_DATABASE_MIGRATE
   value: {{ .Values.database.migrate | quote }}
-- name: SOVITE_OPERATOR_TOKEN
-  valueFrom:
-    secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_OPERATOR_TOKEN}
-- name: SOVITE_CALLER_TOKENS
-  valueFrom:
-    secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_CALLER_TOKENS}
-- name: SOVITE_HARNESS_TOKEN
-  valueFrom:
-    secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_HARNESS_TOKEN}
 - name: AWS_ACCESS_KEY_ID
   valueFrom:
     secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: AWS_ACCESS_KEY_ID}
@@ -59,6 +50,15 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
   value: "false"
 - name: SOVITE_DEPLOYMENT_BINDING
   value: {{ .Values.deploymentBinding | quote }}
+{{- end -}}
+
+{{- define "sovite.controlAuthEnv" -}}
+- name: SOVITE_OPERATOR_TOKEN
+  valueFrom:
+    secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_OPERATOR_TOKEN}
+- name: SOVITE_CALLER_TOKENS
+  valueFrom:
+    secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_CALLER_TOKENS}
 {{- end -}}
 
 {{- define "sovite.modelCredentialEnv" -}}
