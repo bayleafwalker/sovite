@@ -446,3 +446,9 @@ storage; duplicate record ids are refused. Reuse of measurements requires a newl
 signed valid record. Gateway execution, caller assertions, external worker and BYO
 artifact protocols, and hosted deployment rendering remain separate work; this
 contract alone does not make hosted dispatch operational.
+
+## Portable agent workflow planning (2026-10-24)
+
+The [portable workflow owner plan](plans/2026-10-24-portable-agent-workflows.md) records the investigated
+next work, dependencies and acceptance gates for repeatable long-running agent
+sessions. It is a proposal for implementation, not evidence of a deployed capability.
