@@ -160,7 +160,8 @@ def _enrollment_certificate(certificate: bytes):
             key.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode())
 
 
-def provision_enrollment(platform, *, enrollment_id, binding_id, installation_id, role, certificate: bytes):
+def provision_enrollment(platform, *, enrollment_id, binding_id, installation_id, role, certificate: bytes,
+                         actor: str | None = None):
     """Register a certificate issued by the separately managed helper CA."""
     expires_at, certificate_digest, public_key = _enrollment_certificate(certificate)
     with platform.db.sessions.begin() as session:
@@ -173,6 +174,10 @@ def provision_enrollment(platform, *, enrollment_id, binding_id, installation_id
             fail("model_identity_mismatch")
         session.add(HelperEnrollment(id=enrollment_id, binding_id=binding_id, installation_id=installation_id, role=role,
                     expires_at=expires_at, certificate_digest=certificate_digest, public_key=public_key))
+        if actor is not None:
+            platform.db.audit(session, actor, "helper.enrollment_provisioned", enrollment_id,
+                              {"binding_id": binding_id, "installation_id": installation_id, "role": role,
+                               "expires_at": expires_at})
 
 
 def rotate_enrollment(platform, enrollment_id: str, certificate: bytes, *, actor: str | None = None):
