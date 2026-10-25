@@ -26,6 +26,32 @@ spec:
         - ports: [{port: "8080", protocol: TCP}]
 ---
 {{- end }}
+{{- if .Values.remoteWorker.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: {{ $name }}-remote-worker-egress}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: remote-worker}
+  policyTypes: [Egress]
+  egress:
+    {{- range .Values.networkPolicy.remoteWorkerPeers }}
+    - to:
+        {{- if .cidrs }}
+        {{- range .cidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+        {{- else }}
+        - namespaceSelector: {{ toYaml (required "remoteWorkerPeers namespaceSelector is required" .namespaceSelector) | nindent 12 }}
+          podSelector: {{ toYaml (required "remoteWorkerPeers podSelector is required" .podSelector) | nindent 12 }}
+        {{- end }}
+      ports:
+        {{- range .ports }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
+    {{- end }}
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: {{ $name }}-default-deny}
@@ -217,7 +243,7 @@ spec:
   endpointSelector:
     matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}
     matchExpressions:
-      - {key: sovite.component, operator: In, values: [control, worker, native-harness, maintenance]}
+      - {key: sovite.component, operator: In, values: [control, worker, remote-worker, native-harness, maintenance]}
   egress:
     - toEndpoints:
         - matchLabels:
@@ -235,7 +261,7 @@ spec:
               {{- range .Values.networkPolicy.extraDnsNames }}
               - matchName: {{ . | quote }}
               {{- end }}
-              {{- range $key := list "toolPeers" "modelPeers" "harnessPeers" }}
+              {{- range $key := list "toolPeers" "modelPeers" "harnessPeers" "remoteWorkerPeers" }}
               {{- range index $.Values.networkPolicy $key }}
               {{- if not .cidrs }}
               {{- range .hosts }}

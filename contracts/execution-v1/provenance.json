@@ -1,0 +1,20 @@
+{
+  "schema": "sovite-contract-source-provenance/v1",
+  "contractId": "sovite.execution.v1",
+  "generator": {
+    "repository": "https://github.com/bayleafwalker/vuoro",
+    "sourceCommit": "b105f64ce5c12399e04c5d19e72d6cd69bc029f3",
+    "runtimePackage": "vuoro-contracts==0.2.0",
+    "runtimeWheelSha256": "7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9"
+  },
+  "sourceSha256": {
+    "main.tsp": "cbc0e8d097bb63fa0a3248a9aa162f71925c5e19dd393d6ec9ea60fe3489ee1f",
+    "tspconfig.yaml": "d6b5b33902b26f94a6bc1ae9bcccd8cfffac8af020f74304b215a9b7e624fe91",
+    "contract.json": "602af401abd740b4c464c7193399dd318635d7a9673bfb008a2b17232636fb68"
+  },
+  "generatedSdk": {
+    "package": "sovite.execution_contract.vuoro_contract_c3c73ae52d117dd8407c15d4b4b549461e753e30de4783134a2cad02f5dd1ab4_client",
+    "treeSha256": "93ec43157dfaf7a99eb90e5bec38ad51a98cab1487ce897341387a0a1b357dcc",
+    "dataIntegritySha256": "afe312a6a0ed9a446d69a9ca6e9c8b00b2c5574cf3ac852a0ea27912ce74741a"
+  }
+}

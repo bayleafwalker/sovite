@@ -24,6 +24,7 @@ x-control-env: &control-env
   <<: *runtime-env
   SOVITE_OPERATOR_TOKEN: ${SOVITE_OPERATOR_TOKEN:?Run scripts/installation.py compose-init}
   SOVITE_CALLER_TOKENS: ${SOVITE_CALLER_TOKENS:?Run scripts/installation.py compose-init}
+  SOVITE_EXECUTION_TOKENS: "${SOVITE_EXECUTION_TOKENS:-{}}"
 
 x-runtime: &runtime
   image: ${SOVITE_IMAGE:-sovite-platform:0.1.18}
@@ -77,6 +78,34 @@ services:
       retries: 4
       start_period: 30s
     stop_grace_period: 30s
+  remote-worker:
+    image: ${SOVITE_IMAGE:-sovite-platform:0.1.18}
+    build:
+      context: .
+      target: runtime
+    profiles: [remote-worker]
+    entrypoint: [sovite-remote-worker]
+    environment:
+      SOVITE_CONTROL_URL: ${SOVITE_REMOTE_CONTROL_URL:-}
+      SOVITE_EXECUTION_TOKEN: ${SOVITE_EXECUTION_TOKEN:-}
+      SOVITE_EXECUTION_INSTANCE_ID: ${SOVITE_EXECUTION_INSTANCE_ID:-}
+      SOVITE_EXECUTION_JOURNAL_PATH: /state/execution.json
+      SOVITE_EXECUTION_POLL_SECONDS: ${SOVITE_EXECUTION_POLL_SECONDS:-2}
+      SOVITE_EXECUTION_LEASE_SECONDS: ${SOVITE_EXECUTION_LEASE_SECONDS:-90}
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
+    volumes:
+      - remote-execution-state:/state
+    networks: [edge]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:17.11-alpine}
     environment:
@@ -154,3 +183,4 @@ volumes:
   garage-data: {}
   ollama-models: {}
   workspaces: {}
+  remote-execution-state: {}

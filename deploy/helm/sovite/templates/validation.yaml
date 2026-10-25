@@ -57,6 +57,28 @@
 {{- if not (regexMatch "^[A-Z][A-Z0-9_]*$" (default "" .env)) -}}{{ fail "modelCredentials env names must be upper-case environment variable names" }}{{- end -}}
 {{- if or (hasPrefix "SOVITE_" .env) (hasPrefix "AWS_" .env) -}}{{ fail "modelCredentials cannot override reserved SOVITE_ or AWS_ runtime variables" }}{{- end -}}
 {{- end -}}
+{{- if .Values.remoteWorker.enabled -}}
+{{- if not (regexMatch "^https://[^/?#@]+$" .Values.remoteWorker.controlUrl) -}}
+{{- fail "remoteWorker.controlUrl must be an explicit HTTPS origin" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]{1,64}$" .Values.remoteWorker.instanceId) -}}
+{{- fail "remoteWorker.instanceId must be a bounded owner-approved identifier" -}}
+{{- end -}}
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.remoteWorkerPeers) -}}
+{{- fail "networkPolicy.remoteWorkerPeers must explicitly allow the HTTPS owner and configured agent endpoints" -}}
+{{- end -}}
+{{- $ownerHost := (urlParse .Values.remoteWorker.controlUrl).hostname -}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.ciliumDns (not (has $ownerHost .Values.networkPolicy.extraDnsNames)) -}}
+{{- fail "networkPolicy.extraDnsNames must allow the explicit remoteWorker.controlUrl hostname" -}}
+{{- end -}}
+{{- $remoteEnvNames := list -}}
+{{- range .Values.remoteWorker.credentials -}}
+{{- if not (regexMatch "^[A-Z][A-Z0-9_]*$" .env) -}}{{ fail "remoteWorker credential env names must be upper-case environment variable names" }}{{- end -}}
+{{- if or (hasPrefix "SOVITE_" .env) (hasPrefix "AWS_" .env) -}}{{ fail "remoteWorker credentials cannot override reserved SOVITE_ or AWS_ variables" }}{{- end -}}
+{{- if has .env $remoteEnvNames -}}{{ fail (printf "remoteWorker credential env %s is duplicated" .env) }}{{- end -}}
+{{- $remoteEnvNames = append $remoteEnvNames .env -}}
+{{- end -}}
+{{- end -}}
 {{- range $key, $pem := .Values.modelTrust -}}
 {{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,62}$" $key) -}}{{ fail "modelTrust names must be lower-case DNS labels" }}{{- end -}}
 {{- if not (contains "-----BEGIN CERTIFICATE-----" (toString $pem)) -}}{{ fail (printf "modelTrust %s must be a PEM certificate" $key) }}{{- end -}}

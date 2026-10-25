@@ -59,6 +59,11 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 - name: SOVITE_CALLER_TOKENS
   valueFrom:
     secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_CALLER_TOKENS}
+{{- if .Values.remoteWorker.enabled }}
+- name: SOVITE_EXECUTION_TOKENS
+  valueFrom:
+    secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_EXECUTION_TOKENS}
+{{- end }}
 {{- end -}}
 
 {{- define "sovite.modelCredentialEnv" -}}
@@ -66,6 +71,14 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 - name: {{ .env }}
   valueFrom:
     secretKeyRef: {name: {{ $.Values.runtimeSecret }}, key: {{ .key | default .env }}}
+{{- end }}
+{{- end -}}
+
+{{- define "sovite.remoteWorkerCredentialEnv" -}}
+{{- range .Values.remoteWorker.credentials }}
+- name: {{ .env }}
+  valueFrom:
+    secretKeyRef: {name: {{ $.Values.runtimeSecret }}, key: {{ .key }}}
 {{- end }}
 {{- end -}}
 

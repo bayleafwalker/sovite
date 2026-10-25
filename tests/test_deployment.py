@@ -98,6 +98,63 @@ def test_worker_and_native_harness_do_not_receive_control_auth_tokens(tmp_path):
     assert 'SOVITE_HARNESS_TOKEN' in envs['sovite-native-harness']
 
 
+def test_remote_worker_is_https_scoped_and_has_no_platform_or_storage_credentials(tmp_path):
+    values = {
+        'remoteWorker': {
+            'enabled': True,
+            'controlUrl': 'https://sovite.apps.kotona.app',
+            'instanceId': 'remote-agent-1',
+            'credentials': [{'env': 'AGENT_API_KEY', 'key': 'REMOTE_AGENT_API_KEY'}],
+        },
+        'networkPolicy': {
+            'extraDnsNames': ['sovite.apps.kotona.app'],
+            'remoteWorkerPeers': [{
+                'hosts': ['203.0.113.8'],
+                'cidrs': ['203.0.113.8/32'],
+                'ports': [443],
+            }],
+        },
+    }
+    result = render(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    rows = [row for row in yaml.safe_load_all(result.stdout) if row]
+    deployment = next(row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == 'sovite-remote-worker')
+    pod = deployment['spec']['template']['spec']
+    container = pod['containers'][0]
+    env = {entry['name']: entry for entry in container['env']}
+    assert container['command'] == ['sovite-remote-worker']
+    assert env['SOVITE_CONTROL_URL']['value'] == 'https://sovite.apps.kotona.app'
+    assert env['SOVITE_EXECUTION_INSTANCE_ID']['value'] == 'remote-agent-1'
+    assert env['SOVITE_EXECUTION_TOKEN']['valueFrom']['secretKeyRef']['key'] == 'SOVITE_EXECUTION_TOKEN'
+    assert env['AGENT_API_KEY']['valueFrom']['secretKeyRef']['key'] == 'REMOTE_AGENT_API_KEY'
+    forbidden = {'SOVITE_DATABASE_URL', 'SOVITE_DATABASE_SCHEMA', 'SOVITE_DATABASE_MIGRATE',
+                 'SOVITE_S3_ENDPOINT', 'SOVITE_S3_BUCKET', 'AWS_ACCESS_KEY_ID',
+                 'AWS_SECRET_ACCESS_KEY', 'SOVITE_OPERATOR_TOKEN', 'SOVITE_CALLER_TOKENS',
+                 'SOVITE_EXECUTION_TOKENS'}
+    assert forbidden.isdisjoint(env)
+    assert {volume['name'] for volume in pod['volumes']} == {'state', 'tmp'}
+    assert next(volume for volume in pod['volumes'] if volume['name'] == 'state')['persistentVolumeClaim']['claimName'] == 'sovite-remote-execution-state'
+    policies = [row for row in rows if row['kind'] == 'NetworkPolicy']
+    owner_egress = next(row for row in policies if row['metadata']['name'] == 'sovite-remote-worker-egress')['spec']
+    assert owner_egress['podSelector']['matchLabels']['sovite.component'] == 'remote-worker'
+    assert owner_egress['egress'] == [{'to': [{'ipBlock': {'cidr': '203.0.113.8/32'}}],
+                                       'ports': [{'protocol': 'TCP', 'port': 443}]}]
+    dns = next(row for row in rows if row['kind'] == 'CiliumNetworkPolicy' and row['metadata']['name'] == 'sovite-private-dns')
+    assert {'matchName': 'sovite.apps.kotona.app'} in dns['spec']['egress'][0]['toPorts'][0]['rules']['dns']
+    assert 'SOVITE_EXECUTION_TOKENS' in {
+        entry['name'] for entry in next(row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == 'sovite-control')['spec']['template']['spec']['containers'][0]['env']
+    }
+
+    for bad in (
+        {'controlUrl': 'http://sovite.apps.kotona.app'},
+        {'controlUrl': ''},
+        {'instanceId': 'bad/identity'},
+        {'credentials': [{'env': 'SOVITE_DATABASE_URL', 'key': 'bad'}]},
+    ):
+        candidate = {'remoteWorker': {**values['remoteWorker'], **bad}, 'networkPolicy': values['networkPolicy']}
+        assert render(tmp_path, candidate).returncode != 0
+
+
 def test_external_model_hosts_need_exact_cidrs_and_provisioned_credentials(tmp_path):
     peer = {'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}
     values = {'networkPolicy': {'modelPeers': [peer]}, 'modelCredentials': [{'env': 'MODEL_HOST_TOKEN'}], 'nativeHarness': {'enabled': True}}

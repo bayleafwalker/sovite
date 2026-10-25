@@ -111,6 +111,32 @@
         }
       }
     },
+    "remoteWorker": {
+      "type": "object",
+      "required": ["enabled", "controlUrl", "instanceId", "credentials"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "controlUrl": {"type": "string", "pattern": "^$|^https://[^/?#@]+$"},
+        "instanceId": {"type": "string", "pattern": "^$|^[A-Za-z0-9_-]{1,64}$"},
+        "journalStorage": {"type": "string", "minLength": 1},
+        "journalStorageClass": {"type": "string"},
+        "pollSeconds": {"type": "number", "minimum": 0.1, "maximum": 60},
+        "leaseSeconds": {"type": "number", "minimum": 1, "maximum": 3600},
+        "resources": {"$ref": "#/definitions/resources"},
+        "credentials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["env", "key"],
+            "additionalProperties": false,
+            "properties": {
+              "env": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+              "key": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,253}$"}
+            }
+          }
+        }
+      }
+    },
     "nativeHarness": {
       "type": "object",
       "properties": {
@@ -260,6 +286,15 @@
               }
             ]
           }
+        },
+        "remoteWorkerPeers": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {"$ref": "#/definitions/networkPeer"},
+              {"$ref": "#/definitions/externalHostPeer"}
+            ]
+          }
         }
       }
     },
@@ -377,6 +412,13 @@
             "Never"
           ]
         }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {"type": "object"},
+        "limits": {"type": "object"}
       }
     },
     "upstream": {

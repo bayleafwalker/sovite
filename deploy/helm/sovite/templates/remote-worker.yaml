@@ -1,0 +1,68 @@
+{{- if .Values.remoteWorker.enabled -}}
+{{- $name := include "sovite.fullname" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-remote-worker
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-remote-execution-state
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if .Values.remoteWorker.journalStorageClass }}
+  storageClassName: {{ .Values.remoteWorker.journalStorageClass | quote }}
+  {{- end }}
+  resources:
+    requests: {storage: {{ .Values.remoteWorker.journalStorage }}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-remote-worker
+  labels: {{ include "sovite.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: remote-worker}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: sovite, app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: remote-worker}
+    spec:
+      serviceAccountName: {{ $name }}-remote-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: remote-worker
+          image: {{ include "sovite.image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [sovite-remote-worker]
+          env:
+            - {name: SOVITE_CONTROL_URL, value: {{ .Values.remoteWorker.controlUrl | quote }}}
+            - name: SOVITE_EXECUTION_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_EXECUTION_TOKEN}
+            - {name: SOVITE_EXECUTION_INSTANCE_ID, value: {{ .Values.remoteWorker.instanceId | quote }}}
+            - {name: SOVITE_EXECUTION_JOURNAL_PATH, value: /state/execution.json}
+            - {name: SOVITE_EXECUTION_POLL_SECONDS, value: {{ .Values.remoteWorker.pollSeconds | quote }}}
+            - {name: SOVITE_EXECUTION_LEASE_SECONDS, value: {{ .Values.remoteWorker.leaseSeconds | quote }}}
+            {{- with include "sovite.remoteWorkerCredentialEnv" . }}{{ . | nindent 12 }}{{- end }}
+          resources: {{ toYaml .Values.remoteWorker.resources | nindent 12 }}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: state, mountPath: /state}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: state, persistentVolumeClaim: {claimName: {{ $name }}-remote-execution-state}}
+        - {name: tmp, emptyDir: {sizeLimit: 32Mi}}
+{{- end }}

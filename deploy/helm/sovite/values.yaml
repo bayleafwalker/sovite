@@ -6,7 +6,7 @@ mode: development
 deploymentBinding: ""
 image:
   repository: sovite-platform
-  tag: "0.1.17"
+  tag: "0.1.18"
   digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -40,12 +40,26 @@ worker:
   nodeSelector: {}
   tolerations: []
   workspaceSize: 2Gi
+remoteWorker:
+  # Separate API-only worker. It starts only against this explicit HTTPS owner origin.
+  enabled: false
+  controlUrl: ""
+  instanceId: ""
+  journalStorage: 1Gi
+  journalStorageClass: ""
+  pollSeconds: 2
+  leaseSeconds: 90
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  # Each entry names one dedicated API credential; keys refer to runtimeSecret.
+  credentials: []
 nativeHarness:
   enabled: false
   agentId: code-review
   image:
     repository: sovite-platform-codex
-    tag: "0.1.17"
+    tag: "0.1.18"
     digest: ""
   storage: 10Gi
   storageClass: ""
@@ -116,6 +130,8 @@ networkPolicy:
   # Reachability is all the chart grants; an external host needs its own controls.
   modelPeers: []
   harnessPeers: []
+  # Exact HTTPS owner and agent endpoint peers for the isolated remote worker.
+  remoteWorkerPeers: []
   # Prometheus pods allowed to scrape the control plane's /metrics. Both selectors are required.
   # The port also serves the API, so route only the console and MCP paths publicly, never /metrics.
   metricsScrapers: []
