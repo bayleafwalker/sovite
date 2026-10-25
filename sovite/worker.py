@@ -464,8 +464,22 @@ class RemoteWorker:
                 return False
 
         self.runner.authorization_check = renew_exact_fence
+        public_recipe = job["recipe"]
+        runtime_recipe = {
+            "generation": job["generation"],
+            "harness": {
+                "kind": "agent-http",
+                "endpoint": public_recipe["endpoint"],
+                "cancel_endpoint": public_recipe.get("cancel_endpoint"),
+                "api_key_env": public_recipe.get("credential_env"),
+                "idempotent": public_recipe["idempotent"],
+            },
+            "agent": {"id": public_recipe["agent_id"]},
+            "model": {},
+            "grant": {"timeout_seconds": public_recipe["timeout_seconds"]},
+        }
         operation = asyncio.create_task(self.runner.run(
-            job["resolved"], job["task"], job["job_id"],
+            runtime_recipe, job["task"], job["job_id"],
             execution=execution, deadline=deadline, fence=job["fence"],
         ))
         deadline = float(started["deadline"])

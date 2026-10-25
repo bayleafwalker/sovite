@@ -18,7 +18,7 @@ import httpx
 
 
 TIMEOUT_SECONDS = 15.0
-MAX_REQUEST_BYTES = 128 * 1024
+MAX_REQUEST_BYTES = 65_536
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_JSON_DEPTH = 32
 MAX_JSON_NODES = 10_000
@@ -177,7 +177,7 @@ def _finite_number(value) -> bool:
 
 
 def _validate_response(operation: str, result: dict, request: dict) -> None:
-    """Check fixed public projections; task/resolved payload shape is provisional."""
+    """Check fixed identities and states on top of generated schema validation."""
     def exact(fields):
         if set(result) != set(fields):
             raise ValueError
@@ -204,14 +204,14 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
         exact({"state", "job"})
         job = result["job"]
         if not isinstance(job, dict) or set(job) != {
-            "job_id", "generation", "fence", "lease_until", "task", "resolved"
+            "job_id", "generation", "fence", "lease_until", "task", "recipe"
         }:
             raise ValueError
         if (not isinstance(job["job_id"], str) or _ID.fullmatch(job["job_id"]) is None
                 or not isinstance(job["generation"], str) or _GENERATION.fullmatch(job["generation"]) is None
                 or not isinstance(job["fence"], str) or _FENCE.fullmatch(job["fence"]) is None
                 or not _finite_number(job["lease_until"])
-                or not isinstance(job["task"], dict) or not isinstance(job["resolved"], dict)):
+                or not isinstance(job["task"], str) or not isinstance(job["recipe"], dict)):
             raise ValueError
         return
     if operation == "start":
@@ -223,25 +223,10 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
             return
         if state != "started":
             raise ValueError
-        exact({"state", "job_id", "generation", "fence", "lease_until", "deadline"}
-              | ({"execution"} if "execution" in result else set()))
+        exact({"state", "job_id", "generation", "fence", "lease_until", "deadline"})
         same_execution()
         if not _finite_number(result["lease_until"]) or not _finite_number(result["deadline"]):
             raise ValueError
-        if "execution" in result:
-            execution = result["execution"]
-            if (not isinstance(execution, dict) or set(execution) != {"capability", "context"}
-                    or not isinstance(execution["capability"], str) or not execution["capability"]
-                    or not isinstance(execution["context"], dict)):
-                raise ValueError
-            context = execution["context"]
-            # The current owner projection binds generation and workload. The
-            # optional job/fence checks also prevent a future context shape
-            # from silently rebinding this bearer to another execution.
-            if (context.get("generation") != request["generation"]
-                    or ("job_id" in context and context["job_id"] != request["job_id"])
-                    or ("fence" in context and context["fence"] != request["fence"])):
-                raise ValueError
         return
     if operation == "renew":
         exact({"state", "job_id", "generation", "fence", "lease_until", "deadline"})
@@ -320,12 +305,28 @@ class ExecutionClient:
 
     def _post(self, operation: str, body: dict, *, mutation: bool) -> dict:
         op_id = body.get("operation_id", "")
+        wire_body = dict(body)
+        if operation == "complete" and wire_body.get("result") is not None:
+            try:
+                wire_body["result_json"] = json.dumps(wire_body.pop("result"), ensure_ascii=False,
+                                                       allow_nan=False, separators=(",", ":"))
+            except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
+                raise ExecutionClientError("Execution request is invalid") from None
+        else:
+            wire_body.pop("result", None)
         try:
-            encoded = json.dumps(body, ensure_ascii=False, allow_nan=False,
+            encoded = json.dumps(wire_body, ensure_ascii=False, allow_nan=False,
                                  separators=(",", ":")).encode("utf-8")
         except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
             raise ExecutionClientError("Execution request is invalid") from None
-        if len(encoded) > MAX_REQUEST_BYTES:
+        try:
+            from .execution_contract.runtime import OPERATIONS, load_bundle
+            contract = load_bundle()
+            contract_operation = contract.manifest["operations"][OPERATIONS[operation]]
+            contract.validate_request(OPERATIONS[operation], wire_body)
+        except Exception:
+            raise ExecutionClientError("Execution request does not match the admitted contract") from None
+        if len(encoded) > min(MAX_REQUEST_BYTES, contract_operation["requestMaxBytes"]):
             raise ExecutionClientError("Execution request exceeds the control limit")
         headers = {"Authorization": "Bearer " + self._token,
                    "Accept": "application/json", "Accept-Encoding": "identity",
@@ -334,7 +335,7 @@ class ExecutionClient:
             with httpx.Client(timeout=httpx.Timeout(TIMEOUT_SECONDS), trust_env=False,
                               follow_redirects=False, verify=self._verify,
                               transport=self._transport) as client:
-                with client.stream("POST", self._origin + "/internal/execution/" + operation,
+                with client.stream("POST", self._origin + "/internal/execution/v1/" + operation,
                                    headers=headers, content=encoded) as response:
                     if response.status_code < 200 or response.status_code >= 300:
                         # Typed client/validation refusals have not performed the requested
@@ -349,14 +350,16 @@ class ExecutionClient:
                         )
                     encoding = (response.headers.get("content-encoding") or "").lower().strip()
                     declared = (response.headers.get("content-length") or "").strip()
-                    if encoding not in {"", "identity"} or (declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES):
+                    response_cap = contract_operation["responseMaxBytes"].get(str(response.status_code))
+                    if (response_cap is None or encoding not in {"", "identity"}
+                            or (declared.isdigit() and int(declared) > min(MAX_RESPONSE_BYTES, response_cap))):
                         raise ExecutionOutcomeUnknown(body.get("instance_id", ""), op_id) if mutation else ExecutionClientError(
                             "Execution owner returned an invalid response"
                         )
                     data = bytearray()
                     for chunk in response.iter_bytes():
                         data.extend(chunk)
-                        if len(data) > MAX_RESPONSE_BYTES:
+                        if len(data) > min(MAX_RESPONSE_BYTES, response_cap):
                             raise ExecutionOutcomeUnknown(body.get("instance_id", ""), op_id) if mutation else ExecutionClientError(
                                 "Execution owner returned an oversized response"
                             )
@@ -379,6 +382,7 @@ class ExecutionClient:
                 raise ExecutionOutcomeUnknown(body.get("instance_id", ""), op_id)
             raise ExecutionClientError("Execution owner returned an invalid response")
         try:
+            contract.validate_response(OPERATIONS[operation], 200, result)
             _validate_response(operation, result, body)
         except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
             if mutation:

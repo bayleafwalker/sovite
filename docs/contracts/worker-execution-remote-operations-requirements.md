@@ -1,12 +1,12 @@
 # Worker execution remote operations: requirements
 
-Status: **P08 local API implementation candidate; not deployed or runtime-qualified.**
+Status: **owner-operation requirements; the first generated `agent-http-v1` profile is implemented as a candidate but not deployed or fully qualified.**
 
-This document operationalizes the remaining remote worker operations identified
-by [`worker-execution-v1-candidate.md`](worker-execution-v1-candidate.md):
-renew, status, handback, complete, and lookup. The P08 candidate implements
-these choices through bounded internal routes. Qualification and deployment are
-still separate work.
+This document records shared owner-operation safeguards for remote workers.
+The first generated `agent-http-v1` contract is recorded in
+[`worker-execution-v1-candidate.md`](worker-execution-v1-candidate.md). This
+broader document also retains later-profile requirements; qualification and
+deployment remain separate work.
 
 The existing Platform jobs, queue, authorization, audit, and universal execution
 lease remain the only state authority. The identity, fence, digest, and
@@ -64,9 +64,10 @@ may mint or re-deliver a start capability.
 
 ## Operation requirements and state outcomes
 
-The following are invariants that can be tested independently of a future route.
-Any proposed external state names or response fields shown below are not frozen
-until the open decisions are resolved and a generated schema is reviewed.
+The following are owner invariants that apply across profiles. The generated
+`agent-http-v1` source freezes its first-profile HTTP paths and payload shapes;
+other profiles and external projections remain subject to their own admission
+and qualification.
 
 ### Renew
 

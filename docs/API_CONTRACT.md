@@ -100,89 +100,38 @@ do not return certificate material or echo certificate parsing errors.
 
 ## Remote worker execution API
 
-The internal worker API exposes `POST /internal/execution/pull`, `start`,
-`renew`, `status`, `handback`, `complete`, and `lookup`. It authenticates only
-dedicated `SOVITE_EXECUTION_TOKENS`, a JSON object mapping workload identities
-to unique tokens of at least 24 characters. `compute_id` comes from the
-service's `SOVITE_COMPUTE_ID`; neither identity is accepted in request JSON.
-Execution tokens must be distinct from operator, caller, author, activator, and
-inference-authority credentials. An empty execution-token map denies every
-remote execution request.
+The versioned external worker API exposes `POST /internal/execution/v1/{pull,
+start,renew,status,handback,complete,lookup}`. It mounts only when dedicated
+`SOVITE_EXECUTION_TOKENS` are configured and the Python 3.12+ generated-contract
+runtime is installed. Tokens map configured workload identities to unique
+values of at least 24 characters. `compute_id` comes from `SOVITE_COMPUTE_ID`;
+neither identity is accepted in request JSON. Execution tokens must be distinct
+from operator, caller, author, activator, and inference-authority credentials.
 
-`pull` accepts exactly `{instance_id,operation_id}`. It returns `idle` or the
-existing bounded reserved job projection. `start` accepts exactly
-`{instance_id,operation_id,job_id,generation,fence}`. The first committed start
-may return the transient gateway execution capability; an exact replay returns
-`already_started` without that capability. The operation key is
-`(workload_id,instance_id,operation_id)`, bound to operation kind and canonical
-request digest.
+External pull and start use only the admitted `agent-http-v1` profile. Pull
+returns a task and a minimal recipe projection with agent id, endpoint,
+optional credential environment-variable name, idempotency flag, and timeout.
+It does not return the resolved model recipe or any credential value. Tool-agent
+and gateway jobs remain available to existing local worker routes and are not
+reserved by this external profile. Repeated start never returns a start
+capability. Generated request and successful response schemas are loaded from
+the installed package's authenticated resources and validated at both owner and
+client boundaries.
 
-`renew` and `handback` use the same exact execution tuple plus a unique
-`operation_id`. Their responses are journaled with the state change. Repeating
-the same operation returns its original finite response; changing any request
-field or operation kind under the same key returns `idempotency_conflict`.
-`renew` can extend only a live started fence and never moves the fixed execution
-deadline. `handback` records the existing cancellation, safe retry, or
-`execution_uncertain` disposition and cannot release a replacement fence.
+`renew` and `handback` use the exact execution tuple plus a unique
+`operation_id`. `complete` uses that tuple plus `operation_id`, an outcome, an
+optional finite error code, and an optional `result_json` string containing one
+JSON object. These mutations journal their exact request digest in the existing
+owner operation table; same-key retries return the committed result and changed
+requests conflict. `status` and `lookup` are read-only, workload-scoped
+observations. All requests have a 65,536-byte ceiling, with generated per
+operation response bounds and no truncation.
 
-`status` accepts the exact tuple without an operation id. It returns one of
-`current`, `superseded`, `finished`, or `expired`, with only the finite job
-status, phase, lease expiry, and fixed deadline. When the supplied generation
-or fence has been replaced, it retains the caller's tuple and returns `null`
-for those incarnation fields, so replacement state is never attributed to a
-stale tuple. It does not reveal task text,
-resolved configuration, capabilities, credentials, or audit payloads. `current`
-means the live fence also passes current authorization checks: cancellation,
-inhibition, a superseded binding, or revoked/expired gateway execution
-authority reports `superseded`. The observation holds the existing authority
-and exact job/lease row locks while it checks and projects the state; it does
-not mutate owner state or expose the reason for a non-current result.
-`lookup` accepts `{instance_id,operation_id}` and reads only that workload's
-existing operation journal; its projection includes operation kind, job/fence
-identity, and result state, never a stored response body or start capability.
-Both reads are side-effect free.
-
-`complete` accepts the exact tuple plus an operation id, an outcome from
-`completed`, `failed`, `retryable_failure`, or `cancelled`, an optional finite
-error code, and for `completed` a JSON result object no larger than 48 KiB.
-The whole HTTP body remains bounded by the configured request limit. Sovite
-stores the result through its existing artifact store, then rechecks the exact
-fence and current authority before publishing the artifact reference and
-terminal job state in the owner transaction. A failed or uncertain result
-cannot release content. `retryable_failure` is retried only when the installed
-owner policy permits and the job is replay-safe; otherwise it is failed or
-blocked as uncertain. Error codes are finite; raw exceptions, task text,
-credential data, SQL state, and artifact bytes are not written to the operation
-journal or audit event.
-
-All mutation paths acquire the existing authority lock and exact Job/lease row
-locks, append audit with the transition, and journal the committed result. A
-response loss is reconciled by retrying the same operation identity or by the
-read-only `lookup`. No operation replays a start capability, chooses a newer
-fence, or creates a second job/lease authority. The HTTP surface is a local
-candidate implementation; no deployment or runtime qualification is implied.
-
-An agent-http harness served here declares exactly one native capability: native-codex, native-claude or native-opencode. Agents have an empty declared HTTP tool list; the service does not translate HTTP bindings into native authority. Multiple fixed agents require separate services. Enforced native executables cannot run inline in the worker. The service receives no platform database, artifact-store or qualification signing credentials. `SOVITE_HARNESS_TOKEN` is separate from subscription credentials and operator/caller tokens.
-
-The ledger stores request digest and execution state. An exact completed replay returns its stored result; changed input under the same task ID is rejected. In-progress or uncertain work is not restarted. `POST /cancel` accepts `{task_id,agent_id,configuration_revision}` and requests cancellation of queued or running work. Remote cancellation is best effort; worker release authority remains independently checked.
-
-Native output has `{kind,answer,agent_id,model_id,generation,isolation}`, with kind native-codex-result, native-claude-result or native-opencode-result. New subscription/Go output includes model identity with `immutable_weights_verified:false`. The worker stores the artifact and derives release from trusted state and the grant contract. Readiness checks only the fixed configuration and binary; live authentication, entitlement and provider compatibility require a qualified task.
-
-### Native authentication and provider selection
-
-| Route | Model declaration | Harness credential declaration |
-| --- | --- | --- |
-| Codex subscription | adapter codex-subscription; exact model; identity_protocol native-subscription; public cloud destination | `authentication: {mode: subscription, credential_file_env: SOVITE_CODEX_AUTH_FILE}` |
-| Claude subscription | adapter claude-subscription; exact model; identity_protocol native-subscription; public cloud destination | `authentication: {mode: subscription, credential_env: SOVITE_CLAUDE_OAUTH_TOKEN}` |
-| OpenCode Go | adapter opencode-go; model deepseek-v4.1-flash; identity_protocol provider-service; endpoint https://opencode.ai/inference/go/openai/v1; wire_api chat; api_key_env SOVITE_OPENCODE_GO_KEY | No subscription-authentication object; the model's explicit environment reference supplies the Go subscription key. |
-
-Subscription declarations reject API endpoint/key fields and fake weight digests. Codex uses its native ChatGPT provider and exact model; Claude uses its explicit subscription OAuth token. Enforced destination hosts include chatgpt.com and auth.openai.com for Codex, api.anthropic.com for Claude, or opencode.ai for Go. Unavailable routes fail; Sovite selects no replacement model or account.
-
-Each new invocation gets a fresh home, XDG directories, task directory and allowlisted environment. Codex copies only the explicitly selected, protected auth.json, holds a local sidecar lock, and atomically persists valid refreshed credentials after success, failure or cancellation. It refuses to overwrite an already changed source. Operators serialize the profile across hosts and coordinate rotation using the lock. Claude receives only the referenced token. Ambient API keys, provider URLs and home settings are not forwarded.
-
-The new launchers provide answer-only inference. Codex disables shell/image tools, apps, subagents, hooks and remote plugin discovery with a read-only sandbox. Claude uses bare noninteractive mode, an empty tool set and strict empty MCP configuration. OpenCode requires v2, runs a standalone server, permits only opencode-go, denies tools/integrations and uses the exact model for maintenance inference too. Temporary state is removed after execution. These controls do not replace installed machine policy, deployment isolation, destination enforcement or qualification.
-
-Go's direct tool-agent path supports Sovite's declared tools. It sends a job-stable x-opencode-session, an identifying User-Agent and the exact model, and rejects a response naming another model.
+Status reports only the exact fence's state, finite Job status, phase, lease
+expiry, and deadline. Lookup returns journal metadata without private request
+or response bodies. The API retains the existing owner transaction, audit,
+replay, cancellation, recovery, and authorization guards; no second queue or
+lease authority is introduced.
 
 ## Execution bounds
 

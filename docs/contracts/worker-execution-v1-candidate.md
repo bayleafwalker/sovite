@@ -1,30 +1,35 @@
 # Worker execution wire contract candidate
 
-Status: **local P08 API implementation candidate; not deployed or runtime-qualified.**
+Status: **generated F2 candidate with executable SQLite/PostgreSQL evidence; not deployed or fully O2/F2-qualified.**
 
-This note advances P05's F2 contract work from the owner implementation. It
-records the local request/response shapes and their limits. The P08 candidate
-adds authenticated internal worker routes over the existing owner rows; it does
-not authorize deployment, credential removal, or runtime adoption.
+This note records Sovite's versioned `agent-http-v1` execution projection. The
+routes use the existing owner rows and operation journal. The accepted external
+projection is deliberately narrower than the local worker's resolved recipe;
+this source candidate does not authorize deployment or live credential cutover.
 
 The companion [requirements document](worker-execution-remote-operations-requirements.md)
 records the selected P08 semantics for renew, status, handback, complete, and
 lookup, including bounded requests, replay behavior, and exact fencing.
 
 The implementation uses the condition in
-[`2026-10-23-execution-lease-owner.md`](../plans/2026-10-23-execution-lease-owner.md):
-the shared generated-contract foundation and real O2/F2 consumer qualification
-remain required before deployment or runtime adoption. This local candidate is
-available for those checks; passing source review alone does not qualify it.
+[`2026-10-23-execution-lease-owner.md`](../plans/2026-10-23-execution-lease-owner.md).
+The contract is generated against Vuoro foundation commit
+`b105f64ce5c12399e04c5d19e72d6cd69bc029f`. Runtime validation uses the
+published `vuoro-contracts` 0.2.0 wheel pinned by SHA-256
+`7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9`. The
+installed package carries its OpenAPI, JSON Schema, operation manifest and
+nested integrity inventory. The owner API and client validate successful wire
+requests and responses from that bundle. Deployment and full runtime
+qualification remain open.
 
 ## Authenticated scope
 
-The caller identity must be established by the future authenticated adapter.
-`workload_id` and `compute_id` are derived from that identity and are never
-accepted from request JSON. A request cannot set a caller, worker role,
-qualification, grant, model, owner lease key, expiry, or fence. The inference
-gateway capability is a different credential and must not authenticate the
-worker API.
+The bearer maps to a configured workload; `compute_id` comes from owner
+configuration. Neither is accepted from request JSON. A request cannot set a
+caller, worker role, qualification, grant, model, owner lease key, expiry, or
+fence. The inference gateway capability is a different credential and never
+authenticates the worker API. Routes are mounted only when execution tokens are
+configured and the Python 3.12+ contract runtime is installed.
 
 The owner currently accepts these exact bounded identifier forms:
 
@@ -36,16 +41,17 @@ The owner currently accepts these exact bounded identifier forms:
 | `generation` | `sha256:` followed by 64 lowercase hex digits | lease/job generation match |
 | `fence` | exactly 32 lowercase hex digits | current lease incarnation |
 
-This spelling is copied from the internal owner validators. A generated wire
-schema must preserve it without coercion and add a documented character/byte
-limit for every field before publication.
+This spelling is copied from the internal owner validators. The generated wire
+schema preserves it without coercion and documents field and operation byte
+limits.
 
 ## Owner-backed request and response shapes
 
-These shapes are already implemented by `LeaseService.reserve` and
-`LeaseService.start`; they are the only response shapes that this proposal can
-currently pin. `task` and `resolved` are internal owner values, not yet an
-approved external projection.
+The generated source is `contracts/execution-v1/main.tsp`. `instance_id` remains
+in each request body, and the HTTP paths are
+`/internal/execution/v1/{pull,start,renew,status,handback,complete,lookup}`.
+`LeaseService` retains its private local-worker projection; external pulls use
+a precommit `agent-http-v1` admission and a fixed `recipe` projection.
 
 ### Pull / reserve
 
@@ -66,11 +72,16 @@ The owner returns one of:
 {"state":"idle"}
 ```
 
-or an internal reserved snapshot:
+or a reserved snapshot containing the task and only the admitted HTTP recipe:
 
 ```json
-{"state":"reserved","job":{"job_id":"…","generation":"…","fence":"…","lease_until":0,"task":"…","resolved":{}}}
+{"state":"reserved","job":{"job_id":"…","generation":"…","fence":"…","lease_until":0,"task":"…","recipe":{"profile":"agent-http-v1","agent_id":"…","endpoint":"…","idempotent":true,"timeout_seconds":300}}}
 ```
+
+The recipe carries no resolved model, private recipe, or credential value. It
+may name the worker's credential environment variable. Tool-agent and gateway
+jobs remain available to their existing local routes and are left queued by
+this first-profile pull route.
 
 The implementation pins the complete canonical UTF-8 response at no more than
 4 MiB before committing the reservation journal and audit. Reservation does
@@ -85,9 +96,9 @@ and `fence`. The fence and generation must match the current live reservation.
 The first committed start advances the attempt exactly once and fixes the
 execution deadline.
 
-First start response has `state=started`, `job_id`, `generation`, `fence`,
-`lease_until`, and `deadline`. Gateway jobs additionally have
-`execution={capability,context}`. A repeated start returns only
+The external agent-http start response has `state=started`, `job_id`,
+`generation`, `fence`, `lease_until`, and `deadline`. It never returns a gateway
+capability. A repeated start returns only
 `{state=already_started,job_id,generation,fence}`; it never returns the bearer
 again, even when the caller supplies a different operation ID. A caller that
 loses the first response must stop. Status/reconciliation cannot mint or
@@ -95,8 +106,8 @@ re-deliver that capability.
 
 ### Renew, status, handback, complete, and lookup
 
-P08 exposes these operations at `/internal/execution/{renew,status,handback,
-complete,lookup}`. `renew`, `handback`, and `complete` require a new operation
+The versioned routes expose these operations at `/internal/execution/v1/{renew,
+status,handback,complete,lookup}`. `renew`, `handback`, and `complete` require a new operation
 id and journal their exact request digest in the existing owner operation
 table. Same-key retries return the recorded response; changed requests conflict.
 Status and lookup are read-only, workload-scoped observations. Their precise
@@ -114,9 +125,10 @@ execution authority is reported as `superseded` without exposing a reason.
 Status takes the existing authority lock and exact Job/lease row locks so its
 authorization check and projection describe one owner observation. Handback
 returns `handed_back` with the owner disposition.
-Complete accepts one bounded JSON result or a finite failure/cancellation
-outcome; Sovite writes result bytes through its own artifact store and links
-them only after final fence and authorization checks. Lookup returns journal
+Complete accepts a bounded `result_json` string containing a JSON object or a
+finite failure/cancellation outcome; the API rejects duplicate keys and
+non-finite numbers before Sovite writes result bytes through its own artifact
+store and links them only after final fence and authorization checks. Lookup returns journal
 metadata without private request/response bodies. None of these operations
 returns a start capability.
 
@@ -135,16 +147,19 @@ credentials, SQL state, or arbitrary stored data.
 
 ## Admission sequence
 
-1. Pin the shared namespace/resource-root foundation and generated client
-   commits in this consumer.
-2. Build ordinary installed-artifact consumers from the generated contract;
-   reject arbitrary IDs, coercions, oversized bodies, and response canaries.
-3. Qualify O2/F2 through real HTTP and the owner against disposable SQLite and
-   PostgreSQL, including response loss after commit, same/different operation
-   keys, concurrent starts, current/revoked authorization, expired fences,
-   handback/recovery races, and complete/lookup isolation.
-4. Review the dedicated execution-token configuration and artifact response
-   bounds before runtime adoption. Deployment remains outside this candidate.
+1. The consumer pins Vuoro contract runtime commit
+   `b105f64ce5c12399e04c5d19e72d6cd69bc029f`; package resources are loaded with
+   `importlib.resources` and checked against the nested integrity digest.
+2. Installed-wheel checks verify the OpenAPI, schema, manifest, and integrity
+   assets. API and client success paths validate request and response payloads
+   with the generated bundle.
+3. SQLite and disposable PostgreSQL runs cover response-loss replay, altered
+   keys, unauthorized workload access, profile filtering, and the owner lease
+   regression suite. The full lock-order and recovery history matrix remains
+   part of qualification.
+4. Review dedicated execution-token configuration and artifact response bounds
+   before runtime adoption. Deployment remains outside this candidate.
 
-This source candidate has not run the listed qualification histories and does
-not establish end-to-end worker qualification or authorize deployment.
+The available run covered 287 tests across the remote boundary, lease suite,
+and installed wheel. It does not cover the full listed race/recovery matrix,
+end-to-end worker-host qualification, or authorize deployment.

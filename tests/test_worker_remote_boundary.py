@@ -1,10 +1,9 @@
-"""Exercise the provisional remote worker API through the real owner.
+"""Exercise the versioned agent-http-v1 worker API through the real owner.
 
-The shared ``owner`` fixture uses the schema-five SQLite/PostgreSQL fixture;
-PostgreSQL cases are collected and skip only when its disposable URL is absent.
-These tests cover the ungenerated P08 wire surface while its generated contract
-and release qualification remain open.
+The shared ``owner`` fixture uses SQLite and the disposable PostgreSQL fixture;
+PostgreSQL cases skip only when its disposable URL is absent.
 """
+import json
 
 from dataclasses import replace
 from pathlib import Path
@@ -44,7 +43,7 @@ def execution_client(owner):
 def pull_and_start(client, owner):
     pull_body = {"instance_id": owner.instance, "operation_id": "pull-http-1"}
     response = client.post(
-        "/internal/execution/pull",
+        "/internal/execution/v1/pull",
         headers={"Authorization": f"Bearer {TOKEN}"},
         json=pull_body,
     )
@@ -63,7 +62,7 @@ def pull_and_start(client, owner):
         "timeout_seconds": 900,
     }
     pull_replay = client.post(
-        "/internal/execution/pull",
+        "/internal/execution/v1/pull",
         headers={"Authorization": f"Bearer {TOKEN}"},
         json=pull_body,
     )
@@ -77,7 +76,7 @@ def pull_and_start(client, owner):
         "fence": job["fence"],
     }
     started_response = client.post(
-        "/internal/execution/start",
+        "/internal/execution/v1/start",
         headers={"Authorization": f"Bearer {TOKEN}"},
         json=body,
     )
@@ -99,7 +98,7 @@ def test_remote_mutations_reconcile_by_same_operation_key_and_exact_fence(owner)
         job, identity, started = pull_and_start(client, owner)
         replay = dict(identity, operation_id="start-http-replay")
         replay_response = client.post(
-            "/internal/execution/start",
+            "/internal/execution/v1/start",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=replay,
         )
@@ -114,7 +113,7 @@ def test_remote_mutations_reconcile_by_same_operation_key_and_exact_fence(owner)
 
         status_body = {key: identity[key] for key in ("instance_id", "job_id", "generation", "fence")}
         status = client.post(
-            "/internal/execution/status",
+            "/internal/execution/v1/status",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=status_body,
         )
@@ -125,12 +124,12 @@ def test_remote_mutations_reconcile_by_same_operation_key_and_exact_fence(owner)
 
         renew_body = dict(status_body, operation_id="renew-http-1")
         first = client.post(
-            "/internal/execution/renew",
+            "/internal/execution/v1/renew",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=renew_body,
         )
         replayed = client.post(
-            "/internal/execution/renew",
+            "/internal/execution/v1/renew",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=renew_body,
         )
@@ -140,7 +139,7 @@ def test_remote_mutations_reconcile_by_same_operation_key_and_exact_fence(owner)
         assert first.json()["deadline"] == started["deadline"]
 
         lookup = client.post(
-            "/internal/execution/lookup",
+            "/internal/execution/v1/lookup",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json={"instance_id": owner.instance, "operation_id": "renew-http-1"},
         )
@@ -166,7 +165,7 @@ def test_remote_complete_is_idempotent_and_foreign_workload_cannot_observe(owner
         job, identity, _ = pull_and_start(client, owner)
         status_body = {key: identity[key] for key in ("instance_id", "job_id", "generation", "fence")}
         foreign = client.post(
-            "/internal/execution/status",
+            "/internal/execution/v1/status",
             headers={"Authorization": f"Bearer {OTHER_TOKEN}"},
             json=status_body,
         )
@@ -177,19 +176,26 @@ def test_remote_complete_is_idempotent_and_foreign_workload_cannot_observe(owner
             status_body,
             operation_id="complete-http-1",
             outcome="completed",
-            result={"output": "synthetic result"},
+            result_json="{\"output\":\"synthetic result\"}",
             error_code=None,
         )
         before = snapshot(owner.platform)
+        invalid_inner_json = client.post(
+            "/internal/execution/v1/complete",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json=dict(completion, result_json='{"output":1,"output":2}'),
+        )
+        assert invalid_inner_json.status_code == 422
+        assert snapshot(owner.platform) == before
         first = client.post(
-            "/internal/execution/complete",
+            "/internal/execution/v1/complete",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=completion,
         )
         assert first.status_code == 200
         committed = snapshot(owner.platform)
         replayed = client.post(
-            "/internal/execution/complete",
+            "/internal/execution/v1/complete",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=completion,
         )
@@ -199,9 +205,9 @@ def test_remote_complete_is_idempotent_and_foreign_workload_cannot_observe(owner
         assert before["jobs"] != committed["jobs"]
         assert len(committed["worker_execution_operations"]) == len(before["worker_execution_operations"]) + 1
 
-        changed = dict(completion, result={"output": "changed"})
+        changed = dict(completion, result_json="{\"output\":\"changed\"}")
         conflict = client.post(
-            "/internal/execution/complete",
+            "/internal/execution/v1/complete",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=changed,
         )
@@ -210,7 +216,7 @@ def test_remote_complete_is_idempotent_and_foreign_workload_cannot_observe(owner
         assert snapshot(owner.platform) == committed
 
         found = client.post(
-            "/internal/execution/lookup",
+            "/internal/execution/v1/lookup",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json={"instance_id": owner.instance, "operation_id": "complete-http-1"},
         )
@@ -235,12 +241,12 @@ def test_remote_handback_replay_and_stale_fence_do_not_change_successor(owner):
             "fence": identity["fence"],
         }
         first = client.post(
-            "/internal/execution/handback",
+            "/internal/execution/v1/handback",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=body,
         )
         replay = client.post(
-            "/internal/execution/handback",
+            "/internal/execution/v1/handback",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=body,
         )
@@ -250,7 +256,7 @@ def test_remote_handback_replay_and_stale_fence_do_not_change_successor(owner):
 
         stale = dict(body, operation_id="late-renew-http")
         refused = client.post(
-            "/internal/execution/renew",
+            "/internal/execution/v1/renew",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json=stale,
         )
@@ -262,26 +268,78 @@ def test_remote_handback_replay_and_stale_fence_do_not_change_successor(owner):
 
 
 def test_remote_api_auth_and_strict_body_fail_before_owner_effect(owner):
+    from sovite.execution_contract.runtime import OPERATIONS, load_bundle
+
     admit_agent_http_owner(owner)
     owner.platform.submit("native-code-review", "PRIVATE-O2-SENTINEL synthetic task", "operations", "submit-http-1", input_class="C2")
     before = snapshot(owner.platform)
+    contract = load_bundle()
     client = execution_client(owner)
     try:
+        origin_denied = client.post(
+            "/internal/execution/v1/pull",
+            headers={"Authorization": f"Bearer {TOKEN}", "Origin": "https://other.example"},
+            json={"instance_id": owner.instance, "operation_id": "pull-origin-denied"},
+        )
+        assert origin_denied.status_code == 403
+        contract.validate_response(OPERATIONS["pull"], 403, origin_denied.json())
+        invalid_length = client.post(
+            "/internal/execution/v1/pull",
+            headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json",
+                     "Content-Length": "not-a-number"},
+            content=b"{}",
+        )
+        assert invalid_length.status_code == 422
+        contract.validate_response(OPERATIONS["pull"], 422, invalid_length.json())
         missing_auth = client.post(
-            "/internal/execution/pull",
+            "/internal/execution/v1/pull",
             json={"instance_id": owner.instance, "operation_id": "pull-no-auth"},
         )
         assert missing_auth.status_code == 403
         malformed = client.post(
-            "/internal/execution/pull",
+            "/internal/execution/v1/pull",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json={"instance_id": owner.instance, "operation_id": "pull-invalid", "workload_id": "admin"},
         )
         assert malformed.status_code == 422
         assert "workload_id" not in malformed.text
+        contract.validate_response(OPERATIONS["pull"], 422, malformed.json())
+        oversized = client.post(
+            "/internal/execution/v1/pull",
+            headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+            content=(b'{"instance_id":"' + owner.instance.encode()
+                     + b'","operation_id":"pull-too-large","padding":"'
+                     + b"x" * 65_536 + b'"}'),
+        )
+        assert oversized.status_code == 413
+        contract.validate_response(OPERATIONS["pull"], 413, oversized.json())
     finally:
         client.close()
     assert snapshot(owner.platform) == before
+
+
+def test_execution_platform_error_omits_receipt_and_matches_contract(owner, monkeypatch):
+    from sovite.execution_contract.runtime import OPERATIONS, load_bundle
+    from sovite.service import PlatformError
+
+    def rejected(*_args, **_kwargs):
+        raise PlatformError("idempotency_conflict", "operation conflict", 409,
+                            receipt="PRIVATE-RECEIPT-SENTINEL")
+
+    monkeypatch.setattr(LeaseService, "reserve", rejected)
+    client = execution_client(owner)
+    try:
+        response = client.post(
+            "/internal/execution/v1/pull",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={"instance_id": owner.instance, "operation_id": "pull-platform-error"},
+        )
+        assert response.status_code == 409
+        assert "PRIVATE-RECEIPT-SENTINEL" not in response.text
+        assert "receipt" not in response.json()["detail"]
+        load_bundle().validate_response(OPERATIONS["pull"], 409, response.json())
+    finally:
+        client.close()
 
 
 def test_first_external_profile_does_not_reserve_other_harness_types(owner):
@@ -290,7 +348,7 @@ def test_first_external_profile_does_not_reserve_other_harness_types(owner):
     client = execution_client(owner)
     try:
         response = client.post(
-            "/internal/execution/pull",
+            "/internal/execution/v1/pull",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json={"instance_id": owner.instance, "operation_id": "pull-agent-http-only"},
         )
@@ -323,7 +381,7 @@ def test_first_external_profile_returns_only_the_admitted_agent_http_recipe(owne
     client = execution_client(owner)
     try:
         response = client.post(
-            "/internal/execution/pull",
+            "/internal/execution/v1/pull",
             headers={"Authorization": f"Bearer {TOKEN}"},
             json={"instance_id": owner.instance, "operation_id": "pull-http-profile-1"},
         )
@@ -346,3 +404,92 @@ def test_first_external_profile_returns_only_the_admitted_agent_http_recipe(owne
             assert job["task"] == "PRIVATE-O2-SENTINEL synthetic task"
     finally:
         client.close()
+
+
+def test_execution_client_uses_versioned_contract_body_and_json_result():
+    import httpx
+    from sovite.execution_client import ExecutionClient, ExecutionContext
+
+    observed = {}
+
+    def respond(request):
+        observed["path"] = request.url.path
+        observed["authorization"] = request.headers.get("authorization")
+        observed["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "state": "completed",
+            "job_id": "job-client-1",
+            "generation": "sha256:" + "a" * 64,
+            "fence": "b" * 32,
+            "error_code": None,
+        })
+
+    client = ExecutionClient(
+        "https://execution.example", "test-execution-token-value-123456",
+        transport=httpx.MockTransport(respond),
+    )
+    result = client.complete(
+        ExecutionContext("worker-1", "complete-client-1", "job-client-1",
+                         "sha256:" + "a" * 64, "b" * 32),
+        outcome="completed", result={"ok": True},
+    )
+    assert result["state"] == "completed"
+    assert observed == {
+        "path": "/internal/execution/v1/complete",
+        "authorization": "Bearer test-execution-token-value-123456",
+        "body": {
+            "instance_id": "worker-1",
+            "operation_id": "complete-client-1",
+            "job_id": "job-client-1",
+            "generation": "sha256:" + "a" * 64,
+            "fence": "b" * 32,
+            "outcome": "completed",
+            "result_json": "{\"ok\":true}",
+            "error_code": None,
+        },
+    }
+
+
+def test_execution_client_real_http_contract_lifecycle(owner):
+    import httpx
+    from sovite.execution_client import ExecutionClient, ExecutionContext
+
+    admit_agent_http_owner(owner)
+    owner.platform.submit(
+        "native-code-review", "generated contract lifecycle", "operations",
+        "submit-generated-client", input_class="C2",
+    )
+    app_client = execution_client(owner)
+
+    def forward(request):
+        response = app_client.request(
+            request.method, request.url.path, content=request.content,
+            headers={key: value for key, value in request.headers.items()
+                     if key.lower() not in {"host", "content-length", "accept-encoding"}},
+        )
+        return httpx.Response(response.status_code, headers=response.headers,
+                              content=response.content, request=request)
+
+    client = ExecutionClient(
+        "https://execution.example", TOKEN,
+        transport=httpx.MockTransport(forward),
+    )
+    try:
+        reserved = client.pull(owner.instance, "pull-generated-client")
+        assert reserved["state"] == "reserved"
+        job = reserved["job"]
+        identity = (owner.instance, job["job_id"], job["generation"], job["fence"])
+        start_context = ExecutionContext(identity[0], "start-generated-client", *identity[1:])
+        started = client.start(start_context)
+        assert started["state"] == "started"
+        assert client.status(start_context)["state"] == "current"
+        complete_context = ExecutionContext(identity[0], "complete-generated-client", *identity[1:])
+        completed = client.complete(
+            complete_context, outcome="completed", result={"client": "generated-contract"},
+        )
+        assert completed["state"] == "completed"
+        found = client.lookup(owner.instance, complete_context.operation_id)
+        assert found["state"] == "found"
+        assert found["result_state"] == "completed"
+    finally:
+        app_client.close()
