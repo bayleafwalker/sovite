@@ -95,6 +95,11 @@ def test_closed_packet_rejects_paths_commands_urls_and_credential_payloads(tmp_p
     for area in ("../escape", "/absolute", ".git/config", "src/../escape", "src/*"):
         with pytest.raises(sessions.RepositorySessionError):
             sessions.validate_packet(dict(value, allowed_areas=[area]))
+    with pytest.raises(sessions.RepositorySessionError, match="invalid path"):
+        sessions.validate_packet(dict(value, allowed_areas=["a" * (sessions._MAX_AREA_CHARS + 1)]))
+    too_many_path_bytes = [f"src/{index}-" + "x" * 1020 for index in range(65)]
+    with pytest.raises(sessions.RepositorySessionError, match="total size"):
+        sessions.validate_packet(dict(value, allowed_areas=too_many_path_bytes))
 
 
 def test_owner_binding_must_match_packet_and_bare_mirror_must_contain_base(tmp_path):
@@ -128,6 +133,48 @@ def test_checkout_filters_configured_in_mirror_are_rejected_before_worktree_add(
         manager.prepare(_packet(binding))
     assert error.value.code == "checkout_filter_denied"
     assert not marker.exists()
+
+
+def test_partial_mirror_never_lazy_fetches_promised_objects(tmp_path):
+    bare, _, base = _repo(tmp_path, "partial-source")
+    git("--git-dir", str(bare), "config", "uploadpack.allowFilter", "true")
+    clone_env = sessions._git_env()
+    clone_env["GIT_ALLOW_PROTOCOL"] = "file"
+
+    def partial_clone(name: str) -> Path:
+        mirror = tmp_path / f"{name}.git"
+        subprocess.run(
+            ["git", "clone", "--bare", "--filter=blob:none", f"file://{bare}", str(mirror)],
+            env=clone_env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        return mirror
+
+    def missing_objects(mirror: Path) -> list[str]:
+        output = git("--git-dir", str(mirror), "rev-list", "--objects", "--missing=print", "--all")
+        return [line for line in output.splitlines() if line.startswith("?")]
+
+    control = partial_clone("control")
+    assert missing_objects(control)
+    control_env = sessions._git_env()
+    control_env.pop("GIT_NO_LAZY_FETCH", None)
+    control_env["GIT_ALLOW_PROTOCOL"] = "file"
+    control_worktree = tmp_path / "control-worktree"
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", f"--git-dir={control}", "worktree",
+         "add", "--detach", str(control_worktree), base],
+        env=control_env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert (control_worktree / "src" / "old.txt").is_file()
+    assert not missing_objects(control)
+
+    guarded = partial_clone("guarded")
+    assert missing_objects(guarded)
+    binding = _binding(guarded, base)
+    manager = sessions.RepositorySessionManager(tmp_path / "state", Resolver(binding))
+    with pytest.raises(sessions.RepositorySessionError) as error:
+        manager.prepare(_packet(binding))
+    assert error.value.code == "git_invalid"
+    assert missing_objects(guarded)
 
 
 def test_prepare_is_idempotent_across_manager_restart_and_does_not_change_source(tmp_path):
