@@ -19,6 +19,7 @@ from sovite.patch_draft import (
     build_context,
     parse_draft,
 )
+from sovite import patch_draft as patch_draft_module
 from sovite.repository_sessions import PACKET_SCHEMA, RepositorySessionManager
 from sovite.repository_runs import RepositoryRunBudget
 
@@ -105,15 +106,16 @@ class Budget:
 class FakeCall:
     supports_hard_cost_ceiling = True
 
-    def __init__(self, answer, usage=0.2, error=None):
+    def __init__(self, answer, usage=0.2, error=None, provider_request_id="provider-request-1"):
         self.answer, self.usage, self.error = answer, usage, error
+        self.provider_request_id = provider_request_id
         self.calls = []
 
     async def __call__(self, prompt, *, request_id, max_cost_usd):
         self.calls.append((prompt, request_id, max_cost_usd))
         if self.error:
             raise self.error
-        response = {"answer": self.answer, "provider_request_id": "provider-request-1"}
+        response = {"answer": self.answer, "provider_request_id": self.provider_request_id}
         if self.usage is not None:
             response["usage_usd"] = self.usage
         return response
@@ -178,6 +180,23 @@ def test_context_rejects_symlinks_inside_allowed_source_area(tmp_path):
     _, _, packet, manager, workspace = repo(tmp_path, symlink=True)
     with pytest.raises(PatchDraftError, match="symlink"):
         build_context(manager, workspace, packet)
+
+
+def test_context_rejects_assume_unchanged_worktree_divergence(tmp_path):
+    _, _, packet, manager, workspace = repo(tmp_path)
+    git("update-index", "--assume-unchanged", "src/main.py", cwd=workspace.worktree)
+    (workspace.worktree / "src" / "main.py").write_text("changed behind Git status\n")
+    assert git("status", "--porcelain", cwd=workspace.worktree) == ""
+    with pytest.raises(PatchDraftError, match="differs from the authorized Git base"):
+        build_context(manager, workspace, packet)
+
+
+def test_filesystem_without_no_follow_support_fails_closed(tmp_path, monkeypatch):
+    _, _, packet, manager, workspace = repo(tmp_path)
+    context = build_context(manager, workspace, packet)
+    monkeypatch.delattr(patch_draft_module.os, "O_NOFOLLOW")
+    with pytest.raises(PatchDraftError, match="POSIX directory-relative no-follow"):
+        patch_draft_module._read_regular_file(workspace.worktree, context[0].path, 4096)
 
 
 def test_bounded_patch_draft_applies_only_context_file_and_captures_receipt(tmp_path):
@@ -255,5 +274,21 @@ def test_actual_cost_overage_is_persisted_and_blocks_candidate_publication(tmp_p
     assert budget.used_usd == 1.5
     assert budget.state["budget_reservations"][0]["actual_usd"] == 1.5
     assert budget.state["draft_calls"][0]["state"] == "settled"
+    assert git("rev-parse", "HEAD", cwd=workspace.worktree) == packet["base_sha"]
+
+
+def test_known_charge_without_provider_receipt_binding_is_unknown_but_preserved(tmp_path):
+    _, _, packet, manager, workspace = repo(tmp_path)
+    call = FakeCall(draft_json(packet, manager, workspace, "print('after')\n"),
+                    usage=0.2, provider_request_id=None)
+    budget = Budget()
+    executor = BoundedPatchDraftExecutor(manager, packet, call)
+    with pytest.raises(RuntimeFailure, match="external_execution_uncertain"):
+        asyncio.run(executor.execute("Change output", budget=budget, authorization_check=lambda: None))
+    assert budget.used_usd == 0.2
+    assert budget.state["budget_reservations"][0]["actual_usd"] == 0.2
+    assert budget.state["usage_status"] == "unknown"
+    assert budget.state["draft_calls"][0]["state"] == "unknown"
+    assert budget.state["draft_calls"][0]["observed_usage_usd"] == 0.2
     assert git("rev-parse", "HEAD", cwd=workspace.worktree) == packet["base_sha"]
 

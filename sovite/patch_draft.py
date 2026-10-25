@@ -50,6 +50,15 @@ class PatchDraftError(ValueError):
         super().__init__(message)
 
 
+def _require_safe_filesystem() -> None:
+    if (os.name != "posix" or not getattr(os, "O_NOFOLLOW", 0)
+            or not getattr(os, "O_DIRECTORY", 0)
+            or os.open not in os.supports_dir_fd
+            or os.rename not in os.supports_dir_fd):
+        raise PatchDraftError("safe_filesystem_unavailable",
+                              "Patch drafts require POSIX directory-relative no-follow file operations")
+
+
 class PatchDraftCall(Protocol):
     """Trusted adapter boundary, separate from the model-produced answer."""
 
@@ -118,6 +127,7 @@ def _hash(data: bytes) -> str:
 
 def _read_regular_file(root: Path, relative: str, maximum: int) -> bytes:
     """Open each path component without following symlinks and read one blob."""
+    _require_safe_filesystem()
     parts = relative.split("/")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
@@ -154,6 +164,7 @@ def _read_regular_file(root: Path, relative: str, maximum: int) -> bytes:
 
 def _write_regular_file(root: Path, relative: str, data: bytes) -> None:
     """Atomically replace an existing regular file without following links."""
+    _require_safe_filesystem()
     parts = relative.split("/")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -186,7 +197,7 @@ def _write_regular_file(root: Path, relative: str, data: bytes) -> None:
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            os.replace(temp, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            os.rename(temp, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             os.fsync(parent_fd)
         finally:
             os.close(parent_fd)
@@ -233,7 +244,16 @@ def build_context(manager: RepositorySessionManager, workspace: RepositoryWorksp
         if len(files) >= MAX_CONTEXT_FILES:
             raise PatchDraftError("source_context_too_large", "Allowed source context exceeds its file count limit")
         try:
+            size = int(_git("-C", str(workspace.worktree), "cat-file", "-s", object_id).decode("ascii").strip())
+            if size < 0 or size > MAX_CONTEXT_FILE_BYTES:
+                raise PatchDraftError("source_context_too_large", "Base source blob exceeds its per-file limit")
+            base_blob = _git("-C", str(workspace.worktree), "cat-file", "blob", object_id)
+            if len(base_blob) != size:
+                raise PatchDraftError("source_tree_invalid", "Base source blob size changed during context collection")
             content = _read_regular_file(workspace.worktree, path, MAX_CONTEXT_FILE_BYTES)
+            if content != base_blob:
+                raise PatchDraftError("worktree_source_differs_from_base",
+                                      "Attempt worktree content differs from the authorized Git base blob")
             text = content.decode("utf-8", "strict")
         except UnicodeDecodeError:
             # Binary source is omitted and cannot be selected by the model.
@@ -404,17 +424,25 @@ class BoundedPatchDraftExecutor:
             if exc.code == "external_execution_uncertain":
                 # RepositoryRunBudget raises this only after persisting an
                 # observed charge that crossed its reservation or ceiling.
-                _mark_call(budget, call_id, "settled", actual_usd=float(actual),
-                           provider_request_id=provider_request_id if isinstance(provider_request_id, str) else None)
+                if isinstance(provider_request_id, str) and provider_request_id and len(provider_request_id) <= 256:
+                    _mark_call(budget, call_id, "settled", actual_usd=float(actual),
+                               provider_request_id=provider_request_id)
+                else:
+                    _mark_call(budget, call_id, "unknown", reason="provider_receipt_binding_missing",
+                               observed_usage_usd=float(actual), settled=True)
                 raise
             _mark_call(budget, call_id, "unknown", reason="cost_settlement_failed",
                        observed_usage_usd=float(actual),
                        provider_request_id=provider_request_id if isinstance(provider_request_id, str) else None)
             raise RuntimeFailure("external_execution_uncertain") from None
+        if (not isinstance(provider_request_id, str) or not provider_request_id
+                or len(provider_request_id) > 256):
+            _mark_call(budget, call_id, "unknown", reason="provider_receipt_binding_missing",
+                       observed_usage_usd=float(actual), settled=True)
+            raise RuntimeFailure("external_execution_uncertain")
         _mark_call(budget, call_id, "settled", actual_usd=float(actual),
-                   provider_request_id=provider_request_id if isinstance(provider_request_id, str) else None)
-        if (not isinstance(answer, str) or not isinstance(provider_request_id, str)
-                or not provider_request_id or len(provider_request_id) > 256):
+                   provider_request_id=provider_request_id)
+        if not isinstance(answer, str):
             raise RuntimeFailure("external_execution_uncertain")
         authorization_check()
         replacements = parse_draft(answer, context, protected_paths=self.protected_paths)
