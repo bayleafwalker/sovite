@@ -47,6 +47,7 @@ remoteWorker:
   instanceId: ""
   journalStorage: 1Gi
   journalStorageClass: ""
+  persistenceLabels: {}
   pollSeconds: 2
   leaseSeconds: 90
   resources:

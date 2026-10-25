@@ -105,6 +105,10 @@ def test_remote_worker_is_https_scoped_and_has_no_platform_or_storage_credential
             'controlUrl': 'https://sovite.apps.kotona.app',
             'instanceId': 'remote-agent-1',
             'credentials': [{'env': 'AGENT_API_KEY', 'key': 'REMOTE_AGENT_API_KEY'}],
+            'persistenceLabels': {
+                'recurring-job.longhorn.io/source': 'enabled',
+                'recurring-job-group.longhorn.io/backup-tier': 'backup-tier',
+            },
         },
         'networkPolicy': {
             'extraDnsNames': ['sovite.apps.kotona.app'],
@@ -118,6 +122,12 @@ def test_remote_worker_is_https_scoped_and_has_no_platform_or_storage_credential
     result = render(tmp_path, values)
     assert result.returncode == 0, result.stderr
     rows = [row for row in yaml.safe_load_all(result.stdout) if row]
+    journal_pvc = next(
+        row for row in rows
+        if row['kind'] == 'PersistentVolumeClaim'
+        and row['metadata']['name'] == 'sovite-remote-execution-state'
+    )
+    assert journal_pvc['metadata']['labels'] == values['remoteWorker']['persistenceLabels']
     deployment = next(row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == 'sovite-remote-worker')
     pod = deployment['spec']['template']['spec']
     container = pod['containers'][0]
@@ -154,6 +164,18 @@ def test_remote_worker_is_https_scoped_and_has_no_platform_or_storage_credential
         {'credentials': [{'env': 'SOVITE_DATABASE_URL', 'key': 'bad'}]},
     ):
         candidate = {'remoteWorker': {**values['remoteWorker'], **bad}, 'networkPolicy': values['networkPolicy']}
+        assert render(tmp_path, candidate).returncode != 0
+
+    for bad_labels in (
+        {'unsafe key': 'enabled'},
+        {'backup-tier': 'x' * 64},
+        {'x' * 254: 'enabled'},
+        {f'label-{index}': 'enabled' for index in range(33)},
+    ):
+        candidate = {
+            'remoteWorker': {**values['remoteWorker'], 'persistenceLabels': bad_labels},
+            'networkPolicy': values['networkPolicy'],
+        }
         assert render(tmp_path, candidate).returncode != 0
 
 
