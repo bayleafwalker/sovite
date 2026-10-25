@@ -35,12 +35,15 @@ def healthy_worker_count(platform: Platform, hostname: str | None = None) -> int
 
 
 class Worker:
-    def __init__(self, platform: Platform, runner: AdapterRunner | None = None):
+    def __init__(self, platform: Platform, runner: AdapterRunner | None = None,
+                 repository_run_executor=None):
         self.platform, self.runner = platform, runner or AdapterRunner()
+        self.repository_run_executor = repository_run_executor
         self.id = f"{worker_scope(platform)}{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.stop = asyncio.Event()
         self.execution_fences = {}
-        self.leases = LeaseService(platform, self.id, self.execution_fences)
+        self.leases = LeaseService(platform, self.id, self.execution_fences,
+                                   repository_run_profile=repository_run_executor is not None)
 
     def heartbeat(self, job_id: str | None = None):
         return self.leases.heartbeat(job_id)
@@ -68,8 +71,19 @@ class Worker:
         def check_authorization():
             if not self.renew(job.id, fence=captured_fence):
                 raise RuntimeFailure("authorization_revoked")
-        self.runner.authorization_check = check_authorization
-        operation = asyncio.create_task(self.runner.run(job.resolved, job.task, job.id))
+            if repository_run is not None:
+                self.repository_run_executor.check_authorization(job)
+            return True
+        repository_run = job.resolved.get("repository_run")
+        if repository_run is not None:
+            if self.repository_run_executor is None:
+                self.finish(job.id, error=RuntimeFailure("repository_profile_unavailable"), fence=captured_fence)
+                return
+            operation = asyncio.create_task(self.repository_run_executor.run(
+                job, fence=captured_fence, authorization_check=check_authorization))
+        else:
+            self.runner.authorization_check = check_authorization
+            operation = asyncio.create_task(self.runner.run(job.resolved, job.task, job.id))
         timeout = min(int(job.resolved["grant"].get("timeout_seconds", self.platform.settings.job_timeout_seconds)), self.platform.settings.job_timeout_seconds)
         fixed_deadline = getattr(job, "execution_deadline", None)
         if isinstance(fixed_deadline, (int, float)) and not isinstance(fixed_deadline, bool):
@@ -88,15 +102,25 @@ class Worker:
                     self.hand_back(job.id, fence=captured_fence)
                     return
                 self.heartbeat(job.id)
-                if not self.renew(job.id, fence=captured_fence):
+                try:
+                    check_authorization()
+                except RuntimeFailure as exc:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
-                    self.finish(job.id, cancelled=True, fence=captured_fence)
+                    if repository_run is not None and self.repository_run_executor.effect_started(job.id):
+                        self.finish(job.id, error=RuntimeFailure("external_execution_uncertain"), fence=captured_fence)
+                    elif repository_run is not None and exc.code != "authorization_revoked":
+                        self.finish(job.id, error=exc, fence=captured_fence)
+                    else:
+                        self.finish(job.id, cancelled=True, fence=captured_fence)
                     return
                 if time.monotonic() >= deadline:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
-                    self.finish(job.id, error=RuntimeFailure("execution_timeout", False), fence=captured_fence)
+                    if repository_run is not None and self.repository_run_executor.effect_started(job.id):
+                        self.finish(job.id, error=RuntimeFailure("external_execution_uncertain"), fence=captured_fence)
+                    else:
+                        self.finish(job.id, error=RuntimeFailure("execution_timeout", False), fence=captured_fence)
                     return
             result = await operation
             # Artifact commit can be retried safely, while re-executing external effects

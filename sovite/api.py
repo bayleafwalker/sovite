@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 
 from .db import AuditEvent, AuthSession, BundleRevision, GrantState, Job, Qualification, WorkerHeartbeat
 from .qualification import current_qualification, is_qualified, verify_qualification
+from .repository_runs import RepositoryRunError
 from .service import PUBLIC_STATUS, Platform, PlatformError, job_dict
 from .settings import Settings
 from .worker import Worker
@@ -71,6 +72,12 @@ class WorkflowJob(StrictBody):
     selection_reason: str | None = Field(default=None, min_length=1, max_length=500)
 
 
+class RepositoryRunSubmission(StrictBody):
+    schema_version: str = Field(pattern=r"^sovite-repository-run/v1$")
+    preview_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    packet: dict
+
+
 class OutputApproval(StrictBody):
     source_job_id: str = Field(min_length=1, max_length=64)
     source_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$", min_length=71, max_length=71)
@@ -95,7 +102,8 @@ def token_identity(token: str, settings: Settings) -> tuple[str, str] | None:
     return None
 
 
-def create_app(settings: Settings | None = None, platform: Platform | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, platform: Platform | None = None,
+               repository_run_owner=None) -> FastAPI:
     settings = settings or Settings.from_env()
     platform = platform or Platform(settings)
     active_worker: Worker | None = None
@@ -117,6 +125,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.21", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.platform = platform
+    app.state.repository_run_owner = repository_run_owner
     from .authority_api import install_routes
     install_routes(app, platform, settings)
     from .execution_api import install_routes as install_execution_routes
@@ -188,6 +197,10 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                 detail = {"code": "owner_unavailable", "message": "Execution owner state is unavailable"}
         return JSONResponse({"detail": detail}, status_code=status_code)
 
+    @app.exception_handler(RepositoryRunError)
+    async def repository_run_error(request: Request, exc: RepositoryRunError):
+        return JSONResponse({"detail": {"code": exc.code, "message": exc.message}}, status_code=exc.status)
+
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
         # Pydantic's default error includes the rejected input, which can be private.
@@ -233,6 +246,49 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         if auth[1] != "author" and not (auth[1] == "operator" and not settings.hosting_envelope_path):
             raise PlatformError("forbidden", "Workflow author access is required", 403)
         return auth
+
+    def repository_owner():
+        if app.state.repository_run_owner is None:
+            raise RepositoryRunError("executor_unavailable", "No qualified mutable repository executor is installed", 503)
+        return app.state.repository_run_owner
+
+    async def repository_caller(auth=Depends(identity)) -> tuple[str, str]:
+        if auth[1] != "caller":
+            raise PlatformError("forbidden", "A configured repository caller is required", 403)
+        return auth
+
+    @app.get("/api/repository-runs/v1/capabilities")
+    async def repository_run_capabilities(workspace_id: str, auth=Depends(repository_caller)):
+        owner = repository_owner()
+        return owner.capabilities(workspace_id, auth[0])
+
+    @app.post("/api/repository-runs/v1/runs", status_code=201)
+    async def submit_repository_run(body: RepositoryRunSubmission,
+                                    idempotency_key: str = Header(alias="Idempotency-Key", min_length=16, max_length=128,
+                                                                   pattern=r"^[A-Za-z0-9_.-]+$"),
+                                    auth=Depends(repository_caller)):
+        owner = repository_owner()
+        return {"run": owner.submit(body.packet, preview_id=body.preview_id,
+                                    principal_id=auth[0], idempotency_key=idempotency_key)}
+
+    @app.get("/api/repository-runs/v1/runs")
+    async def list_repository_runs(workspace_id: str, limit: int = 100,
+                                   auth=Depends(repository_caller)):
+        owner = repository_owner()
+        return {"runs": owner.list(principal_id=auth[0], workspace_id=workspace_id, limit=limit),
+                "availability": "available", "blockers": []}
+
+    @app.get("/api/repository-runs/v1/runs/{run_id}")
+    async def get_repository_run(run_id: str, workspace_id: str,
+                                 auth=Depends(repository_caller)):
+        owner = repository_owner()
+        return {"run": owner.get(run_id, principal_id=auth[0], workspace_id=workspace_id)}
+
+    @app.post("/api/repository-runs/v1/runs/{run_id}/cancel")
+    async def cancel_repository_run(run_id: str, workspace_id: str,
+                                    auth=Depends(repository_caller)):
+        owner = repository_owner()
+        return {"run": owner.cancel(run_id, principal_id=auth[0], workspace_id=workspace_id)}
 
     async def activator(auth=Depends(identity)) -> tuple[str, str]:
         platform.policy_role(auth[1], "activator", api=True)

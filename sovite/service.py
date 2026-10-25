@@ -265,7 +265,8 @@ class Platform:
                *, expected_generation: str | None = None, workflow_binding: dict | None = None,
                workflow_role: str | None = None, source_release: str | None = None,
                transfer_id: str | None = None, previous_attempt: str | None = None,
-               selection_reason: str | None = None) -> Job:
+               selection_reason: str | None = None,
+               repository_run: dict | None = None) -> Job:
         from .attempts import previous, validate_metadata
         validate_metadata(previous_attempt, selection_reason)
         try:
@@ -290,6 +291,24 @@ class Platform:
         if workflow_binding is not None:
             request.update(workflow_binding=workflow_binding, workflow_role=workflow_role,
                            source_release=source_release, transfer_id=transfer_id)
+        if repository_run is not None:
+            # Only the owner repository-run adapter supplies this closed,
+            # resolver-authored binding. Including it in the request digest
+            # makes idempotency cover the repository, base and run limits.
+            required_repository_fields = {
+                "schema_version", "packet_sha256", "preview_id", "workspace_id", "repository_id",
+                "idempotency_key", "principal_id", "binding_id", "base_sha", "allowed_areas",
+                "executor_id", "publication_revision", "generation",
+                "qualification_ref", "qualification_sha256", "qualification_expires_at",
+                "max_cost_usd", "deadline", "concurrency", "usage_usd", "peak_concurrency",
+                "budget_reservations", "active_slots", "attempts", "evidence",
+            }
+            if (not isinstance(repository_run, dict)
+                    or set(repository_run) != required_repository_fields
+                    or repository_run.get("schema_version") != "sovite-repository-run/v1"
+                    or repository_run.get("principal_id") != caller):
+                raise PlatformError("invalid_repository_run", "Repository-run owner binding is invalid", 422)
+            request["repository_run"] = repository_run
         if expected_generation is not None:
             request["expected_generation"] = expected_generation
         try:
@@ -339,6 +358,10 @@ class Platform:
                 recipe["selection"] = {"grant_id": grant_id, "model_id": recipe["model"]["id"],
                     "harness_id": recipe["harness"]["id"], "generation": recipe["generation"],
                     "reason": selection_reason, "reason_source": "caller" if selection_reason is not None else "not_supplied"}
+                if repository_run is not None:
+                    if repository_run["generation"] != recipe["generation"]:
+                        raise PlatformError("revision_superseded", "Repository-run binding generation is no longer active", 409)
+                    recipe["repository_run"] = dict(repository_run)
                 if len(task.encode()) > self.settings.max_request_bytes:
                     raise PlatformError("invalid_task", "Task and workflow context exceed the configured limit", 422)
                 if workflow_binding is not None:
@@ -438,15 +461,17 @@ class Platform:
             self.db.audit(session, "operator", "binding.inhibited" if inhibit else "binding.resumed", binding_id, {"reason": reason, "generation": generation})
             return {"id": binding_id, "inhibited": inhibit, "reason": reason, "updated_at": state.updated_at}
 
-    def cancel(self, job_id: str) -> Job:
+    def cancel(self, job_id: str, *, actor: str = "operator", require_owner: bool = False) -> Job:
         with self.db.sessions.begin() as session:
             self.db.authority_lock(session)
             row = self.get_job(job_id, session)
+            if require_owner and row.caller != actor:
+                raise PlatformError("not_found", "Task not found", 404)
             if row.status not in TERMINAL:
                 row.cancel_requested, row.updated_at = True, time.time()
                 if row.status != "running":
                     row.status, row.finished_at = "cancelled", time.time()
-                self.db.audit(session, "operator", "task.cancel_requested", row.id)
+                self.db.audit(session, actor, "task.cancel_requested", row.id)
             return row
 
 

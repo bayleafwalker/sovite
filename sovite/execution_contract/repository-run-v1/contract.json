@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sovite.dev/contracts/repository-run/v1",
+  "title": "Sovite repository-run owner submission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "preview_id", "packet"],
+  "properties": {
+    "schema_version": {"const": "sovite-repository-run/v1"},
+    "preview_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "packet": {"$ref": "#/$defs/portable_work_v1"}
+  },
+  "$defs": {
+    "portable_work_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "workspace_id",
+        "repository_id",
+        "executor_id",
+        "base_sha",
+        "goal",
+        "max_cost_usd",
+        "deadline",
+        "concurrency"
+      ],
+      "properties": {
+        "schema_version": {"const": "portable-work/v1"},
+        "workspace_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "repository_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "executor_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "goal": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "max_cost_usd": {"type": "number", "minimum": 0, "maximum": 100000},
+        "deadline": {"type": "string", "format": "date-time"},
+        "concurrency": {"type": "integer", "minimum": 1, "maximum": 20}
+      }
+    }
+  }
+}

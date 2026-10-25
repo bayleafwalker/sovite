@@ -10,6 +10,7 @@ import uuid
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select, text
@@ -24,6 +25,11 @@ CLAIM_LOCK = 0x50617669746531
 
 
 def replay_safe(resolved: dict) -> bool:
+    # A repository edit may have reached an external provider or tool before a
+    # worker disappeared. Preserve the workspace/evidence and require an
+    # explicit owner reconciliation; never replay it as an ordinary task.
+    if resolved.get("repository_run") is not None:
+        return False
     harness = resolved["harness"]
     return harness["kind"] in {"demo", "tool-agent"} and all(t.get("read_only", t["kind"] == "kubernetes-read") for t in resolved.get("tools", [])) or harness.get("idempotent", False)
 
@@ -131,10 +137,12 @@ class LeaseService:
     cannot run without database authority.
     """
 
-    def __init__(self, platform: Platform, worker_id: str, execution_fences: dict):
+    def __init__(self, platform: Platform, worker_id: str, execution_fences: dict,
+                 *, repository_run_profile: bool = False):
         # execution_fences is the Worker's own dict, shared by reference so the
         # execution loop and lease transitions see the same fence state.
         self.platform, self.id, self.execution_fences = platform, worker_id, execution_fences
+        self.repository_run_profile = repository_run_profile is True
         self._trusted_worker_binding: tuple[ExecutionPrincipal, str] | None = None
 
     def bind_trusted_worker(self, *, principal: ExecutionPrincipal, instance_id: str) -> None:
@@ -157,6 +165,15 @@ class LeaseService:
     def _authorize_current(self, session, job: Job, now: float) -> dict:
         if job.cancel_requested:
             _fail("cancelled", 409, "Execution was cancelled")
+        repository_run = job.resolved.get("repository_run")
+        if repository_run is not None:
+            try:
+                raw_deadline = repository_run["deadline"]
+                deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00")).timestamp()
+            except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+                _fail("owner_unavailable", 503, "Repository-run owner state is unavailable")
+            if not math.isfinite(deadline) or deadline <= now:
+                _fail("repository_run_deadline", 409, "Repository-run deadline has expired")
         recipe = self.platform.authorize_existing_job(session, job)
         check_execution_binding(self.platform, session, job)
         return recipe
@@ -306,6 +323,16 @@ class LeaseService:
             for job in candidates:
                 if job.resolved.get("compute", {}).get("id") != principal.compute_id:
                     continue
+                if job.resolved.get("repository_run") is not None:
+                    # The released agent-http profile and ordinary local worker
+                    # are answer-only. Repository mutation needs its separately
+                    # injected owner profile; never hand it to a generic worker.
+                    if external_profile is not None:
+                        incompatible_profile_job = True
+                    elif not self.repository_run_profile:
+                        continue
+                    if incompatible_profile_job:
+                        continue
                 existing_lease = session.get(WorkerExecutionLease, job.id, with_for_update=True)
                 # This final row lock can block after candidate selection too.
                 now = time.time()
@@ -321,6 +348,7 @@ class LeaseService:
                         (404, "previous_attempt_unavailable"),
                         (409, "previous_attempt_unfinished"),
                         (409, "previous_effect_uncertain"),
+                        (409, "repository_run_deadline"),
                     }
                     if exc.status != 403 and not lineage_denial:
                         raise
@@ -486,6 +514,15 @@ class LeaseService:
             if isinstance(grant_timeout, bool) or not isinstance(grant_timeout, (int, float)) or not math.isfinite(grant_timeout) or grant_timeout <= 0:
                 _fail("owner_unavailable", 503, "Execution owner state is unavailable")
             deadline = now + min(float(grant_timeout), float(self.platform.settings.job_timeout_seconds))
+            repository_run = job.resolved.get("repository_run")
+            if repository_run is not None:
+                try:
+                    repository_deadline = datetime.fromisoformat(
+                        repository_run["deadline"].replace("Z", "+00:00")
+                    ).timestamp()
+                except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+                    _fail("owner_unavailable", 503, "Repository-run owner state is unavailable")
+                deadline = min(deadline, repository_deadline)
             if not math.isfinite(deadline) or deadline <= now:
                 _fail("owner_unavailable", 503, "Execution owner state is unavailable")
             job.attempts += 1
@@ -699,6 +736,10 @@ class LeaseService:
                 row.artifact_key, row.artifact_sha256 = artifact
             if denied:
                 row.status, row.error_code = "blocked", denied
+            elif error and error.code == "external_execution_uncertain":
+                # A cancelled mutable repository attempt may already have
+                # produced a commit or crossed another external effect boundary.
+                row.status, row.error_code = "blocked", "execution_uncertain"
             elif cancelled or row.cancel_requested:
                 row.status, row.error_code = "cancelled", "cancelled"
             elif artifact:
@@ -708,7 +749,7 @@ class LeaseService:
                 row.public_projection = {"receipt": row.receipt, "status": "available"}
                 row.released_at = now
                 self.platform.db.audit(session, self.id, "result.release_authorized", row.id, {"grant_id": row.grant_id, "generation": row.generation, "artifact_sha256": row.artifact_sha256})
-            elif error and (error.code == "external_execution_uncertain" or error.retryable and any(not tool.get("read_only", tool["kind"] == "kubernetes-read") for tool in row.resolved.get("tools", []))):
+            elif error and (error.retryable and any(not tool.get("read_only", tool["kind"] == "kubernetes-read") for tool in row.resolved.get("tools", []))):
                 # Whatever path discovered it, an execution whose effect is unknown waits for an operator.
                 row.status, row.error_code = "blocked", "execution_uncertain"
             elif error and error.retryable and row.resolved["grant"].get("on_outage", "queue") == "queue" and row.attempts < int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts)):
