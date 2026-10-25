@@ -79,7 +79,7 @@ class NativeAdapterAnswerOnlyCall:
                        max_cost_usd: float) -> Mapping[str, Any]:
         result = await self.runner.run_native(self.recipe, prompt, self.job_id, isolated=True)
         answer = result.get("answer") if isinstance(result, Mapping) else None
-        return {"answer": answer, "provider_request_id": request_id}
+        return {"answer": answer}
 
 
 @dataclass(frozen=True)
