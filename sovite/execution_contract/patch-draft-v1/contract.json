@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sovite.dev/contracts/patch-draft/v1",
+  "title": "Sovite bounded patch draft",
+  "description": "Model output only. The owner validates exact-base preconditions and applies replacements in an isolated repository-session worktree.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "files"],
+  "properties": {
+    "schema_version": {"const": "sovite-patch-draft/v1"},
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 24,
+      "items": {"$ref": "#/$defs/file"}
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "base_sha256", "content"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 512},
+        "base_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "content": {"type": "string", "maxLength": 49152}
+      }
+    }
+  }
+}
