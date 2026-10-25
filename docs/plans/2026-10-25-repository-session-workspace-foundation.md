@@ -62,8 +62,10 @@ leaves no visible receipt; a later capture removes that attempt's stale
 temporary file and completes a fresh receipt. Recovery verifies and adopts the
 same published receipt instead of generating a replacement. The lock protects
 cooperating writers in this utility; it is not a same-user hostile-writer
-boundary. Git stdout is capped while being read, and candidate patch bytes are
-hashed as a bounded stream. A prepared worktree moved away
+boundary. Local Git commands disable promisor lazy fetch, so an incomplete
+mirror fails closed instead of reaching its configured remote. Git stdout is
+capped while being read, and candidate patch bytes are hashed as a bounded
+stream. A prepared worktree moved away
 from its base without candidate evidence is rejected. A candidate changed
 after receipt creation is rejected, while the original receipt remains.
 
