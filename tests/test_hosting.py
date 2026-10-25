@@ -622,6 +622,61 @@ def test_offline_configuration_needs_no_runtime_credentials(hosted, monkeypatch)
         Settings.from_env()
 
 
+def test_database_worker_has_its_own_credential_free_settings_role(monkeypatch):
+    for name in (
+        "SOVITE_OPERATOR_TOKEN", "SOVITE_AUTHOR_TOKEN", "SOVITE_ACTIVATOR_TOKEN",
+        "SOVITE_CALLER_TOKENS", "SOVITE_AUTHORITY_TOKEN", "SOVITE_EXECUTION_TOKENS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SOVITE_DATABASE_URL", "sqlite:///:memory:")
+
+    worker_settings = Settings.from_env(auth_role="worker")
+    assert worker_settings.database_url == "sqlite:///:memory:"
+    assert worker_settings.operator_token == ""
+    assert worker_settings.author_token == ""
+    assert worker_settings.activator_token == ""
+    assert worker_settings.caller_tokens == {}
+    assert worker_settings.authority_token == ""
+    assert worker_settings.execution_tokens == {}
+    with pytest.raises(ValueError, match="SOVITE_OPERATOR_TOKEN"):
+        Settings.from_env()
+
+
+def test_worker_command_loads_worker_role_without_relaxing_server_auth(monkeypatch):
+    for name in (
+        "SOVITE_OPERATOR_TOKEN", "SOVITE_AUTHOR_TOKEN", "SOVITE_ACTIVATOR_TOKEN",
+        "SOVITE_CALLER_TOKENS", "SOVITE_AUTHORITY_TOKEN", "SOVITE_EXECUTION_TOKENS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SOVITE_DATABASE_URL", "sqlite:///:memory:")
+    monkeypatch.setattr(sys, "argv", ["sovite", "worker"])
+    observed = []
+
+    class FakePlatform:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def initialize(self):
+            observed.append("initialized")
+
+    class FakeStop:
+        def set(self):
+            pass
+
+    class FakeWorker:
+        def __init__(self, platform):
+            assert platform.settings.operator_token == ""
+            self.stop = FakeStop()
+
+        async def run(self):
+            observed.append("worker_started")
+
+    monkeypatch.setattr(cli, "Platform", FakePlatform)
+    monkeypatch.setattr(cli, "Worker", FakeWorker)
+    cli.main()
+    assert observed == ["initialized", "worker_started"]
+
+
 def test_review_1_standalone_has_no_bundle_mutation_api(tmp_path):
     settings = Settings(database_url=f"sqlite:///{tmp_path}/standalone.db", operator_token=OPERATOR,
                         public_origin="http://testserver", secure_cookies=False)

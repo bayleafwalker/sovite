@@ -121,6 +121,8 @@ def test_remote_worker_is_https_scoped_and_has_no_platform_or_storage_credential
     deployment = next(row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == 'sovite-remote-worker')
     pod = deployment['spec']['template']['spec']
     container = pod['containers'][0]
+    assert pod['securityContext']['fsGroup'] == 10001
+    assert pod['securityContext']['fsGroupChangePolicy'] == 'OnRootMismatch'
     env = {entry['name']: entry for entry in container['env']}
     assert container['command'] == ['sovite-remote-worker']
     assert env['SOVITE_CONTROL_URL']['value'] == 'https://sovite.apps.kotona.app'

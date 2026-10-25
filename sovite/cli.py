@@ -192,6 +192,8 @@ def main():
         offline = (hosted and args.command in {"keys", "runtime-binding"}) or (args.command == "qualify" and args.output)
         if offline:
             settings = Settings.from_env(require_auth=False)
+        elif args.command == "worker":
+            settings = Settings.from_env(auth_role="worker")
         elif hosted and args.command != "serve":
             role = {"compile": "author", "activate": "activator"}.get(args.command, "operator")
             settings = Settings.from_env(auth_role=role)
