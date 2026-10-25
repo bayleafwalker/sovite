@@ -41,6 +41,8 @@ The closed packet currently binds:
 - normalized relative `allowed_areas`;
 - timezone-aware ISO `deadline`;
 - `attempt_id`, `generation`, and `fence` from the current owner context.
+- `allowed_areas` contains at most 256 entries; each path is at most 4,096
+  characters and the total UTF-8 path bytes are capped at 64 KiB.
 
 Unknown fields fail validation. In particular, a packet cannot contain a local
 mirror path, repository URL, shell command, credential payload, or provider

@@ -36,6 +36,8 @@ _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_REF = re.compile(r"^sha256:[0-9a-f]{64}$")
 _FENCE = re.compile(r"^[0-9a-f]{32}$")
 _AREA_FORBIDDEN = set("*?[]{}!\\\x00")
+_MAX_AREA_CHARS = 4096
+_MAX_ALLOWED_AREAS_BYTES = 64 * 1024
 _MAX_GIT_OUTPUT = 64 * 1024 * 1024
 _MAX_PATCH_BYTES = 256 * 1024 * 1024
 
@@ -103,7 +105,8 @@ def _identifier(value: Any, field: str) -> str:
 
 
 def _area(value: Any) -> str:
-    if not isinstance(value, str) or not value or value.startswith("/") or any(c in _AREA_FORBIDDEN for c in value):
+    if (not isinstance(value, str) or not value or len(value) > _MAX_AREA_CHARS
+            or value.startswith("/") or any(c in _AREA_FORBIDDEN for c in value)):
         raise RepositorySessionError("invalid_packet", "allowed_areas contains an invalid path")
     # Use a deliberately small, platform-independent relative-path grammar.
     parts = value.split("/")
@@ -147,6 +150,12 @@ def validate_packet(value: Mapping[str, Any]) -> RepositorySessionPacket:
     normalized = tuple(_area(item) for item in areas)
     if len(set(normalized)) != len(normalized):
         raise RepositorySessionError("invalid_packet", "allowed_areas contains duplicates")
+    try:
+        areas_bytes = sum(len(area.encode("utf-8", "strict")) for area in normalized)
+    except UnicodeEncodeError:
+        raise RepositorySessionError("invalid_packet", "allowed_areas contains an invalid path") from None
+    if areas_bytes > _MAX_ALLOWED_AREAS_BYTES:
+        raise RepositorySessionError("invalid_packet", "allowed_areas exceeds its total size limit")
     packet = RepositorySessionPacket(
         schema_version=PACKET_SCHEMA,
         binding_id=value["binding_id"],
@@ -188,7 +197,8 @@ def _git_env() -> dict[str, str]:
                  "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF"):
         env.pop(name, None)
     env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
+                "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_NO_LAZY_FETCH": "1"})
     return env
 
 
