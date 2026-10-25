@@ -94,7 +94,9 @@ class Settings:
     @classmethod
     def from_env(cls, *, require_auth: bool = True, auth_role: str | None = None) -> "Settings":
         # Servers load all roles. Trusted local CLI processes load only their role.
-        if auth_role not in {None, "operator", "author", "activator"}:
+        # The database-backed worker is not an operator and must not need an
+        # operator credential merely to initialize its bounded execution loop.
+        if auth_role not in {None, "operator", "author", "activator", "worker"}:
             raise ValueError("Unknown authentication role")
         env = os.environ
         def truth(key: str, default: bool) -> bool:

@@ -38,7 +38,7 @@ spec:
       serviceAccountName: {{ $name }}-remote-worker
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
-      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, fsGroupChangePolicy: OnRootMismatch, seccompProfile: {type: RuntimeDefault}}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
