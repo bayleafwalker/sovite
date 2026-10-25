@@ -47,7 +47,15 @@ def validate_contract_provenance(files):
     if provenance["generator"]["runtimeWheelSha256"] != "7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9":
         raise ValueError("Execution contract runtime wheel hash is not the qualified release")
 
-    package_files = sorted(path for path in sdk_root.rglob("*") if path.is_file())
+    # Hash exactly the files the source release can contain. Runtime imports
+    # create interpreter-specific __pycache__/*.pyc files inside this package;
+    # those files are excluded from the release and must not affect provenance.
+    package_files = sorted(
+        path for path in files
+        if path.is_relative_to(sdk_root)
+        and path.suffix in SOURCE_SUFFIXES
+        and not (set(path.relative_to(sdk_root).parts) & EXCLUDED_PARTS)
+    )
     tree_hash = hashlib.sha256()
     for path in package_files:
         relative = path.relative_to(sdk_root).as_posix()
