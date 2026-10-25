@@ -95,8 +95,8 @@ def test_enforced_installer_render_has_remote_worker_lifecycle_probes(tmp_path: 
     values_path = tmp_path / "values.yaml"
     values_path.write_text(yaml.safe_dump({
         "mode": "enforced",
-        "image": {"repository": "registry.example/sovite-platform", "tag": "0.1.20", "digest": "sha256:" + "1" * 64},
-        "nativeHarness": {"image": {"repository": "registry.example/sovite-platform-codex", "tag": "0.1.20", "digest": "sha256:" + "2" * 64}},
+        "image": {"repository": "registry.example/sovite-platform", "tag": "0.1.21", "digest": "sha256:" + "1" * 64},
+        "nativeHarness": {"image": {"repository": "registry.example/sovite-platform-codex", "tag": "0.1.21", "digest": "sha256:" + "2" * 64}},
         "postgres": {"image": "postgres:17.11-alpine@sha256:" + "3" * 64},
         "garage": {"image": "dxflrs/garage:v2.4.1@sha256:" + "4" * 64},
         "ollama": {"image": "ollama/ollama:0.40.6@sha256:" + "5" * 64},

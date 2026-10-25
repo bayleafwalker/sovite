@@ -152,12 +152,12 @@ Switch the runtime URL to the runtime role, keep the same schema, and set `SOVIT
 
 `db check` is read-only and exits 0 with `{"status":"compatible","schema_version":5}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
 
-### Upgrade from 0.1.15 / schema 3 to 0.1.20 / schema 5
+### Upgrade from 0.1.15 / schema 3 to 0.1.21 / schema 5
 
 Schema 5 is not backward-readable by 0.1.15 (schema 3) or 0.1.17 (schema 4).
 This is a one-way database upgrade; the source has no downgrade migration. For
 the migration window, stop the control API and every local or remote worker,
-take and verify a database and artifact backup, then run the candidate 0.1.20
+take and verify a database and artifact backup, then run the candidate 0.1.21
 image once with the migration-role `SOVITE_DATABASE_URL` and the existing
 `SOVITE_DATABASE_SCHEMA` value:
 
@@ -168,7 +168,7 @@ sovite db check
 
 Require the check to report `schema_version: 5`. Then configure the runtime
 role, retain the same schema name, set `SOVITE_DATABASE_MIGRATE=never`, and run
-`sovite db check` again before starting 0.1.20 control and local worker
+`sovite db check` again before starting 0.1.21 control and local worker
 processes. Use a separately provisioned execution-token map if remote workers
 will be enabled. Do not let an older image start against schema 5; rollback to
 0.1.15 or 0.1.17 requires restoring the verified pre-migration database and

@@ -120,6 +120,19 @@
         "instanceId": {"type": "string", "pattern": "^$|^[A-Za-z0-9_-]{1,64}$"},
         "journalStorage": {"type": "string", "minLength": 1},
         "journalStorageClass": {"type": "string"},
+        "persistenceLabels": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {
+            "maxLength": 253,
+            "pattern": "^([A-Za-z0-9]([-A-Za-z0-9.]*[A-Za-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 63,
+            "pattern": "^$|^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+          }
+        },
         "pollSeconds": {"type": "number", "minimum": 0.1, "maximum": 60},
         "leaseSeconds": {"type": "number", "minimum": 1, "maximum": 3600},
         "resources": {"$ref": "#/definitions/resources"},
