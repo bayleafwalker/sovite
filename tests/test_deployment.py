@@ -155,6 +155,50 @@ def test_remote_worker_is_https_scoped_and_has_no_platform_or_storage_credential
         assert render(tmp_path, candidate).returncode != 0
 
 
+def test_remote_worker_can_only_reach_same_release_native_harness_when_enabled(tmp_path):
+    def rendered(values):
+        result = render(tmp_path, values)
+        assert result.returncode == 0, result.stderr
+        return [row for row in yaml.safe_load_all(result.stdout) if row]
+
+    def assert_boundary(rows, enabled):
+        policies = [row for row in rows if row['kind'] == 'NetworkPolicy']
+        harness_policy = next(row for row in policies if row['metadata']['name'] == 'sovite-native-harness')['spec']
+        harness = next(row for row in rows if row['kind'] == 'Deployment' and row['metadata']['name'] == 'sovite-native-harness')
+        assert harness_policy['podSelector']['matchLabels'] == {
+            'app.kubernetes.io/instance': 'sovite', 'sovite.component': 'native-harness'}
+        assert harness['spec']['template']['metadata']['labels']['sovite.component'] == 'native-harness'
+        assert harness_policy['ingress'][0]['ports'] == [{'protocol': 'TCP', 'port': 8090}]
+        sources = harness_policy['ingress'][0]['from']
+        components = {source['podSelector']['matchLabels']['sovite.component'] for source in sources}
+        assert components == ({'worker', 'remote-worker'} if enabled else {'worker'})
+        assert all(source['podSelector']['matchLabels']['app.kubernetes.io/instance'] == 'sovite'
+                   for source in sources)
+        assert all('namespaceSelector' not in source for source in sources)
+
+        state_ingress = next(row for row in policies if row['metadata']['name'] == 'sovite-state-ingress')['spec']
+        state_components = state_ingress['ingress'][0]['from'][0]['podSelector']['matchExpressions'][0]['values']
+        assert 'remote-worker' not in state_components
+        if enabled:
+            remote_egress = next(row for row in policies if row['metadata']['name'] == 'sovite-remote-worker-egress')['spec']
+            assert remote_egress['egress'] == [{'to': [{'ipBlock': {'cidr': '203.0.113.8/32'}},],
+                                                'ports': [{'protocol': 'TCP', 'port': 443}]}]
+
+    defaults = rendered({'nativeHarness': {'enabled': True}})
+    assert_boundary(defaults, False)
+    assert not any(row['metadata']['name'] == 'sovite-remote-worker-egress'
+                   for row in defaults if row['kind'] == 'NetworkPolicy')
+
+    enabled = rendered({
+        'nativeHarness': {'enabled': True},
+        'remoteWorker': {'enabled': True, 'controlUrl': 'https://sovite.apps.kotona.app',
+                         'instanceId': 'worker-1', 'credentials': [{'env': 'AGENT_API_KEY', 'key': 'AGENT_API_KEY'}]},
+        'networkPolicy': {'extraDnsNames': ['sovite.apps.kotona.app'],
+                          'remoteWorkerPeers': [{'hosts': ['203.0.113.8'], 'cidrs': ['203.0.113.8/32'], 'ports': [443]}]},
+    })
+    assert_boundary(enabled, True)
+
+
 def test_external_model_hosts_need_exact_cidrs_and_provisioned_credentials(tmp_path):
     peer = {'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}
     values = {'networkPolicy': {'modelPeers': [peer]}, 'modelCredentials': [{'env': 'MODEL_HOST_TOKEN'}], 'nativeHarness': {'enabled': True}}
