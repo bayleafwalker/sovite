@@ -677,6 +677,38 @@ def test_worker_command_loads_worker_role_without_relaxing_server_auth(monkeypat
     assert observed == ["initialized", "worker_started"]
 
 
+def test_worker_health_command_loads_credential_free_role_and_server_stays_protected(
+    tmp_path, monkeypatch, capsys
+):
+    for name in (
+        "SOVITE_OPERATOR_TOKEN", "SOVITE_AUTHOR_TOKEN", "SOVITE_ACTIVATOR_TOKEN",
+        "SOVITE_CALLER_TOKENS", "SOVITE_AUTHORITY_TOKEN", "SOVITE_EXECUTION_TOKENS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    database_url = f"sqlite:///{tmp_path / 'health.sqlite'}"
+    artifact_path = str(tmp_path / "artifacts")
+    platform = Platform(Settings(
+        database_url=database_url, operator_token="", artifact_path=artifact_path,
+        require_qualification=False,
+    ))
+    platform.initialize()
+    Worker(platform).heartbeat()
+    monkeypatch.setenv("SOVITE_DATABASE_URL", database_url)
+    monkeypatch.setenv("SOVITE_ARTIFACT_PATH", artifact_path)
+    monkeypatch.setenv("SOVITE_REQUIRE_QUALIFICATION", "false")
+    monkeypatch.setattr(sys, "argv", ["sovite", "worker-health"])
+    cli.main()
+    output = json.loads(capsys.readouterr().out)
+    assert output["healthy_workers"] == 1
+    assert output["compute_id"] == "local"
+
+    monkeypatch.setattr(sys, "argv", ["sovite", "serve"])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 1
+    assert "SOVITE_OPERATOR_TOKEN" in capsys.readouterr().err
+
+
 def test_review_1_standalone_has_no_bundle_mutation_api(tmp_path):
     settings = Settings(database_url=f"sqlite:///{tmp_path}/standalone.db", operator_token=OPERATOR,
                         public_origin="http://testserver", secure_cookies=False)
