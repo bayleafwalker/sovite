@@ -136,6 +136,30 @@ The candidate must preserve owner-generated fences, current authorization,
 response-loss safety, append-only audit and exact transaction boundaries. It
 must not add another queue or lease authority.
 
+## Isolated runtime composition
+
+Compose and Helm expose an opt-in API-only worker. It is disabled by default,
+requires an explicitly configured HTTPS control origin, instance identity and
+execution token, and stores the crash-reconciliation journal on persistent
+storage. Its environment and mounts contain no platform database URL/schema,
+S3 endpoint/bucket or AWS storage key, operator/caller credential, owner token
+map, bundle, or local control volume. Optional adapter credentials are named
+individually and come only from the deployment secret. They must match the
+`credential_env` admitted in an `agent-http-v1` recipe. The service never
+inherits the local worker's shared runtime environment.
+
+Helm's remote-worker egress remains default-deny. Operators must provide exact
+owner and selected agent endpoint peers under `networkPolicy.remoteWorkerPeers`;
+the HTTPS origin is not inferred from the chart's public-origin value. Compose
+uses the separately supplied `SOVITE_REMOTE_CONTROL_URL`; it does not guess an
+owner URL or route through the local HTTP control listener. The same instance
+identity must remain attached to its persistent journal across process
+restarts. Losing that journal is not permission to replay an unknown mutation.
+
+This composition is source-level and opt-in. It does not authorize rollout or
+prove a site's secret, network, or credential bindings. The local SQL/S3 worker
+and its existing composition are unchanged.
+
 ## Error boundary
 
 The route uses the existing bounded `PlatformError` body. Worker operations use

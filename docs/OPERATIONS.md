@@ -146,11 +146,35 @@ sovite db migrate
 sovite db check
 ```
 
-These commands use only database settings; they need no operator token, bundle, artifact credentials or signing keys and do not activate a generation. `migrate` creates the version 1 tables and applies the ordered binding-state (2), execution-authority (3) and setup-identity/draft (4) steps, recording each version in `platform_metadata`. Existing data and audit history survive the upgrade; repeated migration checks compatibility without resetting state. SQLite DDL and version writes share an explicit transaction; PostgreSQL uses transactional DDL. Run one migration process at a time with runtime processes stopped, after a verified backup. There is no automatic downgrade.
+These commands use only database settings; they need no operator token, bundle, artifact credentials or signing keys and do not activate a generation. `migrate` creates the version 1 tables and applies the ordered binding-state (2), execution-authority/helper enrollment (3), setup-identity/draft (4), and worker execution lease/operation journal (5) steps, recording each version in `platform_metadata`. Existing data and audit history survive the upgrade; repeated migration checks compatibility without resetting state. SQLite DDL and version writes share an explicit transaction; PostgreSQL uses transactional DDL. Run one migration process at a time with all control and worker processes stopped, after a verified backup. There is no automatic downgrade.
 
 Switch the runtime URL to the runtime role, keep the same schema, and set `SOVITE_DATABASE_MIGRATE=never`. Run `sovite db check` as that role, then start the API and workers. `Platform.initialize()` checks compatibility before bundle activation or work; it issues no DDL in this mode. Existing first-bundle activation and operational DML still occur after a successful check. The separate native harness receives no platform database credentials and owns an independent local SQLite execution ledger; these settings govern the platform database only.
 
-`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":4}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
+`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":5}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
+
+### Upgrade from 0.1.15 / schema 3 to 0.1.18 / schema 5
+
+Schema 5 is not backward-readable by 0.1.15 (schema 3) or 0.1.17 (schema 4).
+This is a one-way database upgrade; the source has no downgrade migration. For
+the migration window, stop the control API and every local or remote worker,
+take and verify a database and artifact backup, then run the candidate 0.1.18
+image once with the migration-role `SOVITE_DATABASE_URL` and the existing
+`SOVITE_DATABASE_SCHEMA` value:
+
+```sh
+sovite db migrate
+sovite db check
+```
+
+Require the check to report `schema_version: 5`. Then configure the runtime
+role, retain the same schema name, set `SOVITE_DATABASE_MIGRATE=never`, and run
+`sovite db check` again before starting 0.1.18 control and local worker
+processes. Use a separately provisioned execution-token map if remote workers
+will be enabled. Do not let an older image start against schema 5; rollback to
+0.1.15 or 0.1.17 requires restoring the verified pre-migration database and
+matching artifact backup, then starting the corresponding release. The new
+worker lease/operation tables are additive, but the old code rejects the newer
+schema marker before doing work.
 
 | Code | Meaning |
 | --- | --- |
