@@ -81,6 +81,15 @@ The request uses the configured bearer token and `Idempotency-Key: durable-job-i
 
 ## Remote helper enrollment administration
 
+The operator API exposes read-only `GET /api/helpers/readiness`. It reports
+current binding state, bounded enrollment/session projections, and whether
+current signed qualification evidence contains a host-class record matching the
+active binding's role, image and weights digests, destination, trust tier,
+retention, and cancellation bound. Malformed, stale, oversized, or misbound
+records produce fixed error codes. This endpoint is diagnostic only:
+`dispatch_authority` is always false, and qualification records do not prove
+live host state or enable dispatch.
+
 The operator API exposes `POST /api/helpers/enrollments/{enrollment_id}` to provision an enrollment, `POST /api/helpers/enrollments/{enrollment_id}/rotate`,
 `POST /api/helpers/enrollments/{enrollment_id}/revoke`, and
 `POST /api/helpers/reconcile`. Each route requires the existing operator identity;
