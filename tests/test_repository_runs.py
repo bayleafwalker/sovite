@@ -1,0 +1,462 @@
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+import yaml
+from jsonschema import Draft202012Validator, ValidationError
+from fastapi.testclient import TestClient
+
+from sovite import policy
+from sovite.api import create_app
+from sovite.db import Job
+from sovite.repository_runs import (
+    RUN_SCHEMA,
+    RepositoryRunAttemptExecutor,
+    RepositoryRunError,
+    RepositoryRunOwner,
+    canonical_packet_digest,
+    expected_preview_id,
+    validate_run_packet,
+)
+from sovite.service import Platform, PlatformError
+from sovite.settings import Settings
+from sovite.worker import Worker
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CALLER = "repo-caller-token-000000000000000000"
+OTHER = "repo-other-token-00000000000000000"
+
+
+def git(*args: str, cwd: Path | None = None) -> str:
+    result = subprocess.run(["git", *args], cwd=cwd, check=True, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return result.stdout.strip()
+
+
+def make_repo(tmp_path: Path) -> tuple[Path, str]:
+    bare = tmp_path / "project.git"
+    source = tmp_path / "project"
+    git("init", "--bare", str(bare))
+    git("init", str(source))
+    git("config", "user.name", "Repository run test", cwd=source)
+    git("config", "user.email", "repo-run@example.invalid", cwd=source)
+    (source / "src").mkdir()
+    (source / "src" / "main.txt").write_text("base\n")
+    git("add", ".", cwd=source)
+    git("commit", "-m", "base", cwd=source)
+    base = git("rev-parse", "HEAD", cwd=source)
+    git("remote", "add", "origin", str(bare), cwd=source)
+    git("push", "origin", "HEAD", cwd=source)
+    git("--git-dir", str(bare), "symbolic-ref", "HEAD", "refs/heads/main")
+    git("--git-dir", str(bare), "update-ref", "refs/heads/main", base)
+    return bare, base
+
+
+@pytest.fixture
+def setup(tmp_path):
+    bundle, _ = policy.load_bundle(ROOT / "config/platform.local.yaml")
+    config_path = tmp_path / "bundle.yaml"
+    config_path.write_text(yaml.safe_dump(bundle))
+    settings = Settings(database_url=f"sqlite:///{tmp_path}/control.db", bundle_path=str(config_path),
+        artifact_path=str(tmp_path / "artifacts"), operator_token="operator-repo-test-token-0000000000",
+        caller_tokens={"cloud-codex": CALLER, "other-user": OTHER}, public_origin="http://testserver",
+        secure_cookies=False, require_qualification=False,
+        qualification_private_key=str(tmp_path / "private.pem"),
+        qualification_public_keys=[str(tmp_path / "public.pem")])
+    platform = Platform(settings)
+    platform.initialize()
+    return settings, platform
+
+
+class BindingResolver:
+    def __init__(self, mirror: Path, base: str, generation: str):
+        self.mirror, self.base, self.generation = mirror, base, generation
+        self.attempt_packets: list[dict] = []
+        self.deadline = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        self.latest_deadline = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+        self.qualification_expires_at = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+        self.qualification_ref = "repo-profile-qualification-8"
+        self.qualification_sha256 = "e" * 64
+        self.max_cost_usd = 5.0
+        self.max_concurrency = 2
+
+    def resolve_dispatch_binding(self, workspace_id: str, repository_id: str, principal_id: str):
+        return {
+            "binding_id": "owner-binding-1", "workspace_id": "workspace-1",
+            "repository_id": "repo-1", "principal_id": "cloud-codex",
+            "mirror_root": str(self.mirror), "base_sha": self.base,
+            "allowed_areas": ["src"], "grant_id": "incident-forensics",
+            "input_class": None, "generation": self.generation,
+            "executor_id": "repo-executor-1", "publication_revision": "rev-8",
+            "max_cost_usd": self.max_cost_usd, "max_concurrency": self.max_concurrency,
+            "latest_deadline": self.latest_deadline,
+            "qualification_ref": self.qualification_ref,
+            "qualification_sha256": self.qualification_sha256,
+            "qualification_expires_at": self.qualification_expires_at,
+        }
+
+    def list_dispatch_bindings(self, workspace_id: str, principal_id: str):
+        if workspace_id != "workspace-1" or principal_id != "cloud-codex":
+            return []
+        return [self.resolve_dispatch_binding(workspace_id, "repo-1", principal_id)]
+
+    def issue_attempt_packet(self, binding_id: str, *, job_id: str, attempt_id: str,
+                             generation: str, fence: str, deadline: str):
+        packet = {
+            "schema_version": "sovite-repository-session/v1",
+            "binding_id": "attempt-binding-" + fence[:8],
+            "job_id": job_id, "workspace_id": "workspace-1", "repository_id": "repo-1",
+            "base_sha": self.base, "allowed_areas": ["src"],
+            "deadline": deadline,
+            "attempt_id": attempt_id, "generation": generation, "fence": fence,
+            "mirror_root": str(self.mirror),
+        }
+        self.attempt_packets.append(packet)
+        return packet
+
+
+def packet(base: str, **overrides):
+    value = {
+        "schema_version": "portable-work/v1", "workspace_id": "workspace-1",
+        "repository_id": "repo-1", "executor_id": "repo-executor-1",
+        "base_sha": base, "goal": "Update the source file",
+        "max_cost_usd": 2.0,
+        "deadline": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "concurrency": 1,
+    }
+    value.update(overrides)
+    return value
+
+
+def make_owner(platform, resolver, executor=None, enabled=True):
+    generation = platform.active()[1]
+    if resolver.generation != generation:
+        resolver.generation = generation
+    return RepositoryRunOwner(platform, resolver, profile_enabled=enabled,
+                              stub_or_qualified_executor=executor)
+
+
+def submit(owner, value, *, principal_id="cloud-codex", idempotency_key="test-key-00000000"):
+    return owner.submit(value, preview_id=expected_preview_id(value, principal_id),
+                        principal_id=principal_id, idempotency_key=idempotency_key)
+
+
+def test_closed_packet_rejects_commands_paths_credentials_and_bad_limits():
+    valid = packet("a" * 40)
+    assert validate_run_packet(valid) == valid
+    for name, value in (("command", ["sh", "-c", "bad"]),
+                        ("mirror_root", "/tmp/project.git"),
+                        ("credentials", {"token": "private"}),
+                        ("repository_url", "https://example.invalid/project")):
+        with pytest.raises(RepositoryRunError, match="fields"):
+            validate_run_packet(valid | {name: value})
+    for invalid in (valid | {"concurrency": True}, valid | {"max_cost_usd": float("inf")},
+                    valid | {"base_sha": "short"}, valid | {"deadline": "tomorrow"}):
+        with pytest.raises(RepositoryRunError):
+            validate_run_packet(invalid)
+    with pytest.raises(RepositoryRunError, match="8000"):
+        validate_run_packet(valid | {"goal": "x" * 8_001})
+    with pytest.raises(RepositoryRunError, match="100000"):
+        validate_run_packet(valid | {"max_cost_usd": 100_001})
+
+
+def test_shipped_contract_matches_owner_envelope_and_exact_cloud_packet():
+    schema = json.loads((ROOT / "sovite/execution_contract/repository-run-v1/contract.json").read_text())
+    value = packet("a" * 40)
+    envelope = {"schema_version": RUN_SCHEMA,
+                "preview_id": expected_preview_id(value, "cloud-codex"), "packet": value}
+    validator = Draft202012Validator(schema)
+    validator.validate(envelope)
+    with pytest.raises(ValidationError):
+        validator.validate(envelope | {"command": ["sh"]})
+    with pytest.raises(ValidationError):
+        validator.validate({**envelope, "packet": value | {"mirror_root": "/tmp/repo"}})
+
+
+def test_default_owner_is_disabled_and_cannot_admit_a_queue_item(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = make_owner(platform, resolver, enabled=False)
+    capabilities = owner.capabilities("workspace-1", "cloud-codex")
+    assert capabilities["availability"] == "unavailable"
+    assert capabilities["executors"][0]["launch_supported"] is False
+    with pytest.raises(RepositoryRunError, match="qualified") as error:
+        submit(owner, packet(base), principal_id="cloud-codex", idempotency_key="not-enabled-000000")
+    assert error.value.code == "executor_unavailable"
+    with platform.db.sessions() as session:
+        assert session.query(Job).count() == 0
+
+
+def test_binding_principal_repository_executor_limits_and_key_digest_are_enforced(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    request = packet(base)
+    first = submit(owner, request, principal_id="cloud-codex", idempotency_key="same.key-00000000")
+    assert first["workspace_id"] == "workspace-1"
+    assert submit(owner, request, principal_id="cloud-codex", idempotency_key="same.key-00000000")["id"] == first["id"]
+    assert first["attempts"] == [] and first["evidence"] == []
+    assert canonical_packet_digest(request) != canonical_packet_digest(request | {"goal": "different"})
+    with pytest.raises(PlatformError, match="different request"):
+        submit(owner, request | {"goal": "different"}, principal_id="cloud-codex", idempotency_key="same.key-00000000")
+    with pytest.raises(RepositoryRunError) as denied:
+        submit(owner, request, principal_id="other-user", idempotency_key="other-key-00000000")
+    assert denied.value.code == "binding_mismatch"
+    with pytest.raises(RepositoryRunError) as limited:
+        submit(owner, request | {"max_cost_usd": 6.0}, principal_id="cloud-codex", idempotency_key="over-limit-00000000")
+    assert limited.value.code == "limits_exceeded"
+    with pytest.raises(RepositoryRunError) as preview:
+        owner.submit(request, preview_id="0" * 64, principal_id="cloud-codex",
+                     idempotency_key="wrong-preview-0000000")
+    assert preview.value.code == "preview_mismatch"
+
+
+def test_authenticated_api_scopes_run_list_status_and_cancel(setup, tmp_path):
+    settings, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    with TestClient(create_app(settings, platform, owner)) as client:
+        caps = client.get("/api/repository-runs/v1/capabilities?workspace_id=workspace-1",
+                          headers={"Authorization": "Bearer " + CALLER})
+        assert caps.status_code == 200
+        assert caps.json()["schema_version"] == RUN_SCHEMA
+        capability = caps.json()["executors"][0]
+        assert capability["workspace_id"] == "workspace-1"
+        assert capability["repository_ids"] == ["repo-1"]
+        assert capability["launch_supported"] is True
+        assert capability["limits"] == {
+            "max_cost_usd": 5.0, "max_concurrency": 2,
+            "latest_deadline": resolver.latest_deadline,
+        }
+        request_packet = packet(base)
+        request_packet = packet(base)
+        submitted = client.post("/api/repository-runs/v1/runs", headers={
+            "Authorization": "Bearer " + CALLER, "Idempotency-Key": "api-once-00000000"},
+            json={"schema_version": RUN_SCHEMA, "preview_id": expected_preview_id(request_packet, "cloud-codex"),
+                  "packet": request_packet})
+        assert submitted.status_code == 201
+        run = submitted.json()["run"]
+        listed = client.get("/api/repository-runs/v1/runs?workspace_id=workspace-1",
+                            headers={"Authorization": "Bearer " + CALLER})
+        assert [row["id"] for row in listed.json()["runs"]] == [run["id"]]
+        assert client.get(f"/api/repository-runs/v1/runs/{run['id']}?workspace_id=other",
+                          headers={"Authorization": "Bearer " + CALLER}).status_code == 404
+        assert client.get(f"/api/repository-runs/v1/runs/{run['id']}?workspace_id=workspace-1",
+                          headers={"Authorization": "Bearer " + OTHER}).status_code == 404
+        cancelled = client.post(f"/api/repository-runs/v1/runs/{run['id']}/cancel?workspace_id=workspace-1",
+                                headers={"Authorization": "Bearer " + OTHER})
+        assert cancelled.status_code == 404
+        cancelled = client.post(f"/api/repository-runs/v1/runs/{run['id']}/cancel?workspace_id=workspace-1",
+                                headers={"Authorization": "Bearer " + CALLER})
+        assert cancelled.status_code == 200
+        assert cancelled.json()["run"]["state"] == "cancelled"
+
+
+def test_stub_executor_is_fenced_and_publishes_typed_candidate_evidence(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    start = asyncio.Event()
+
+    async def stub(worktree, goal, deadline, budget, authorize):
+        assert goal == "Update the source file"
+        assert deadline > datetime.now(timezone.utc).timestamp()
+        authorize()
+        budget.acquire_slot("slot-one")
+        budget.reserve_cost("provider-call-1", 0.5)
+        budget.settle_cost("provider-call-1", 0.25)
+        budget.release_slot("slot-one")
+        (worktree / "src" / "main.txt").write_text("candidate\n")
+        git("add", "-A", cwd=worktree)
+        git("-c", "user.name=Run stub", "-c", "user.email=stub@example.invalid",
+            "commit", "-m", "candidate", cwd=worktree)
+        start.set()
+
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "attempt-state", stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    request_packet = packet(base)
+    created = submit(owner, request_packet, principal_id="cloud-codex", idempotency_key="execute-once-00000000")
+    assert asyncio.run(Worker(platform, repository_run_executor=lifecycle).run_once())
+    observed = owner.get(created["id"], principal_id="cloud-codex", workspace_id="workspace-1")
+    with platform.db.sessions() as session:
+        saved = session.get(Job, created["id"])
+        error_code = saved.error_code
+    assert observed["state"] == "completed", error_code
+    assert observed["preview_id"] == expected_preview_id(request_packet, "cloud-codex")
+    assert observed["idempotency_key"] == "execute-once-00000000"
+    assert len(observed["attempts"]) == 1
+    assert observed["attempts"][0]["state"] == "completed"
+    assert set(observed["attempts"][0]) <= {"id", "state", "provider", "model", "started_at", "finished_at", "checkpoint_sha"}
+    assert observed["attempts"][0]["checkpoint_sha"] != base
+    assert len(observed["evidence"]) == 1
+    assert observed["evidence"][0]["uri"].startswith("sovite://repository-runs/")
+    assert len(observed["evidence"][0]["sha256"]) == 64
+    assert resolver.attempt_packets[0]["fence"]
+    assert start.is_set()
+    with platform.db.sessions() as session:
+        internal = session.get(Job, created["id"]).resolved["repository_run"]
+    assert internal["usage_usd"] == 0.25
+    assert internal["budget_reservations"] == [{"call_id": "provider-call-1", "reserved_usd": 0.5,
+        "state": "settled", "actual_usd": 0.25}]
+    assert internal["peak_concurrency"] == 1
+
+
+def test_default_worker_never_routes_repository_run_into_answer_only_runner(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    run = submit(owner, packet(base), principal_id="cloud-codex", idempotency_key="leave-queued-00000000")
+    assert not asyncio.run(Worker(platform).run_once())
+    assert owner.get(run["id"], principal_id="cloud-codex")["state"] == "queued"
+
+
+@pytest.mark.parametrize("overrun", ["cost", "concurrency"])
+def test_owner_budget_reserves_before_calls_and_stops_overruns(setup, tmp_path, overrun):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+
+    async def stub(worktree, goal, deadline, budget, authorize):
+        authorize()
+        if overrun == "cost":
+            budget.reserve_cost("call-one", 1.5)
+            budget.settle_cost("call-one", 1.5)
+            # This rejection happens before another paid operation can begin.
+            budget.reserve_cost("call-two", 0.6)
+        else:
+            budget.acquire_slot("parallel-one")
+            budget.acquire_slot("parallel-two")
+
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "bounded-state", stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    created = submit(owner, packet(base), principal_id="cloud-codex",
+                     idempotency_key=f"budget-{overrun}-00000000")
+    assert asyncio.run(Worker(platform, repository_run_executor=lifecycle).run_once())
+    observed = owner.get(created["id"], principal_id="cloud-codex")
+    assert observed["state"] == "blocked"
+    assert observed["attempts"][0]["state"] == "uncertain"
+    with platform.db.sessions() as session:
+        internal = session.get(Job, created["id"]).resolved["repository_run"]
+    if overrun == "cost":
+        assert internal["usage_usd"] == 1.5
+        assert [row["call_id"] for row in internal["budget_reservations"]] == ["call-one"]
+    else:
+        assert internal["active_slots"] == ["parallel-one"]
+        assert internal["peak_concurrency"] == 1
+
+
+@pytest.mark.parametrize("revocation", ["qualification", "limit"])
+def test_admitted_run_rechecks_live_owner_qualification_and_limits(setup, tmp_path, revocation):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    invoked = []
+
+    async def stub(*_args):
+        invoked.append(True)
+
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "reauth-state", stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    created = submit(owner, packet(base), principal_id="cloud-codex",
+                     idempotency_key=f"reauth-{revocation}-0000000")
+    if revocation == "qualification":
+        resolver.qualification_sha256 = "f" * 64
+    else:
+        resolver.max_cost_usd = 1.0
+    assert asyncio.run(Worker(platform, repository_run_executor=lifecycle).run_once())
+    observed = owner.get(created["id"], principal_id="cloud-codex")
+    assert observed["state"] == "failed"
+    assert observed["attempts"] == []
+    assert invoked == []
+
+
+def test_revocation_after_mutation_preserves_uncertain_attempt_and_candidate_workspace(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+
+    async def stub(worktree, _goal, _deadline, budget, authorize):
+        budget.acquire_slot("write")
+        (worktree / "src" / "main.txt").write_text("partial candidate\n")
+        git("add", "-A", cwd=worktree)
+        git("-c", "user.name=Run stub", "-c", "user.email=stub@example.invalid",
+            "commit", "-m", "partial", cwd=worktree)
+        resolver.qualification_ref = "replacement-profile-qualification"
+        authorize()
+
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "uncertain-state", stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    created = submit(owner, packet(base), principal_id="cloud-codex",
+                     idempotency_key="revoke-mid-run-0000000")
+    assert asyncio.run(Worker(platform, repository_run_executor=lifecycle).run_once())
+    observed = owner.get(created["id"], principal_id="cloud-codex")
+    assert observed["state"] == "blocked"
+    assert observed["attempts"][0]["state"] == "uncertain"
+    assert observed["evidence"] == []
+
+
+def test_cancel_during_mutable_attempt_becomes_uncertain_not_clean_cancel(setup, tmp_path):
+    _, platform = setup
+    platform.settings.lease_seconds = 1
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    started = asyncio.Event()
+
+    async def blocking_stub(worktree, _goal, _deadline, budget, authorize):
+        authorize()
+        budget.acquire_slot("writing")
+        (worktree / "src" / "main.txt").write_text("partial write\n")
+        started.set()
+        await asyncio.Event().wait()
+
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "cancel-state", blocking_stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    created = submit(owner, packet(base), principal_id="cloud-codex",
+                     idempotency_key="cancel-mid-run-0000000")
+    worker = Worker(platform, repository_run_executor=lifecycle)
+
+    async def cancel_run():
+        operation = asyncio.create_task(worker.run_once())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        owner.cancel(created["id"], principal_id="cloud-codex", workspace_id="workspace-1")
+        await asyncio.wait_for(operation, timeout=5)
+
+    asyncio.run(cancel_run())
+    observed = owner.get(created["id"], principal_id="cloud-codex")
+    assert observed["state"] == "blocked"
+    assert observed["attempts"][0]["state"] == "uncertain"
+
+
+def test_expired_worker_fence_blocks_mutable_run_replay(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    run = submit(owner, packet(base), principal_id="cloud-codex", idempotency_key="recover-blocked-00000000")
+    worker = Worker(platform, repository_run_executor=lambda *_: None)
+    job = worker.claim()
+    assert job is not None and job.id == run["id"]
+    assert not __import__("sovite.lease_service", fromlist=["replay_safe"]).replay_safe(job.resolved)
+    with platform.db.sessions.begin() as session:
+        row = session.get(Job, job.id)
+        row.lease_until = 0
+        resolved = copy.deepcopy(row.resolved)
+        resolved["repository_run"]["attempts"] = [{"id": "attempt-interrupted", "state": "interrupted"}]
+        row.resolved = resolved
+        lease = session.get(__import__("sovite.db", fromlist=["WorkerExecutionLease"]).WorkerExecutionLease, job.id)
+        lease.lease_until = 0
+    worker.recover_expired()
+    observed = owner.get(run["id"], principal_id="cloud-codex")
+    assert observed["state"] == "blocked"
+    assert observed["attempts"][0]["state"] == "uncertain"
