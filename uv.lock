@@ -1039,7 +1039,7 @@ wheels = [
 
 [[package]]
 name = "sovite-platform"
-version = "0.1.18"
+version = "0.1.19"
 source = { editable = "." }
 dependencies = [
     { name = "attrs" },

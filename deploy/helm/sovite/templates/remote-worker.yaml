@@ -54,11 +54,14 @@ spec:
                 secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_EXECUTION_TOKEN}
             - {name: SOVITE_EXECUTION_INSTANCE_ID, value: {{ .Values.remoteWorker.instanceId | quote }}}
             - {name: SOVITE_EXECUTION_JOURNAL_PATH, value: /state/execution.json}
+            - {name: SOVITE_REMOTE_WORKER_HEALTH_PATH, value: /tmp/remote-worker-heartbeat}
             - {name: SOVITE_EXECUTION_POLL_SECONDS, value: {{ .Values.remoteWorker.pollSeconds | quote }}}
             - {name: SOVITE_EXECUTION_LEASE_SECONDS, value: {{ .Values.remoteWorker.leaseSeconds | quote }}}
             {{- with include "sovite.remoteWorkerCredentialEnv" . }}{{ . | nindent 12 }}{{- end }}
           resources: {{ toYaml .Values.remoteWorker.resources | nindent 12 }}
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          readinessProbe: {exec: {command: [sovite-remote-worker-health]}, initialDelaySeconds: 5, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {exec: {command: [sovite-remote-worker-health]}, initialDelaySeconds: 20, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3}
           volumeMounts:
             - {name: state, mountPath: /state}
             - {name: tmp, mountPath: /tmp}
