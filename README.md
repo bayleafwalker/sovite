@@ -70,6 +70,17 @@ Merge the stanza in `config/codex.mcp.toml` into the caller's user-level Codex c
 
 The caller sees `list_candidates`, `begin_task`, `task_status` and `read_result`. Discovery lists only caller-visible grants; detailed metadata requires the installed discovery-class clearance. Its labelled observations are not reservations or live account/capacity checks. Preferences stay with the coordinator. A receipt is an independent server-created identifier, not a bearer capability. A `reference` contract returns receipt/status only; `class-aware` permits output only within the caller's clearance. Explicit `result_readers` give coordinator and reviewer identities scoped content access without operator-wide authority. Every content release rechecks current producing-job authority and artifact integrity. Operator tokens are rejected by MCP. See [caller discovery and attempt lineage](docs/CALLER-DISCOVERY.md).
 
+## Repository-session status
+
+An internal pre-launch workspace/evidence foundation now validates a closed
+`sovite-repository-session/v1` packet against a trusted owner binding, creates
+an exact-base detached Git worktree, and records candidate evidence. **There is
+no released repository-session API or worker launch capability.** This
+foundation is not wired to job admission, the execution lease API, native
+provider launchers, or merge authority, and it does not claim a hard process
+sandbox. See the [repository-session workspace decision record](docs/plans/2026-10-25-repository-session-workspace-foundation.md)
+and [the broader portable-workflow plan](docs/plans/2026-10-24-portable-agent-workflows.md).
+
 ## Configuration and runtime boundaries
 
 | Layer | Configuration | Implementation |

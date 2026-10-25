@@ -29,6 +29,13 @@ ownership; do not add a second queue, put a runner in Vuoro, or turn the inferen
 connector into a reverse command channel. Keep a possible package extraction
 as a later implementation decision. This plan does not enable remote execution.
 
+As of the 2026-10-25 workspace-foundation decision, an internal pre-launch
+utility validates an owner-resolved repository-session packet, prepares an
+exact-base detached worktree, and captures candidate evidence. It is not
+connected to job admission, the execution owner API, a worker, or a provider
+launcher. The repository-session API and launch capability remain unreleased;
+see the [workspace foundation decision record](2026-10-25-repository-session-workspace-foundation.md).
+
 ## Work packages
 
 - **SV-PW1 / contract and qualification:** shape a repository-session capability
