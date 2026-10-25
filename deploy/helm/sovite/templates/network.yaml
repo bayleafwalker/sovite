@@ -173,6 +173,10 @@ spec:
     - from:
         - podSelector:
             matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: worker}
+        {{- if .Values.remoteWorker.enabled }}
+        - podSelector:
+            matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, sovite.component: remote-worker}
+        {{- end }}
       ports: [{protocol: TCP, port: 8090}]
   egress:
     - to:
