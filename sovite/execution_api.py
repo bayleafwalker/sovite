@@ -76,11 +76,12 @@ def install_routes(app, platform, settings):
             principal=principal,
             instance_id=body.instance_id,
             operation_id=body.operation_id,
+            external_profile="agent-http-v1",
         )
 
     @app.post("/internal/execution/start")
     def start(body: ExecutionMutation, principal=Depends(authenticate)):
-        return service.leases.start(principal=principal, context=_context(body))
+        return service.leases.start(principal=principal, context=_context(body), external_profile="agent-http-v1")
 
     @app.post("/internal/execution/status")
     def status(body: ExecutionIdentity, principal=Depends(authenticate)):

@@ -97,7 +97,8 @@ def operation_request_digest(*, operation_kind: str, principal: ExecutionPrincip
         _request_error()
     value = dict(request)
     fields = {"instance_id", "operation_id"} if operation_kind == "pull" else {"instance_id", "operation_id", "job_id", "generation", "fence"}
-    if set(value) != fields:
+    profile = value.pop("profile", None)
+    if set(value) != fields or (profile is not None and profile != "agent-http-v1"):
         _request_error()
     _validate_instance(value["instance_id"])
     _validate_operation(value["operation_id"])
@@ -109,7 +110,7 @@ def operation_request_digest(*, operation_kind: str, principal: ExecutionPrincip
     try:
         return _digest({"schema_version": _OP_DIGEST_SCHEMA, "operation_kind": operation_kind,
                         "workload_id": principal.workload_id, "compute_id": principal.compute_id,
-                        "request": value})
+                        "request": {**value, **({"profile": profile} if profile is not None else {})}})
     except ValueError:
         _request_error()
 
@@ -199,11 +200,52 @@ class LeaseService:
         return (lease.workload_id == principal.workload_id and lease.instance_id == instance_id
             and job.lease_owner == owner and lease.generation == job.generation)
 
-    def reserve(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str) -> dict:
+    def _agent_http_recipe(self, job: Job) -> dict:
+        """Project only the first admitted external recipe from owner state."""
+        resolved = job.resolved
+        try:
+            harness = resolved["harness"]
+            agent_id = resolved["agent"]["id"]
+            connection = resolved.get("model", {}).get("connection", {})
+            timeout = resolved.get("grant", {}).get("timeout_seconds", self.platform.settings.job_timeout_seconds)
+            endpoint = harness.get("endpoint")
+            cancel_endpoint = harness.get("cancel_endpoint")
+            credential_env = harness.get("api_key_env")
+            idempotent = harness.get("idempotent", False)
+        except (AttributeError, KeyError, TypeError):
+            _fail("owner_unavailable", 503, "Execution owner state is unavailable")
+        if (harness.get("kind") != "agent-http" or connection.get("kind") == "model-gateway"
+            or not isinstance(agent_id, str) or not 1 <= len(agent_id) <= 96
+            or not isinstance(endpoint, str) or not 1 <= len(endpoint) <= 16000
+            or (cancel_endpoint is not None and (not isinstance(cancel_endpoint, str) or not 1 <= len(cancel_endpoint) <= 16000))
+            or (credential_env is not None and (not isinstance(credential_env, str)
+                or re.fullmatch(r"[A-Z][A-Z0-9_]{1,95}", credential_env) is None))
+            or type(idempotent) is not bool
+            or type(timeout) is not int or not 1 <= timeout <= 2_147_483_647):
+            _fail("execution_profile_unavailable", 409, "Execution profile is not available to this worker")
+        recipe = {"profile": "agent-http-v1", "agent_id": agent_id, "endpoint": endpoint,
+            "idempotent": idempotent, "timeout_seconds": timeout}
+        if cancel_endpoint is not None:
+            recipe["cancel_endpoint"] = cancel_endpoint
+        if credential_env is not None:
+            recipe["credential_env"] = credential_env
+        return recipe
+
+    def _external_reservation_response(self, job: Job, lease: WorkerExecutionLease) -> dict:
+        return {"state": "reserved", "job": {"job_id": job.id, "generation": job.generation,
+            "fence": lease.fence, "lease_until": lease.lease_until, "task": job.task,
+            "recipe": self._agent_http_recipe(job)}}
+
+    def reserve(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str,
+                external_profile: str | None = None) -> dict:
         """One caller-scoped reservation; no attempt, bearer or execution deadline."""
         _validate_principal(principal); _validate_instance(instance_id); _validate_operation(operation_id)
+        if external_profile not in {None, "agent-http-v1"}:
+            _request_error()
         owner = self._owner_for(principal, instance_id)
         request = {"instance_id": instance_id, "operation_id": operation_id}
+        if external_profile is not None:
+            request["profile"] = external_profile
         request_digest = operation_request_digest(operation_kind="pull", principal=principal, request=request)
         with self.platform.db.sessions.begin() as session:
             self.platform.db.authority_lock(session)
@@ -242,7 +284,8 @@ class LeaseService:
                     "task_sha256": task_hash, "resolved_sha256": resolved_hash}
                 if prior.result != expected_result:
                     _fail("execution_fenced", 409, "Execution reservation is no longer current")
-                response = self._reservation_response(job, lease)
+                response = (self._external_reservation_response(job, lease) if external_profile is not None
+                    else self._reservation_response(job, lease))
                 self._check_response_size(response)
                 return copy.deepcopy(response)
 
@@ -259,6 +302,7 @@ class LeaseService:
             running = Counter()
             for active_job in session.scalars(select(Job).where(Job.status == "running")):
                 running[active_job.resolved.get("model", {}).get("id")] += 1
+            incompatible_profile_job = False
             for job in candidates:
                 if job.resolved.get("compute", {}).get("id") != principal.compute_id:
                     continue
@@ -283,6 +327,17 @@ class LeaseService:
                     job.status, job.error_code, job.updated_at, job.finished_at = "blocked", exc.code, now, now
                     self.platform.db.audit(session, self.id, "task.dispatch_denied", job.id, {"code": exc.code})
                     continue
+                if external_profile is not None:
+                    try:
+                        self._agent_http_recipe(job)
+                    except PlatformError as exc:
+                        if exc.code != "execution_profile_unavailable":
+                            raise
+                        # The HTTP pull endpoint admits only its server-selected
+                        # profile. Leave incompatible work in the owner's queue
+                        # for local or separately qualified workers.
+                        incompatible_profile_job = True
+                        continue
                 model = job.resolved.get("model", {})
                 limit = model.get("max_concurrency")
                 if limit and running[model.get("id")] >= limit:
@@ -296,8 +351,9 @@ class LeaseService:
                     for field in ("workload_id", "instance_id", "fence", "generation", "phase", "lease_until", "execution_deadline", "created_at", "updated_at"):
                         setattr(existing_lease, field, getattr(lease, field))
                     lease = existing_lease
-                response = {"state": "reserved", "job": {"job_id": job.id, "generation": job.generation,
-                    "fence": fence, "lease_until": lease_until, "task": job.task, "resolved": copy.deepcopy(job.resolved)}}
+                response = (self._external_reservation_response(job, lease) if external_profile is not None else
+                    {"state": "reserved", "job": {"job_id": job.id, "generation": job.generation,
+                    "fence": fence, "lease_until": lease_until, "task": job.task, "resolved": copy.deepcopy(job.resolved)}})
                 self._check_response_size(response)
                 task_hash, resolved_hash = self._private_hashes(job)
                 job.status, job.lease_owner, job.lease_until, job.updated_at = "running", owner, lease_until, now
@@ -310,6 +366,8 @@ class LeaseService:
                 self.platform.db.audit(session, self.id, "task.execution_reserved", job.id,
                     {"generation": job.generation, "fence": fence, "workload_id": principal.workload_id, "instance_id": instance_id})
                 return copy.deepcopy(response)
+            if incompatible_profile_job:
+                _fail("execution_profile_unavailable", 409, "Execution profile is not available to this worker")
             idle = {"state": "idle"}
             session.add(WorkerExecutionOperation(workload_id=principal.workload_id, instance_id=instance_id,
                 operation_id=operation_id, operation_kind="pull", request_digest=request_digest,
@@ -333,9 +391,12 @@ class LeaseService:
         if size > _MAX_RESPONSE_BYTES:
             _fail("execution_payload_too_large", 413, "Execution payload exceeds the bounded response size")
 
-    def start(self, *, principal: ExecutionPrincipal, context: ExecutionContext) -> dict:
+    def start(self, *, principal: ExecutionPrincipal, context: ExecutionContext,
+              external_profile: str | None = None) -> dict:
         """Linearize once; only a first committed start may return execution bearer."""
         _validate_principal(principal)
+        if external_profile not in {None, "agent-http-v1"}:
+            _request_error()
         if not isinstance(context, ExecutionContext):
             _request_error()
         _validate_instance(context.instance_id); _validate_operation(context.operation_id)
@@ -346,6 +407,8 @@ class LeaseService:
         owner = self._owner_for(principal, context.instance_id)
         request = {"instance_id": context.instance_id, "operation_id": context.operation_id,
             "job_id": context.job_id, "generation": context.generation, "fence": context.fence}
+        if external_profile is not None:
+            request["profile"] = external_profile
         request_digest = operation_request_digest(operation_kind="start", principal=principal, request=request)
         with self.platform.db.sessions.begin() as session:
             self.platform.db.authority_lock(session)
@@ -376,6 +439,8 @@ class LeaseService:
             if job.cancel_requested:
                 _fail("cancelled", 409, "Execution was cancelled")
             self._authorize_current(session, job, now)
+            if external_profile is not None:
+                self._agent_http_recipe(job)
             if job.status != "running" or job.lease_owner != owner or job.lease_until is None:
                 _fail("execution_fenced", 409, "Execution context is no longer current")
             if isinstance(job.lease_until, bool) or not isinstance(job.lease_until, (int, float)) or not math.isfinite(job.lease_until) or job.lease_until <= now or lease.lease_until != job.lease_until:
