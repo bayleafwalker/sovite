@@ -26,6 +26,7 @@ class Settings:
     operator_token: str = ""
     authority_token: str = ""
     execution_workload_identity: str = "worker"
+    execution_tokens: dict[str, str] = field(default_factory=dict)
     authority_retention_days: int = 7
     author_token: str = ""
     activator_token: str = ""
@@ -55,12 +56,27 @@ class Settings:
     def __post_init__(self):
         if set(self.caller_tokens) & {"operator", "author", "activator"}:
             raise ValueError("Caller identities must not reuse administrative role names")
+        if not isinstance(self.execution_tokens, dict) or not all(
+            isinstance(identity, str)
+            and re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", identity)
+            and isinstance(token, str)
+            and len(token) >= 24
+            for identity, token in self.execution_tokens.items()
+        ):
+            raise ValueError("execution tokens must map workload identities to 24+ character credentials")
         if self.installation_id and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", self.installation_id):
             raise ValueError("SOVITE_INSTALLATION_ID must be an installation identifier of 1..160 characters")
         if type(self.authority_retention_days) is not int or self.authority_retention_days < 1:
             raise ValueError("authority retention days must be a positive integer")
         if self.authority_token and (len(self.authority_token) < 24 or self.authority_token in [self.operator_token, self.author_token, self.activator_token, *self.caller_tokens.values()]):
             raise ValueError("authority credential must be dedicated and contain at least 24 characters")
+        credentials = [*self.execution_tokens.values()]
+        if len(set(credentials)) != len(credentials) or any(
+            token in [self.operator_token, self.author_token, self.activator_token,
+                      self.authority_token, *self.caller_tokens.values()]
+            for token in credentials
+        ):
+            raise ValueError("execution credentials must be unique and separate from other roles")
         if self.setup_api_enabled and self.hosting_envelope_path:
             raise ValueError("The bounded setup API is local-only; hosted delegation is not qualified")
         if self.setup_api_enabled and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", self.setup_installation_id):
@@ -86,6 +102,12 @@ class Settings:
         caller_tokens = json.loads(env.get("SOVITE_CALLER_TOKENS", "{}")) if auth_role is None else {}
         if not isinstance(caller_tokens, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in caller_tokens.items()):
             raise ValueError("SOVITE_CALLER_TOKENS must be a JSON object mapping caller identities to tokens")
+        execution_tokens = json.loads(env.get("SOVITE_EXECUTION_TOKENS", "{}")) if auth_role is None else {}
+        if not isinstance(execution_tokens, dict) or not all(
+            isinstance(k, str) and isinstance(v, str)
+            for k, v in execution_tokens.items()
+        ):
+            raise ValueError("SOVITE_EXECUTION_TOKENS must map workload identities to credentials")
         defaults = cls.from_database_env()
         result = cls(
             database_url=defaults.database_url,
@@ -104,6 +126,7 @@ class Settings:
             caller_tokens=caller_tokens if auth_role is None else {},
             authority_token=env.get("SOVITE_AUTHORITY_TOKEN", "") if auth_role is None else "",
             execution_workload_identity=env.get("SOVITE_EXECUTION_WORKLOAD_IDENTITY", "worker"),
+            execution_tokens=execution_tokens if auth_role is None else {},
             authority_retention_days=int(env.get("SOVITE_AUTHORITY_RETENTION_DAYS", "7")),
             public_origin=env.get("SOVITE_PUBLIC_ORIGIN", defaults.public_origin).rstrip("/"),
             secure_cookies=truth("SECURE_COOKIES", True),

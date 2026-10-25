@@ -143,15 +143,27 @@ def sweep_terminal_authority(platform, session):
         marker.value = {"at": now}
 
 
-def provision_enrollment(platform, *, enrollment_id, binding_id, installation_id, role, certificate: bytes):
-    """Preprovisioned registry only. Certificate issuance/renewal belongs to PR 6."""
-    cert = x509.load_pem_x509_certificate(certificate)
+def _enrollment_certificate(certificate: bytes):
+    try:
+        cert = x509.load_pem_x509_certificate(certificate)
+        client_auth = ExtendedKeyUsageOID.CLIENT_AUTH in cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    except Exception:
+        raise ValueError("valid helper client certificate required") from None
     key = cert.public_key()
     if (cert.not_valid_before_utc.timestamp() > time.time() or cert.not_valid_after_utc.timestamp() <= time.time()
-            or ExtendedKeyUsageOID.CLIENT_AUTH not in cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value):
+            or not client_auth):
         raise ValueError("valid helper client certificate required")
     if not isinstance(key, Ed25519PublicKey):
         raise ValueError("Ed25519 enrollment required")
+    return (cert.not_valid_after_utc.timestamp(),
+            hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest(),
+            key.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode())
+
+
+def provision_enrollment(platform, *, enrollment_id, binding_id, installation_id, role, certificate: bytes,
+                         actor: str | None = None):
+    """Register a certificate issued by the separately managed helper CA."""
+    expires_at, certificate_digest, public_key = _enrollment_certificate(certificate)
     with platform.db.sessions.begin() as session:
         platform.db.authority_lock(session)
         if session.get(HelperEnrollment, enrollment_id):
@@ -161,8 +173,91 @@ def provision_enrollment(platform, *, enrollment_id, binding_id, installation_id
         if binding is None or binding.get("connection", {}).get("enrollment_role") != role:
             fail("model_identity_mismatch")
         session.add(HelperEnrollment(id=enrollment_id, binding_id=binding_id, installation_id=installation_id, role=role,
-                    expires_at=cert.not_valid_after_utc.timestamp(), certificate_digest=hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest(),
-                    public_key=key.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()))
+                    expires_at=expires_at, certificate_digest=certificate_digest, public_key=public_key))
+        if actor is not None:
+            platform.db.audit(session, actor, "helper.enrollment_provisioned", enrollment_id,
+                              {"binding_id": binding_id, "installation_id": installation_id, "role": role,
+                               "expires_at": expires_at})
+
+
+def rotate_enrollment(platform, enrollment_id: str, certificate: bytes, *, actor: str | None = None):
+    """Atomically replace an enrollment certificate; existing sessions are fenced."""
+    expires_at, certificate_digest, public_key = _enrollment_certificate(certificate)
+    with platform.db.sessions.begin() as session:
+        platform.db.authority_lock(session)
+        enrollment = session.get(HelperEnrollment, enrollment_id)
+        if enrollment is None or enrollment.revoked or enrollment.expires_at <= time.time():
+            fail("model_identity_mismatch")
+        if certificate_digest == enrollment.certificate_digest:
+            fail("enrollment_certificate_unchanged")
+        enrollment.certificate_digest = certificate_digest
+        enrollment.public_key = public_key
+        enrollment.expires_at = expires_at
+        for helper in session.scalars(select(HelperSession).where(
+                HelperSession.enrollment_id == enrollment_id, HelperSession.active == True)):
+            Authority(platform)._close(session, helper)
+        if actor is not None:
+            platform.db.audit(session, actor, "helper.enrollment_rotated", enrollment_id,
+                              {"binding_id": enrollment.binding_id, "expires_at": expires_at})
+        return {"enrollment_id": enrollment_id, "expires_at": expires_at}
+
+
+def revoke_enrollment(platform, enrollment_id: str, *, actor: str | None = None):
+    """Revoke an enrollment and terminate its current sessions in the same transaction."""
+    authority = Authority(platform)
+    with platform.db.sessions.begin() as session:
+        platform.db.authority_lock(session)
+        enrollment = session.get(HelperEnrollment, enrollment_id)
+        if enrollment is None:
+            fail("model_identity_mismatch")
+        enrollment.revoked = True
+        for helper in session.scalars(select(HelperSession).where(
+                HelperSession.enrollment_id == enrollment_id, HelperSession.active == True)):
+            authority._close(session, helper)
+        if actor is not None:
+            platform.db.audit(session, actor, "helper.enrollment_revoked", enrollment_id,
+                              {"binding_id": enrollment.binding_id})
+    return {"enrollment_id": enrollment_id, "revoked": True}
+
+
+def reconcile_helper_demand(platform, *, actor: str | None = None):
+    """Return per-binding helper capacity and fence sessions with expired/revoked enrollment."""
+    now = time.time()
+    authority = Authority(platform)
+    with platform.db.sessions.begin() as session:
+        platform.db.authority_lock(session)
+        bundle, generation = platform.active(session)
+        demand = []
+        fenced_sessions = 0
+        for binding in bundle.get("models", []):
+            if binding.get("connection", {}).get("kind") != "model-gateway":
+                continue
+            binding_id = binding["id"]
+            role = binding.get("connection", {}).get("enrollment_role")
+            runtime = session.get(BindingState, binding_id)
+            enrollments = list(session.scalars(select(HelperEnrollment).where(HelperEnrollment.binding_id == binding_id)))
+            for helper in session.scalars(select(HelperSession).where(
+                    HelperSession.binding_id == binding_id, HelperSession.active == True)):
+                enrollment = session.get(HelperEnrollment, helper.enrollment_id)
+                if (enrollment is None or enrollment.revoked or enrollment.expires_at <= now
+                        or not binding.get("enabled", True) or (runtime and runtime.inhibited)
+                        or helper.generation != generation or enrollment.role != role):
+                    authority._close(session, helper)
+                    fenced_sessions += 1
+            eligible = [row for row in enrollments if not row.revoked and row.expires_at > now
+                        and row.role == role]
+            inhibited = bool(runtime and runtime.inhibited)
+            active = session.scalar(select(HelperSession.id).where(
+                HelperSession.binding_id == binding_id, HelperSession.active == True)) is not None
+            demand.append({"binding_id": binding_id, "enabled": bool(binding.get("enabled", True)),
+                           "inhibited": inhibited,
+                           "eligible_enrollments": len(eligible), "active_session": active,
+                           "demand": "none" if not binding.get("enabled", True) or inhibited or active else
+                                     ("replacement" if eligible else "enrollment")})
+        if actor is not None:
+            platform.db.audit(session, actor, "helper.demand_reconciled", "helper-enrollments",
+                              {"bindings": len(demand), "fenced_sessions": fenced_sessions})
+        return demand
 
 
 class Authority:

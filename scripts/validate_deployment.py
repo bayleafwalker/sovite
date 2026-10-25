@@ -47,6 +47,11 @@ def render(helm, values, namespace="sovite", release="sovite"):
                     raise ValueError("Native harness has platform authority or private state credentials")
                 if spec.get("automountServiceAccountToken") is not False:
                     raise ValueError("Native harness inherits a Kubernetes API credential")
+            if role == "worker":
+                env = {item["name"] for item in container.get("env", [])}
+                forbidden = {"SOVITE_OPERATOR_TOKEN", "SOVITE_CALLER_TOKENS", "SOVITE_HARNESS_TOKEN"}
+                if env & forbidden:
+                    raise ValueError("Worker has control or native-harness authentication credentials")
     # This is an exact check on generated documents, not a claim of cluster enforcement.
     default_denies = [row for row in resources if row["kind"] == "NetworkPolicy" and row["metadata"]["name"].endswith("-default-deny")]
     if not default_denies or default_denies[0]["spec"].get("egress") != [] or default_denies[0]["spec"].get("ingress") != []:

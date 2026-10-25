@@ -1,10 +1,13 @@
 # Connector protocol v1 (PR 2)
 
 This implements transport-independent protocol and identity building blocks and a
-**development-only Phase 1 pilot**. There is no production gateway service,
-request authorization, execution ledger, worker/native routing or deployable
-connector chart yet (PRs 3–5). `require_model_adapter()` continues to reject every
-`model-gateway` binding. Nothing here makes that path enforced-capable.
+**development-only Phase 1 pilot**. The source now also contains gateway and
+execution-owner implementations plus an opt-in P08 remote `tool-agent` Chat
+route. These paths remain local candidates: there is no qualified or deployed
+gateway, no default/native worker cutover, and no deployable connector chart.
+The unscoped `require_model_adapter()` still rejects `model-gateway` bindings;
+the remote candidate requires a per-run capability-bound adapter. Nothing here
+makes that path enforced-capable.
 
 The helper opens one outbound TLS 1.3 WebSocket with a client certificate and
 subprotocol `sovite-inference.v1`. Compression, ambient proxies, redirects and
@@ -224,13 +227,17 @@ rotation and revocation are later-PR/deployment evidence and have not been run.
 
 ## Gateway authority boundary (PR 3)
 
-Status: **not yet routed from workers (PR 4)**. The gateway is a separate
-`sovite gateway` entrypoint with reduced configuration, a workload HTTPS inference
-listener and an mTLS TLS 1.3 WebSocket connector. It talks to control exclusively
-through the private workload-authenticated authority HTTP API. See
+Status: **local P08 remote-worker candidate routes tool-agent Chat requests**.
+The default SQL/S3 worker and native harnesses remain unrouted. The gateway is a
+separate `sovite gateway` entrypoint with reduced configuration, a workload HTTPS
+inference listener and an mTLS TLS 1.3 WebSocket connector. It talks to control
+exclusively through the private workload-authenticated authority HTTP API. See
 [PLATFORM-SPEC](PLATFORM-SPEC.md#gateway-and-execution-authority-pr-3) for the seven
 transactional checks and [OPERATIONS](OPERATIONS.md#isolated-model-gateway-pr-3)
-for configuration. No helper credential is accepted on either workload surface.
+for configuration. The opt-in remote worker sends one-time execution capability,
+exact job/fence and a separate inference workload bearer; no helper credential is
+accepted on either workload surface. This local source route has not been
+disposable- or live-qualified.
 
 After certificate fingerprint lookup, control reserves a single session and
 supplies a fresh challenge. The gateway calls `verify_connection` on `hello`, and

@@ -12,7 +12,10 @@ from sqlalchemy import select
 
 from connector_support import BODY
 from model_support import authority_env, connected, consume, database, infer, v2_bundle
-from sovite.authority import CAPABILITY_SECONDS, checksum
+from sovite.authority import (CAPABILITY_SECONDS, checksum, provision_enrollment,
+                              reconcile_helper_demand, revoke_enrollment, rotate_enrollment)
+from sovite.db import HelperEnrollment
+from test_connector_helper import certificates
 from sovite.connector.identity import digest
 from sovite.db import BindingState, ExecutionAuthority, HelperSession, Job, MetadataRow, RequestLedger
 from sovite.gateway.client import AuthorityClient, GatewayError
@@ -226,6 +229,54 @@ def test_INFERENCE_ONLY_authority_rejects_operator_caller_helper_credentials(aut
             response = await client.post('/internal/authority/start', json={'gateway_id': 'test'}, headers={'Authorization': 'Bearer ' + env.settings.authority_token})
             assert response.status_code == 200
     asyncio.run(scenario())
+
+
+def test_HELPER_LIFECYCLE_rotation_revocation_and_demand_are_fenced(authority_env, tmp_path):
+    env = authority_env
+    (tmp_path / 'old').mkdir()
+    certificates(tmp_path / 'old')
+    provision_enrollment(env.platform, enrollment_id='lifecycle-enrollment', binding_id=env.model['id'],
+                         installation_id='lifecycle-installation', role=env.role['id'],
+                         certificate=(tmp_path / 'old' / 'helper.pem').read_bytes())
+    with env.platform.db.sessions.begin() as session:
+        session.add(HelperSession(id='lifecycle-session', binding_id=env.model['id'], enrollment_id='lifecycle-enrollment',
+                                  gateway_id='test-gateway', generation=env.job.generation, challenge='n' * 64,
+                                  active=True, last_seen=time.time()))
+    assert reconcile_helper_demand(env.platform) == [{
+        'binding_id': env.model['id'], 'enabled': True, 'inhibited': False, 'eligible_enrollments': 1,
+        'active_session': True, 'demand': 'none'}]
+
+    (tmp_path / 'new').mkdir()
+    certificates(tmp_path / 'new')
+    rotate_enrollment(env.platform, 'lifecycle-enrollment', (tmp_path / 'new' / 'helper.pem').read_bytes())
+    with env.platform.db.sessions() as session:
+        old_session = session.get(HelperSession, 'lifecycle-session')
+        enrollment = session.get(HelperEnrollment, 'lifecycle-enrollment')
+        assert not old_session.active and not enrollment.revoked
+        assert enrollment.certificate_digest != hashlib.sha256(
+            (tmp_path / 'old' / 'helper.pem').read_bytes()).hexdigest()
+    assert reconcile_helper_demand(env.platform)[0]['demand'] == 'replacement'
+
+    with env.platform.db.sessions.begin() as session:
+        session.add(BindingState(id=env.model['id'], inhibited=True, reason='operator stop', updated_at=time.time()))
+    inhibited_demand = reconcile_helper_demand(env.platform)[0]
+    assert inhibited_demand['eligible_enrollments'] == 1
+    assert inhibited_demand['active_session'] is False
+    assert inhibited_demand['inhibited'] is True
+    assert inhibited_demand['demand'] == 'none'
+    with env.platform.db.sessions.begin() as session:
+        session.get(BindingState, env.model['id']).inhibited = False
+
+    with env.platform.db.sessions.begin() as session:
+        session.add(HelperSession(id='lifecycle-session-2', binding_id=env.model['id'], enrollment_id='lifecycle-enrollment',
+                                  gateway_id='test-gateway', generation=env.job.generation, challenge='m' * 64,
+                                  active=True, last_seen=time.time()))
+    assert revoke_enrollment(env.platform, 'lifecycle-enrollment') == {'enrollment_id': 'lifecycle-enrollment', 'revoked': True}
+    with env.platform.db.sessions() as session:
+        assert not session.get(HelperSession, 'lifecycle-session-2').active
+        assert session.get(HelperEnrollment, 'lifecycle-enrollment').revoked
+    demand = reconcile_helper_demand(env.platform)[0]
+    assert demand['eligible_enrollments'] == 0 and demand['demand'] == 'enrollment'
 
 
 def test_authority_settings_reject_credential_reuse():

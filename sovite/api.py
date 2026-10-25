@@ -115,33 +115,42 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             worker_task.cancel()
             await asyncio.gather(worker_task, return_exceptions=True)
 
-    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.16", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.18", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.platform = platform
     from .authority_api import install_routes
     install_routes(app, platform, settings)
+    from .execution_api import install_routes as install_execution_routes
+    install_execution_routes(app, platform, settings)
 
     @app.middleware("http")
     async def bounds_and_headers(request: Request, call_next):
+        execution_route = request.url.path.startswith("/internal/execution/v1/")
         if request.url.path == "/mcp" and request.headers.get("origin") and request.headers["origin"].rstrip("/") != settings.public_origin:
             return JSONResponse({"detail": {"code": "origin_denied", "message": "Request origin is not permitted"}}, status_code=403)
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             origin = request.headers.get("origin")
             if origin and origin.rstrip("/") != settings.public_origin:
-                return JSONResponse({"detail": {"code": "origin_denied", "message": "Request origin is not permitted"}}, status_code=403)
-            limit = settings.max_request_bytes + 4096
+                code = "execution_scope_denied" if execution_route else "origin_denied"
+                return JSONResponse({"detail": {"code": code, "message": "Request origin is not permitted"}}, status_code=403)
+            limit = 65_536 if execution_route else settings.max_request_bytes + 4096
             length = request.headers.get("content-length")
             try:
                 if length is not None and int(length) > limit:
-                    return JSONResponse({"detail": {"code": "request_too_large", "message": "Request exceeds the configured limit"}}, status_code=413)
+                    code = "execution_payload_too_large" if execution_route else "request_too_large"
+                    return JSONResponse({"detail": {"code": code, "message": "Request exceeds the configured limit"}}, status_code=413)
             except ValueError:
-                return JSONResponse({"detail": {"code": "invalid_request", "message": "Invalid request"}}, status_code=400)
+                status_code = 422 if execution_route else 400
+                return JSONResponse({"detail": {"code": "invalid_request", "message": "Invalid request"}}, status_code=status_code)
             data = bytearray()
             async for part in request.stream():
                 data.extend(part)
                 if len(data) > limit:
-                    return JSONResponse({"detail": {"code": "request_too_large", "message": "Request exceeds the configured limit"}}, status_code=413)
+                    code = "execution_payload_too_large" if execution_route else "request_too_large"
+                    return JSONResponse({"detail": {"code": code, "message": "Request exceeds the configured limit"}}, status_code=413)
             request._body = bytes(data)
-            if request.url.path.startswith("/api/workflows/") or request.url.path == "/api/output-releases":
+            if (request.url.path.startswith("/api/workflows/")
+                or request.url.path == "/api/output-releases"
+                or request.url.path.startswith("/internal/execution/")):
                 from .hosting import bounded_json
                 try:
                     bounded_json(request._body, limit)
@@ -158,10 +167,26 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     @app.exception_handler(PlatformError)
     async def platform_error(request: Request, exc: PlatformError):
+        execution_route = request.url.path.startswith("/internal/execution/v1/")
         detail = {"code": exc.code, "message": exc.message}
-        if exc.receipt is not None:
+        if exc.receipt is not None and not execution_route:
             detail["receipt"] = exc.receipt
-        return JSONResponse({"detail": detail}, status_code=exc.status)
+        status_code = exc.status
+        if execution_route:
+            try:
+                from .execution_contract.runtime import OPERATIONS, load_bundle
+                operation_name = request.url.path.rsplit("/", 1)[-1]
+                operation = OPERATIONS[operation_name]
+                contract = load_bundle()
+                contract.validate_response(operation, status_code, {"detail": detail})
+                cap = contract.manifest["operations"][operation]["responseMaxBytes"][str(status_code)]
+                if len(json.dumps({"detail": detail}, ensure_ascii=False,
+                                  allow_nan=False, separators=(",", ":")).encode("utf-8")) > cap:
+                    raise ValueError
+            except Exception:
+                status_code = 503
+                detail = {"code": "owner_unavailable", "message": "Execution owner state is unavailable"}
+        return JSONResponse({"detail": detail}, status_code=status_code)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
@@ -231,6 +256,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
 
     from .setup_api import install_routes as install_setup_routes
     install_setup_routes(app, platform, operator)
+    from .helper_admin_api import install_routes as install_helper_admin_routes
+    install_helper_admin_routes(app, platform, operator)
 
     @app.post("/api/workflows/validate")
     async def validate_workflow(body: WorkflowDraft, auth=Depends(workflow_author)):
@@ -488,7 +515,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             if "protocolVersion" in params and not isinstance(requested, str):
                 return rpc_error(-32602, "Invalid parameters")
             version = requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-11-25"
-            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " task gateway", "version": "0.1.16"}, "instructions": "This service accepts private and public work under installed class and boundary policy. Class-aware grants return content to cleared callers; otherwise results require an explicitly scoped reader. Reference grants preserve receipt-only delivery."})
+            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " task gateway", "version": "0.1.18"}, "instructions": "This service accepts private and public work under installed class and boundary policy. Class-aware grants return content to cleared callers; otherwise results require an explicitly scoped reader. Reference grants preserve receipt-only delivery."})
         if method == "ping":
             return reply({})
         if method == "tools/list":

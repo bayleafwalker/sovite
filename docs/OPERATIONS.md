@@ -239,9 +239,11 @@ what was actually observed; commissioning evidence is not production evidence.
 
 ## Isolated model gateway (PR 3)
 
-Status: **not yet routed from workers (PR 4)**. Do not enable it as an enforced
-worker/native inference route. No chart, worker egress, retry accounting, enrollment
-issuer or demand cutover is included in this stage.
+Status: **an opt-in P08 remote-worker candidate routes tool-agent Chat requests
+through the inference listener; default and native workers remain unrouted**.
+Do not enable it as an enforced route. The local candidate has no chart or
+worker egress policy, and does not qualify retry accounting, enrollment
+issuance or demand cutover.
 
 Run `sovite db migrate` with the migration role before upgrading runtime processes.
 Schema version 3 adds `execution_authority`, `helper_enrollments`, `helper_sessions`

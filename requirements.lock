@@ -48,5 +48,6 @@ websockets==15.0.1
 wheel==0.48.0
 
 vuoro-adapter-kit @ https://github.com/bayleafwalker/vuoro/releases/download/vuoro-adapter-kit-v0.2.2/vuoro_adapter_kit-0.2.2-py3-none-any.whl#sha256=6d78c2f05a8e3a72c480b0e333232bc90ccee1a36b71fba09f5bc8fc8e5377fa
+vuoro-contracts @ https://github.com/bayleafwalker/vuoro/releases/download/vuoro-contracts-v0.2.0/vuoro_contracts-0.2.0-py3-none-any.whl#sha256=7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9
 PyJWT==2.15.1
 vuoro-service @ https://github.com/bayleafwalker/vuoro/releases/download/vuoro-service-v0.1.97/vuoro_service-0.1.97-py3-none-any.whl#sha256=38b08a352617d88592dbc93da0f91afc1d5f5f230729761ca7e041de9fb32a56

@@ -78,6 +78,26 @@ def test_database_lifecycle_settings_reach_control_and_worker(tmp_path):
         assert render(tmp_path, {'database': database}).returncode != 0
 
 
+def test_worker_and_native_harness_do_not_receive_control_auth_tokens(tmp_path):
+    result = render(tmp_path, {'nativeHarness': {'enabled': True}})
+    assert result.returncode == 0, result.stderr
+    rows = [row for row in yaml.safe_load_all(result.stdout) if row]
+    deployments = {
+        row['metadata']['name']: row['spec']['template']['spec']['containers'][0]
+        for row in rows
+        if row['kind'] == 'Deployment'
+    }
+    envs = {
+        name: {entry['name'] for entry in container['env']}
+        for name, container in deployments.items()
+    }
+
+    assert {'SOVITE_OPERATOR_TOKEN', 'SOVITE_CALLER_TOKENS'} <= envs['sovite-control']
+    assert not ({'SOVITE_OPERATOR_TOKEN', 'SOVITE_CALLER_TOKENS', 'SOVITE_HARNESS_TOKEN'} & envs['sovite-worker'])
+    assert not ({'SOVITE_DATABASE_URL', 'SOVITE_OPERATOR_TOKEN', 'SOVITE_CALLER_TOKENS'} & envs['sovite-native-harness'])
+    assert 'SOVITE_HARNESS_TOKEN' in envs['sovite-native-harness']
+
+
 def test_external_model_hosts_need_exact_cidrs_and_provisioned_credentials(tmp_path):
     peer = {'hosts': ['192.0.2.20'], 'cidrs': ['192.0.2.20/32'], 'ports': [8021]}
     values = {'networkPolicy': {'modelPeers': [peer]}, 'modelCredentials': [{'env': 'MODEL_HOST_TOKEN'}], 'nativeHarness': {'enabled': True}}

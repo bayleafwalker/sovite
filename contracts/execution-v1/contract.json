@@ -1,0 +1,21 @@
+{
+  "contractVersion": "1.0.0",
+  "exposures": {
+    "executionPull": "internal",
+    "executionStart": "internal",
+    "executionRenew": "internal",
+    "executionStatus": "internal",
+    "executionHandback": "internal",
+    "executionComplete": "internal",
+    "executionLookup": "internal"
+  },
+  "byteBounds": {
+    "executionPull": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 4194304, "403": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}},
+    "executionStart": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 65536, "403": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}},
+    "executionRenew": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 4096, "403": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}},
+    "executionStatus": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 4096, "403": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}},
+    "executionHandback": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 4096, "403": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}},
+    "executionComplete": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 4096, "403": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}},
+    "executionLookup": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 4096, "403": 4096, "404": 4096, "413": 4096, "422": 4096, "503": 4096}}
+  }
+}

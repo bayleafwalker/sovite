@@ -79,27 +79,59 @@ The worker sends the following exact body to the configured agent-http service's
 
 The request uses the configured bearer token and `Idempotency-Key: durable-job-id`. Set `SOVITE_HARNESS_AGENT_ID` and `SOVITE_BUNDLE_PATH` on the fixed service. When the platform uses a hosting envelope, load the same `SOVITE_HOSTING_ENVELOPE`; the service compiles that exact generation and rejects raw-bundle or different-envelope revisions. This does not broaden the narrower service-only hosting profile, which permits internal model-gateway connections only.
 
-An agent-http harness served here declares exactly one native capability: native-codex, native-claude or native-opencode. Agents have an empty declared HTTP tool list; the service does not translate HTTP bindings into native authority. Multiple fixed agents require separate services. Enforced native executables cannot run inline in the worker. The service receives no platform database, artifact-store or qualification signing credentials. `SOVITE_HARNESS_TOKEN` is separate from subscription credentials and operator/caller tokens.
+## Remote helper enrollment administration
 
-The ledger stores request digest and execution state. An exact completed replay returns its stored result; changed input under the same task ID is rejected. In-progress or uncertain work is not restarted. `POST /cancel` accepts `{task_id,agent_id,configuration_revision}` and requests cancellation of queued or running work. Remote cancellation is best effort; worker release authority remains independently checked.
+The operator API exposes `POST /api/helpers/enrollments/{enrollment_id}` to provision an enrollment, `POST /api/helpers/enrollments/{enrollment_id}/rotate`,
+`POST /api/helpers/enrollments/{enrollment_id}/revoke`, and
+`POST /api/helpers/reconcile`. Each route requires the existing operator identity;
+caller and gateway credentials are not accepted. Provisioning accepts bounded `binding_id`, `installation_id`, `role`, and `certificate_pem` fields and returns only `{enrollment_id,provisioned:true}`. The selected active binding must declare that enrollment role. It records a client certificate that has already been issued by the separately managed helper CA. Rotation accepts a bounded
+`certificate_pem` body containing a client certificate that has already been
+issued by the separately managed helper CA. The CA and private signing key stay
+outside Sovite. Sovite validates client-certificate usage and enrollment key
+type, provisions the enrollment or atomically rotates its certificate, and
+fences sessions using the prior certificate. Revocation marks the enrollment revoked and fences its active
+sessions in the same transaction. Reconciliation returns per-binding helper
+demand and fences sessions whose enrollment expired or was revoked, or whose
+binding generation/role is no longer current. Mutations and demand reconciliation
+append actor-attributed durable audit events in their state transaction.
 
-Native output has `{kind,answer,agent_id,model_id,generation,isolation}`, with kind native-codex-result, native-claude-result or native-opencode-result. New subscription/Go output includes model identity with `immutable_weights_verified:false`. The worker stores the artifact and derives release from trusted state and the grant contract. Readiness checks only the fixed configuration and binary; live authentication, entitlement and provider compatibility require a qualified task.
+These routes do not implement CSR issuance or a helper renewal handshake. They
+do not return certificate material or echo certificate parsing errors.
 
-### Native authentication and provider selection
+## Remote worker execution API
 
-| Route | Model declaration | Harness credential declaration |
-| --- | --- | --- |
-| Codex subscription | adapter codex-subscription; exact model; identity_protocol native-subscription; public cloud destination | `authentication: {mode: subscription, credential_file_env: SOVITE_CODEX_AUTH_FILE}` |
-| Claude subscription | adapter claude-subscription; exact model; identity_protocol native-subscription; public cloud destination | `authentication: {mode: subscription, credential_env: SOVITE_CLAUDE_OAUTH_TOKEN}` |
-| OpenCode Go | adapter opencode-go; model deepseek-v4.1-flash; identity_protocol provider-service; endpoint https://opencode.ai/inference/go/openai/v1; wire_api chat; api_key_env SOVITE_OPENCODE_GO_KEY | No subscription-authentication object; the model's explicit environment reference supplies the Go subscription key. |
+The versioned external worker API exposes `POST /internal/execution/v1/{pull,
+start,renew,status,handback,complete,lookup}`. It mounts only when dedicated
+`SOVITE_EXECUTION_TOKENS` are configured and the Python 3.12+ generated-contract
+runtime is installed. Tokens map configured workload identities to unique
+values of at least 24 characters. `compute_id` comes from `SOVITE_COMPUTE_ID`;
+neither identity is accepted in request JSON. Execution tokens must be distinct
+from operator, caller, author, activator, and inference-authority credentials.
 
-Subscription declarations reject API endpoint/key fields and fake weight digests. Codex uses its native ChatGPT provider and exact model; Claude uses its explicit subscription OAuth token. Enforced destination hosts include chatgpt.com and auth.openai.com for Codex, api.anthropic.com for Claude, or opencode.ai for Go. Unavailable routes fail; Sovite selects no replacement model or account.
+External pull and start use only the admitted `agent-http-v1` profile. Pull
+returns a task and a minimal recipe projection with agent id, endpoint,
+optional credential environment-variable name, idempotency flag, and timeout.
+It does not return the resolved model recipe or any credential value. Tool-agent
+and gateway jobs remain available to existing local worker routes and are not
+reserved by this external profile. Repeated start never returns a start
+capability. Generated request and successful response schemas are loaded from
+the installed package's authenticated resources and validated at both owner and
+client boundaries.
 
-Each new invocation gets a fresh home, XDG directories, task directory and allowlisted environment. Codex copies only the explicitly selected, protected auth.json, holds a local sidecar lock, and atomically persists valid refreshed credentials after success, failure or cancellation. It refuses to overwrite an already changed source. Operators serialize the profile across hosts and coordinate rotation using the lock. Claude receives only the referenced token. Ambient API keys, provider URLs and home settings are not forwarded.
+`renew` and `handback` use the exact execution tuple plus a unique
+`operation_id`. `complete` uses that tuple plus `operation_id`, an outcome, an
+optional finite error code, and an optional `result_json` string containing one
+JSON object. These mutations journal their exact request digest in the existing
+owner operation table; same-key retries return the committed result and changed
+requests conflict. `status` and `lookup` are read-only, workload-scoped
+observations. All requests have a 65,536-byte ceiling, with generated per
+operation response bounds and no truncation.
 
-The new launchers provide answer-only inference. Codex disables shell/image tools, apps, subagents, hooks and remote plugin discovery with a read-only sandbox. Claude uses bare noninteractive mode, an empty tool set and strict empty MCP configuration. OpenCode requires v2, runs a standalone server, permits only opencode-go, denies tools/integrations and uses the exact model for maintenance inference too. Temporary state is removed after execution. These controls do not replace installed machine policy, deployment isolation, destination enforcement or qualification.
-
-Go's direct tool-agent path supports Sovite's declared tools. It sends a job-stable x-opencode-session, an identifying User-Agent and the exact model, and rejects a response naming another model.
+Status reports only the exact fence's state, finite Job status, phase, lease
+expiry, and deadline. Lookup returns journal metadata without private request
+or response bodies. The API retains the existing owner transaction, audit,
+replay, cancellation, recovery, and authorization guards; no second queue or
+lease authority is introduced.
 
 ## Execution bounds
 
