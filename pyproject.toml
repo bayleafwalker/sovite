@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sovite-platform"
-version = "0.1.18"
+version = "0.1.19"
 description = "A provisioned platform for mixed agent estates with explicit flow contracts"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,6 +26,7 @@ test = [
 [project.scripts]
 sovite = "sovite.cli:main"
 sovite-remote-worker = "sovite.remote_worker_cli:main"
+sovite-remote-worker-health = "sovite.remote_worker_health:main"
 
 [tool.setuptools.packages.find]
 include = ["sovite*"]

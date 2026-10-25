@@ -66,9 +66,12 @@ async def _run(
 ) -> None:
     from .execution_client import ExecutionClient
     from .remote_journal import ExecutionJournal
+    from .remote_worker_health import _health_path, maintain_heartbeat
     from .worker import RemoteWorker
 
     journal = ExecutionJournal(journal_path)
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = None
     try:
         worker = RemoteWorker(
             ExecutionClient.from_env(verify=ca_bundle or True),
@@ -80,8 +83,17 @@ async def _run(
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, worker.stop.set)
+        heartbeat_task = asyncio.create_task(maintain_heartbeat(_health_path(), heartbeat_stop))
         await worker.run()
     finally:
+        heartbeat_stop.set()
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        try:
+            _health_path().unlink()
+        except (FileNotFoundError, ValueError):
+            pass
         journal.close()
 
 

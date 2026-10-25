@@ -27,7 +27,7 @@ x-control-env: &control-env
   SOVITE_EXECUTION_TOKENS: "${SOVITE_EXECUTION_TOKENS:-{}}"
 
 x-runtime: &runtime
-  image: ${SOVITE_IMAGE:-sovite-platform:0.1.18}
+  image: ${SOVITE_IMAGE:-sovite-platform:0.1.19}
   build:
     context: .
     target: runtime
@@ -79,7 +79,7 @@ services:
       start_period: 30s
     stop_grace_period: 30s
   remote-worker:
-    image: ${SOVITE_IMAGE:-sovite-platform:0.1.18}
+    image: ${SOVITE_IMAGE:-sovite-platform:0.1.19}
     build:
       context: .
       target: runtime
