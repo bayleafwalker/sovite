@@ -18,9 +18,17 @@ from .adapters import AdapterRunner, RuntimeFailure
 from .db import canonical
 from .hosting import compile_bundle, load_envelope
 from .policy import load_bundle, native_harness_kind, resolve_recipe
+from .runtime_boundary import CONTROL_OR_STORE_ENV
 
 
 def create_app() -> FastAPI:
+    forbidden = [name for name in (*CONTROL_OR_STORE_ENV, "SOVITE_EXECUTION_TOKEN")
+                 if os.environ.get(name)]
+    if forbidden:
+        # Check before loading configuration, creating a ledger, or starting a
+        # runner. Values never appear in this fixed diagnostic.
+        raise ValueError("Native harness requires an isolated environment; remove control or artifact authority: "
+                         + ", ".join(forbidden))
     bundle, _ = load_bundle(os.environ.get("SOVITE_BUNDLE_PATH", "config/platform.ollama.yaml"))
     bundle, generation = compile_bundle(bundle, load_envelope(os.environ.get("SOVITE_HOSTING_ENVELOPE") or None))
     agent_id = os.environ.get("SOVITE_HARNESS_AGENT_ID", "code-review")

@@ -46,6 +46,15 @@ the existing allow-listed environment, which excludes the execution bearer.
 This command is an explicit source candidate; existing `sovite worker` and
 embedded-worker composition remain unchanged.
 
+The separately deployed native harness now also refuses inherited control
+database/artifact configuration, operator/author/activator/caller authority,
+execution-owner tokens, qualification private keys and ambient AWS credential
+chains before loading its bundle or creating its task ledger. It still accepts
+its own harness token, approved model-provider credentials, public qualification
+configuration and the hosting envelope used to bind its fixed recipe. This is
+a startup boundary, not evidence that a particular external host is isolated or
+that the default SQL/S3 worker has been replaced.
+
 Gateway-backed execution in the opt-in remote worker is limited to `tool-agent`
 jobs with an `openai-compatible` Chat binding. Configure the fixed HTTPS
 inference origin with `SOVITE_INFERENCE_URL`, a distinct workload bearer with
