@@ -10,7 +10,9 @@ from sovite.resource_gateway_read import ResourceGatewayRead, ResourceReadError
 REQUEST = {"workspace_id": "workspace-a", "resource_domain_id": "domain-a", "observation_id": "pod-health"}
 CONTEXT = {"tenant_id": "tenant-a", "principal_id": "alice", "attempt_id": "attempt-1", "fence": "fence-1"}
 BINDING = REQUEST | {"tenant_id": "tenant-a", "namespace": "application", "pod_name": "web-0",
-    "tool": {"kind": "kubernetes-read", "namespace": "application", "allowed_operations": ["list-pods"]},
+    "tool": {"kind": "kubernetes-read", "namespace": "application", "allowed_operations": ["list-pods"],
+             "endpoint": "https://cluster.invalid", "token_file": "/synthetic/no-token",
+             "api_key_env": "SOVITE_TEST_READ_TOKEN"},
     "source_class": "C2", "output_class": "C1", "destination": "workbench",
     "output_contract_id": "pod-projection", "output_contract_revision": "sha256:" + "a" * 64}
 RAW = {"kind": "PodList", "items": [{"metadata": {"name": "web-0", "namespace": "application",
@@ -162,3 +164,59 @@ def test_contract_revocation_during_release_blocks_return(setup):
         return True
     gateway.release = change_contract
     with pytest.raises(ResourceReadError, match="binding_changed"): read(gateway)
+
+
+@pytest.mark.parametrize("endpoint", [None, "http://cluster.invalid", "http://bob:literal-secret@cluster.invalid",
+    "https://bob:literal-secret@cluster.invalid", "https://cluster.invalid/path", "https://cluster.invalid?x=1",
+    "https://cluster.invalid#fragment", "https://cluster.invalid:", "https://cluster.invalid:0",
+    "https://cluster.invalid:65536", "https://", "https://cluster.invalid\n", "https://cluster.invalid ",
+    "https://cluster.invalid\\evil", "https://cluster.invalid?", "https://cluster.invalid#"])
+def test_invalid_endpoint_is_refused_before_any_http_or_credential_read(setup, monkeypatch, endpoint):
+    import httpx
+    from sovite.adapters import AdapterRunner
+    catalog, _, _, gateway = setup
+    if endpoint is None: del catalog.binding["tool"]["endpoint"]
+    else: catalog.binding["tool"]["endpoint"] = endpoint
+    catalog.binding["tool"]["api_key_env"] = "SOVITE_TEST_READ_TOKEN"
+    monkeypatch.setenv("SOVITE_TEST_READ_TOKEN", "synthetic-token")
+    calls = []
+    gateway.runner = AdapterRunner(transport=httpx.MockTransport(lambda request: calls.append(request) or httpx.Response(200, json=RAW)))
+    with pytest.raises(ResourceReadError, match="binding_unavailable") as error: read(gateway)
+    assert calls == []
+    assert "literal-secret" not in str(error.value) and "synthetic-token" not in str(error.value)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("id", 4), ("api_key_env", []), ("api_key_env", "BAD=VALUE"),
+    ("token_file", None), ("token_file", "relative"), ("token_file", "/tmp/contains\nnewline"),
+    ("ca_file", False), ("ca_file", "relative"), ("timeout_seconds", True),
+    ("timeout_seconds", 0), ("timeout_seconds", -1), ("timeout_seconds", 301),
+    ("timeout_seconds", 1.5), ("timeout_seconds", float("inf")),
+])
+def test_malformed_tool_config_refuses_before_target(setup, field, value):
+    catalog, runner, _, gateway = setup
+    catalog.binding["tool"][field] = value
+    with pytest.raises(ResourceReadError, match="binding_unavailable"): read(gateway)
+    assert runner.calls == []
+
+
+def test_missing_explicit_credential_reference_refuses_before_target(setup):
+    catalog, runner, _, gateway = setup
+    del catalog.binding["tool"]["token_file"]
+    with pytest.raises(ResourceReadError, match="binding_unavailable"): read(gateway)
+    assert runner.calls == []
+
+
+def test_missing_explicit_environment_reference_refuses_before_target(setup):
+    catalog, runner, _, gateway = setup
+    del catalog.binding["tool"]["api_key_env"]
+    with pytest.raises(ResourceReadError, match="binding_unavailable"): read(gateway)
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("endpoint", ["https://cluster.invalid/", "https://cluster.invalid:6443", "https://[::1]:6443/"])
+def test_valid_explicit_https_origin_is_accepted(setup, endpoint):
+    catalog, runner, _, gateway = setup
+    catalog.binding["tool"]["endpoint"] = endpoint
+    assert read(gateway)["observation"]["phase"] == "Running"
+    assert len(runner.calls) == 1

@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import ipaddress
 import json
 import re
+from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Mapping
 
 from .adapters import AdapterRunner
@@ -38,6 +41,40 @@ def _ids(value: Any, fields: set[str]) -> bool:
             and all(isinstance(value[k], str) and _ID.fullmatch(value[k]) for k in fields))
 
 
+def _safe_string(value: Any) -> bool:
+    return (isinstance(value, str) and bool(value)
+            and not any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value))
+
+
+def _https_origin(value: Any) -> bool:
+    if (not _safe_string(value) or not value.startswith("https://")
+            or any(ch in value for ch in "?#\\%")):
+        return False
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        port = parsed.port
+        if (parsed.scheme != "https" or not host or parsed.username is not None
+                or parsed.password is not None or "@" in parsed.netloc
+                or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+                or parsed.netloc.endswith(":") or port is not None and not 1 <= port <= 65535):
+            return False
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            labels = host.split(".")
+            if (len(host) > 253 or any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                                       for label in labels)):
+                return False
+        return True
+    except ValueError:
+        return False
+
+
+def _absolute_reference(value: Any) -> bool:
+    return _safe_string(value) and Path(value).is_absolute()
+
+
 def _binding(value: Any, request: Mapping[str, str], context: Mapping[str, str]) -> dict:
     if not isinstance(value, Mapping) or set(value) != _BINDING:
         raise ResourceReadError("binding_unavailable")
@@ -55,7 +92,16 @@ def _binding(value: Any, request: Mapping[str, str], context: Mapping[str, str])
     if (not isinstance(tool, dict) or set(tool) - {"id", "kind", "namespace", "allowed_operations", "endpoint", "api_key_env", "token_file", "ca_file", "timeout_seconds"}
             or tool.get("kind") != "kubernetes-read"
             or tool.get("namespace") != value["namespace"]
-            or tool.get("allowed_operations") != ["list-pods"]):
+            or tool.get("allowed_operations") != ["list-pods"]
+            or not _https_origin(tool.get("endpoint"))
+            or not _absolute_reference(tool.get("token_file"))
+            or "id" in tool and (not isinstance(tool["id"], str) or not _ID.fullmatch(tool["id"]))
+            or not isinstance(tool.get("api_key_env"), str)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tool["api_key_env"])
+            or "ca_file" in tool and not _absolute_reference(tool["ca_file"])
+            or "timeout_seconds" in tool and (type(tool["timeout_seconds"]) is not int
+                                               or not 1 <= tool["timeout_seconds"] <= 300)):
+
         raise ResourceReadError("binding_unavailable")
     return copy.deepcopy(dict(value))
 

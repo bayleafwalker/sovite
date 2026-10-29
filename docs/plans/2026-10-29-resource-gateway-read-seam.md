@@ -28,3 +28,11 @@ output releases apply to completed jobs and are not silently treated as this
 new read's approval. A production composer must supply and qualify the catalog,
 authenticated context, authorization and output-decision providers on the
 resource-owner side, as well as a compatible enclosing operation protocol.
+
+The owner catalog must explicitly configure a fixed HTTPS API origin, a named
+environment credential reference and an absolute token-file reference. There
+is no endpoint or credential-reference fallback. Userinfo, cleartext URLs,
+paths, query strings, fragments, malformed ports and whitespace are refused
+before the adapter reads credentials or contacts a target. Optional CA-file
+references must be absolute, and request timeout is bounded to 1–300 seconds.
+These checks do not establish reachability or attest the selected target.
