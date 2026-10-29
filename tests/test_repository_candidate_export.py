@@ -1,6 +1,7 @@
 """Owner candidate export uses exact Git/receipt bytes and existing output release."""
 import asyncio
 import base64
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -62,6 +63,9 @@ def test_export_exact_candidate_bundle_and_release(prepared, tmp_path):
     assert result==content
     data=json.loads(result); assert data['base_sha']==base
     assert 'fence' not in result and str(tmp_path) not in result
+    receipt_bytes=json.dumps(data['receipt_projection'], sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+    assert hashlib.sha256(receipt_bytes).hexdigest()==data['receipt_projection_sha256']
+    assert data['receipt_projection']['tip_sha']==data['tip_sha']
     target=tmp_path/'consumer'; git('clone',str(mirror),str(target))
     bundle=tmp_path/'candidate.bundle'; bundle.write_bytes(base64.b64decode(data['bundle_base64']))
     heads = git('bundle','list-heads',str(bundle),cwd=target).splitlines()

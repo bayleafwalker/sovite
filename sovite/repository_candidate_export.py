@@ -125,10 +125,16 @@ class CandidateExportOwner:
                 _need(status == 0 and isinstance(bundle, bytes) and bundle)
             after = manager._candidate_snapshot(packet, worktree, Path(mirror))
             _need(manager._candidate_core(after) == manager._candidate_core(receipt))
+            # The stored owner receipt contains a live fence. Export every other
+            # receipt field as a separately hashed projection, never that token.
+            receipt_projection = manager._candidate_core(receipt)
+            del receipt_projection["fence"]
+            projection_sha256 = hashlib.sha256(_canonical_json(receipt_projection)).hexdigest()
             payload = {"schema_version":"sovite-repository-candidate-export/v1", "run_id":job.id,
                        "attempt_id":attempt_id, "workspace_id":run["workspace_id"], "repository_id":run["repository_id"],
                        "base_sha":packet.base_sha, "tip_sha":receipt["tip_sha"],
                        "patch_sha256":receipt["patch_sha256"], "receipt_sha256":evidence[0]["sha256"],
+                       "receipt_projection":receipt_projection, "receipt_projection_sha256":projection_sha256,
                        "bundle_sha256":hashlib.sha256(bundle).hexdigest(),
                        "bundle_base64":base64.b64encode(bundle).decode("ascii")}
             content = _canonical_json(payload).decode("utf-8")

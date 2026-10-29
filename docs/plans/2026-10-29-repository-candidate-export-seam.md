@@ -19,7 +19,7 @@ execution authority to remain current, including its deadline; exporting after
 that deadline is currently unavailable, not an implicit continuation grant.
 
 The bounded JSON content carries base/tip commit identities, receipt and patch
-hashes, and a base64 Git bundle with an explicit base prerequisite. A temporary
+hashes, a separately hashed receipt projection without the fence, and a base64 Git bundle with an explicit base prerequisite. A temporary
 private Git repository names the retained candidate commit directly and includes
 no unrelated refs. Candidate history must be linear from that base. The owner
 validates the retained immutable receipt, its exact stored digest and execution
