@@ -72,6 +72,7 @@ def setup(tmp_path):
         qualification_private_key=str(tmp_path / "private.pem"),
         qualification_public_keys=[str(tmp_path / "public.pem")])
     platform = Platform(settings)
+    platform.db.migrate()
     platform.initialize()
     return settings, platform
 

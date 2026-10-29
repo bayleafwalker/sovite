@@ -43,6 +43,17 @@ def compose(*args, **kw):
     return run(["docker", "compose", "-f", "compose.yaml", *extra, *args], **kw)
 
 
+def up(args):
+    # Bring up only the database/object store first, run the explicit migration
+    # command as a one-shot control container, then start runtime workloads.
+    _, running = writer_state()
+    if running:
+        raise RuntimeError("Stop existing writers before database migration: " + ", ".join(running))
+    compose("up", "-d", "--wait", "postgres", "garage")
+    compose("run", "--rm", "--no-deps", "control", "db", "migrate")
+    compose("up", "-d", "--wait")
+
+
 def private_write(path: Path, data: str | bytes):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -86,7 +97,7 @@ def writer_state():
         return [], []
     rows = json.loads(output) if output.startswith("[") else [json.loads(line) for line in output.splitlines()]
     writers = [row["Service"] for row in rows if row.get("Service") in {"control", "worker", "native-harness"}]
-    running = [row["Service"] for row in rows if row.get("Service") in writers and row.get("State") == "running"]
+    running = [row["Service"] for row in rows if row.get("Service") in writers and row.get("State") in {"running", "restarting"}]
     return sorted(set(writers)), sorted(set(running))
 
 
@@ -350,7 +361,7 @@ def main():
     args = parser.parse_args()
     mapping = {"keys-init": keys_init, "health": health, "stage-model": stage,
                "build": lambda _: compose("build"),
-               "up": lambda _: compose("up", "-d", "--wait"),
+               "up": up,
                "down": lambda _: compose("down"),
                "logs": lambda _: compose("logs", "--tail", "100")}
     try:

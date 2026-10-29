@@ -359,6 +359,7 @@ def local_evaluation(root: Path, model: dict):
         )
         platform = Platform(settings)
         try:
+            platform.db.migrate()
             platform.initialize()
             initialize_keys(settings)
             env = {

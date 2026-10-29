@@ -73,6 +73,7 @@ def installed(tmp_path):
         operator_token=OP, caller_tokens={"workflow-consumer": CALLER, "approver": APPROVER},
         require_qualification=False, installation_id="workflow-test", compute_id="workers")
     platform = Platform(settings)
+    platform.db.migrate()
     platform.initialize()
     binding = platform.bind_workflow(mixed_definition(), revision_ref(), revision_ref("session-policy"),
         platform.active()[1], input_class="C3")

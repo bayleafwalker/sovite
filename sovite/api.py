@@ -130,6 +130,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     install_routes(app, platform, settings)
     from .execution_api import install_routes as install_execution_routes
     install_execution_routes(app, platform, settings)
+    from .resource_owner_api import install_routes as install_resource_owner_routes
+    install_resource_owner_routes(app, platform, settings)
 
     @app.middleware("http")
     async def bounds_and_headers(request: Request, call_next):

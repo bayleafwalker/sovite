@@ -37,6 +37,7 @@ def setup(tmp_path):
     config_path.write_text(yaml.safe_dump(bundle))
     settings = Settings(database_url=f"sqlite:///{tmp_path}/control.db", bundle_path=str(config_path), artifact_path=str(tmp_path / "artifacts"), operator_token=OPERATOR, caller_tokens={"cloud-codex": CALLER, "operations": OTHER}, public_origin="http://testserver", secure_cookies=False, require_qualification=False, qualification_private_key=str(tmp_path / "private.pem"), qualification_public_keys=[str(tmp_path / "public.pem")])
     platform = Platform(settings)
+    platform.db.migrate()
     platform.initialize()
     return settings, platform, bundle
 
@@ -543,6 +544,7 @@ def test_model_concurrency_limit_lets_other_models_overtake(tmp_path):
     config_path.write_text(yaml.safe_dump(bundle))
     settings = Settings(database_url=f"sqlite:///{tmp_path}/control.db", bundle_path=str(config_path), artifact_path=str(tmp_path / "artifacts"), operator_token=OPERATOR, caller_tokens={"cloud-codex": CALLER, "operations": OTHER}, public_origin="http://testserver", secure_cookies=False, require_qualification=False, qualification_private_key=str(tmp_path / "private.pem"), qualification_public_keys=[str(tmp_path / "public.pem")])
     platform = Platform(settings)
+    platform.db.migrate()
     platform.initialize()
     first = platform.submit("incident-forensics", "task", "cloud-codex", "a")
     second = platform.submit("incident-forensics", "task", "cloud-codex", "b")

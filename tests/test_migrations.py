@@ -37,7 +37,7 @@ def database_cli(database, monkeypatch, capsys):
             main()
             result = capsys.readouterr()
             assert not result.err
-            assert json.loads(result.out) == {"status": "compatible", "schema_version": 5}
+            assert json.loads(result.out) == {"status": "compatible", "schema_version": MIGRATIONS[-1][0]}
     return run
 
 
@@ -99,7 +99,7 @@ def test_upgrade_v1_preserves_jobs_bundle_and_operational_state(database, databa
     database_cli("migrate")
     assert "binding_runtime_state" in inspect(db.engine).get_table_names(schema=db.schema)
     with db.sessions.begin() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 5}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 6}
         assert session.get(MetadataRow, "active_generation").value == {"generation": generation}
         assert session.get(BundleRevision, generation).bundle == bundle
         job = session.get(Job, "old-job")
@@ -122,9 +122,10 @@ def test_upgrade_v1_preserves_jobs_bundle_and_operational_state(database, databa
 
 def test_fresh_schema_stores_and_reads_binding_state(database):
     db = database
+    db.migrate()
     db.initialize()
     with db.sessions.begin() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 5}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 6}
         session.add(BindingState(id="model-a"))
     with db.sessions.begin() as session:
         state = session.get(BindingState, "model-a")
@@ -146,10 +147,11 @@ def test_upgrade_is_idempotent_after_table_creation(database):
     BindingState.__table__.create(db.engine)
     with db.sessions.begin() as session:
         session.add(BindingState(id="model-a", inhibited=True, reason="Preserve during upgrade"))
+    db.migrate()
     db.initialize()
     db.initialize()
     with db.sessions() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 5}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 6}
         assert session.get(BindingState, "model-a").inhibited
 
 
@@ -656,15 +658,49 @@ def _read_only_sql(statements):
 def test_schema5_migration_ledger_preserves_historical_meanings():
     import sovite.db as owner
     _assert_historical_migrations()
-    assert len(owner.MIGRATIONS) == 5, "schema-5 append migration is missing"
-    assert [number for number, _ in owner.MIGRATIONS] == [1, 2, 3, 4, 5]
+    assert len(owner.MIGRATIONS) == 6, "schema-6 append migration is missing"
+    assert [number for number, _ in owner.MIGRATIONS] == [1, 2, 3, 4, 5, 6]
     assert {table.name for table in owner.MIGRATIONS[4][1]} == set(_SCHEMA5_FIELDS)
-    assert set(Base.metadata.tables) == _historical_layout(4) | set(_SCHEMA5_FIELDS)
+    assert {table.name for table in owner.MIGRATIONS[5][1]} == {
+        "resource_gateway_enrollments", "resource_workload_scopes",
+        "resource_output_grants", "resource_owner_requests"}
+    assert set(Base.metadata.tables) == _historical_layout(4) | set(_SCHEMA5_FIELDS) | {
+        "resource_gateway_enrollments", "resource_workload_scopes",
+        "resource_output_grants", "resource_owner_requests"}
     for model_name, table_name in (("WorkerExecutionLease", "worker_execution_leases"),
                                    ("WorkerExecutionOperation", "worker_execution_operations")):
         model = getattr(owner, model_name, None)
         assert model is not None, f"missing owner ORM model {model_name}"
         assert model.__table__ is Base.metadata.tables[table_name]
+
+
+def test_schema5_to_6_requires_explicit_migration_and_preserves_rows(database):
+    db = database
+    _create_historical_schema(db, 4)
+    Base.metadata.create_all(db.engine, tables=[Base.metadata.tables[name] for name in _SCHEMA5_FIELDS])
+    with db.sessions.begin() as session:
+        session.get(MetadataRow, "schema_version").value = {"version": 5}
+        session.add(Job(id="before-resource-owner", receipt="before-ro-receipt",
+            idempotency_key="before-ro-key", request_digest="before-ro-digest",
+            caller="caller", grant_id="grant", generation="generation", resolved={}, task="kept"))
+    with db.sessions() as session:
+        assert session.get(MetadataRow, "schema_version").value == {"version": 5}
+    statements = []
+    capture = _read_only_sql(statements)
+    event.listen(db.engine, "before_cursor_execute", capture)
+    with pytest.raises(DatabaseSchemaError) as refusal:
+        db.initialize()
+    event.remove(db.engine, "before_cursor_execute", capture)
+    assert refusal.value.code == "database_schema_older"
+    assert statements
+    assert "resource_owner_requests" not in inspect(db.engine).get_table_names(schema=db.schema)
+    db.migrate()
+    with db.sessions() as session:
+        assert session.get(MetadataRow, "schema_version").value == {"version": 6}
+        assert session.get(Job, "before-resource-owner").task == "kept"
+    assert {"resource_gateway_enrollments", "resource_workload_scopes",
+        "resource_output_grants", "resource_owner_requests"} <= set(
+            inspect(db.engine).get_table_names(schema=db.schema))
 
 
 def test_schema5_historical_oracle_detects_migration1_leak(monkeypatch):
@@ -694,7 +730,7 @@ def test_schema5_upgrade_preserves_every_historical_row_and_authored_bytes(datab
             for name in _SCHEMA5_FIELDS:
                 assert connection.execute(select(Base.metadata.tables[name])).all() == [], "legacy jobs must not get backfilled reservations or operations"
         with database.sessions() as session:
-            assert session.get(MetadataRow, "schema_version").value == {"version": 5}
+            assert session.get(MetadataRow, "schema_version").value == {"version": 6}
         database.migrate()
 
 

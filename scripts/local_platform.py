@@ -73,12 +73,19 @@ def init(args):
 
 
 def finish_init(info):
+    active = [name for name, row in read_processes().items()
+              if process_identity(row["pid"]) == row["identity"]]
+    if active:
+        raise RuntimeError("Stop local platform writers before database migration: " + ", ".join(active))
     private = Path(info["environment"]["SOVITE_QUALIFICATION_PRIVATE_KEY"])
     public = Path(json.loads(info["environment"]["SOVITE_QUALIFICATION_PUBLIC_KEYS"])[0])
     if not private.exists() and not public.exists():
         command(info, "keys", "init")
     elif not private.exists() or not public.exists():
         raise RuntimeError("The signing key pair is incomplete; restore its original matching files before continuing")
+    # Runtime startup is check-only; the setup flow performs the explicit
+    # offline schema upgrade before its first platform initialization.
+    command(info, "db", "migrate")
     command(info, "init")
     evidence = LOCAL / ("assessment.json" if not (LOCAL / "assessment.json").exists() else f"assessment-{time.time_ns()}.json")
     command(info, "assess", "--output", str(evidence))

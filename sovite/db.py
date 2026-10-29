@@ -153,6 +153,79 @@ class WorkerExecutionOperation(Base):
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class ResourceGatewayEnrollment(Base):
+    __tablename__ = "resource_gateway_enrollments"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    gateway_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    audience: Mapped[str] = mapped_column(String(96), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    domain_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False)
+    revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class ResourceWorkloadScope(Base):
+    __tablename__ = "resource_workload_scopes"
+    workload_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    gateway_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    domain_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    observation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(63), nullable=False)
+    pod_name: Mapped[str] = mapped_column(String(253), nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class ResourceOutputGrant(Base):
+    __tablename__ = "resource_output_grants"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workload_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    principal_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    domain_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    observation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(96), nullable=False)
+    destination: Mapped[str] = mapped_column(String(96), nullable=False)
+    policy_revision: Mapped[str] = mapped_column(String(71), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class ResourceOwnerRequest(Base):
+    __tablename__ = "resource_owner_requests"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    generation: Mapped[str] = mapped_column(String(80), nullable=False)
+    workload_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    principal_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    fence: Mapped[str] = mapped_column(String(64), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    domain_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    observation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(63), nullable=False)
+    pod_name: Mapped[str] = mapped_column(String(253), nullable=False)
+    request: Mapped[dict] = mapped_column(JSON, nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    observation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observation_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    release: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    output_schema: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    output_destination: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    output_policy_revision: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    output_actor: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class HelperEnrollment(Base):
     __tablename__ = "helper_enrollments"
     id: Mapped[str] = mapped_column(String(160), primary_key=True)
@@ -226,11 +299,12 @@ class SetupDraft(Base):
 
 
 MIGRATIONS = (
-    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations"})),
+    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations", "resource_gateway_enrollments", "resource_workload_scopes", "resource_output_grants", "resource_owner_requests"})),
     (2, (BindingState.__table__,)),
     (3, (ExecutionAuthority.__table__, HelperEnrollment.__table__, HelperSession.__table__, RequestLedger.__table__)),
     (4, (SetupPrincipal.__table__, SetupDraft.__table__)),
     (5, (WorkerExecutionLease.__table__, WorkerExecutionOperation.__table__)),
+    (6, (ResourceGatewayEnrollment.__table__, ResourceWorkloadScope.__table__, ResourceOutputGrant.__table__, ResourceOwnerRequest.__table__)),
 )
 
 
@@ -275,9 +349,9 @@ class Database:
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
 
     def initialize(self, migrate: str = "startup"):
-        if migrate == "startup":
-            self.migrate()
-        elif migrate == "never":
+        if migrate in {"startup", "never"}:
+            # Schema changes run only through the explicit offline migration
+            # command. Startup is a compatibility check, never a DDL path.
             self.check()
         else:
             raise ValueError("SOVITE_DATABASE_MIGRATE must be startup or never")

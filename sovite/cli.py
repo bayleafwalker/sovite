@@ -39,6 +39,7 @@ async def assessment(settings: Settings, output: str) -> dict:
     with tempfile.TemporaryDirectory(prefix="sovite-assessment-") as work:
         ephemeral = replace(settings, database_url=f"sqlite:///{work}/control.db", database_schema=None, database_migrate="startup", artifact_backend="filesystem", artifact_path=f"{work}/artifacts", require_qualification=False, compute_id=grant["compute"])
         platform = Platform(ephemeral)
+        platform.db.migrate()
         platform.initialize()
         checks.append({"name": "bundle-validation", "status": "passed", "detail": "Current bundle parses, resolves and passes declared policy constraints."})
         canary = "SYNTHETIC-PRIVATE-" + str(time.time_ns())

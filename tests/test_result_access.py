@@ -47,6 +47,7 @@ def installed(tmp_path):
         require_qualification=False,
     )
     platform = Platform(settings)
+    platform.db.migrate()
     platform.initialize()
     return platform, bundle
 

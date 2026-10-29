@@ -146,11 +146,11 @@ sovite db migrate
 sovite db check
 ```
 
-These commands use only database settings; they need no operator token, bundle, artifact credentials or signing keys and do not activate a generation. `migrate` creates the version 1 tables and applies the ordered binding-state (2), execution-authority/helper enrollment (3), setup-identity/draft (4), and worker execution lease/operation journal (5) steps, recording each version in `platform_metadata`. Existing data and audit history survive the upgrade; repeated migration checks compatibility without resetting state. SQLite DDL and version writes share an explicit transaction; PostgreSQL uses transactional DDL. Run one migration process at a time with all control and worker processes stopped, after a verified backup. There is no automatic downgrade.
+These commands use only database settings; they need no operator token, bundle, artifact credentials or signing keys and do not activate a generation. `migrate` creates the version 1 tables and applies the ordered binding-state (2), execution-authority/helper enrollment (3), setup-identity/draft (4), worker execution lease/operation journal (5), and resource gateway owner state (6) steps, recording each version in `platform_metadata`. Existing data and audit history survive the upgrade; repeated migration checks compatibility without resetting state. SQLite DDL and version writes share an explicit transaction; PostgreSQL uses transactional DDL. Run one migration process at a time with all control and worker processes stopped, after a verified backup. There is no automatic downgrade.
 
-Switch the runtime URL to the runtime role, keep the same schema, and set `SOVITE_DATABASE_MIGRATE=never`. Run `sovite db check` as that role, then start the API and workers. `Platform.initialize()` checks compatibility before bundle activation or work; it issues no DDL in this mode. Existing first-bundle activation and operational DML still occur after a successful check. The separate native harness receives no platform database credentials and owns an independent local SQLite execution ledger; these settings govern the platform database only.
+Switch the runtime URL to the runtime role, keep the same schema, and set `SOVITE_DATABASE_MIGRATE=never`. Run `sovite db check` as that role, then start the API and workers. Startup is check-only for both `startup` and `never`; neither mode executes DDL. Fresh databases and older schemas refuse startup until the explicit offline `sovite db migrate` succeeds. `Platform.initialize()` checks compatibility before bundle activation or work. Existing first-bundle activation and operational DML still occur after a successful check. The separate native harness receives no platform database credentials and owns an independent local SQLite execution ledger; these settings govern the platform database only.
 
-`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":5}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
+`db check` is read-only and exits 0 with `{"status":"compatible","schema_version":6}` on success. It exits 1 with JSON containing a stable `code` on stderr for compatibility failures. Startup raises the same code before dispatch:
 
 ### Upgrade from 0.1.15 / schema 3 to 0.1.21 / schema 5
 
@@ -190,9 +190,42 @@ Migration also refuses unknown/newer versions and incomplete existing schemas be
 | --- | --- | --- |
 | `SOVITE_DATABASE_URL` | `sqlite:///.state/control.db` | Migration or runtime connection URL, selected for the command/process. |
 | `SOVITE_DATABASE_SCHEMA` | Unset (empty environment value also means unset) | PostgreSQL schema for every Sovite table; unset preserves the connection's existing default schema behavior. SQLite rejects an explicitly configured schema. |
-| `SOVITE_DATABASE_MIGRATE` | `startup` | `startup` runs migrations during initialization for existing deployments; `never` performs compatibility checking only. Explicit `db migrate` still migrates when this is `never`. Other values are rejected. |
+| `SOVITE_DATABASE_MIGRATE` | `startup` | Both `startup` and `never` perform compatibility checking only. Neither runs DDL. Run `sovite db migrate` explicitly before starting a fresh or older schema. Other values are rejected. |
 
-Helm values `database.schema: ""` and `database.migrate: startup` map to the schema/migration settings on control and worker pods. Compose accepts the same environment variables with those defaults. For hosted operation set `database.schema` and `database.migrate: never`, and deliver only runtime credentials to workloads. Run migration with a separately supplied migration URL before reconciling workloads. This lifecycle does not provision roles or add a chart migration Job.
+Helm values `database.schema` and `database.migrate` map to the schema/migration settings on control and worker pods. Compose accepts the same environment variables. For hosted operation set `database.schema` and `database.migrate: never`, and deliver only runtime credentials to workloads. Before a Helm release upgrade, stop old control/worker writers and run a one-shot Job using the candidate image and a migration-role Secret; the chart does not create a migration Job:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sovite-schema-migrate
+  namespace: sovite
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: registry.example/sovite@sha256:REPLACE_WITH_CANDIDATE_DIGEST
+          command: [sovite]
+          args: [db, migrate]
+          envFrom:
+            - secretRef:
+                name: sovite-migration-database
+          env:
+            - name: SOVITE_DATABASE_SCHEMA
+              value: workspace_sovite
+```
+
+Apply and wait for that Job to complete, inspect its logs, remove it, then upgrade the Helm release. The referenced Secret supplies the migration-role `SOVITE_DATABASE_URL`; runtime pods retain only runtime credentials. For manual Compose operation, use this order while control, worker and native writer services are stopped:
+
+```sh
+docker compose up -d --wait postgres garage
+docker compose run --rm --no-deps control db migrate
+docker compose up -d --wait
+```
+
+The `scripts/installation.py up` command performs the same Compose sequence and refuses to migrate while writers are running. Neither workflow stops or upgrades existing writers automatically. This lifecycle does not provision PostgreSQL roles.
 
 Configured schema names must match `[a-z][a-z0-9_]{0,62}`; `public`, `information_schema` and `pg_*` names are refused. Provision the schema before migration. SQLAlchemy's `schema_translate_map` qualifies every ORM and migration table reference with that schema, and inspection specifies it explicitly. This avoids `search_path` fallback to `public` or another schema when the configured namespace/table is absent. Database grants enforce access boundaries independently; schema qualification alone cannot constrain a role with broad grants. The explicit schema also participates in the runtime qualification fingerprint; changing it invalidates existing evidence. Unset schemas retain the existing fingerprint.
 
