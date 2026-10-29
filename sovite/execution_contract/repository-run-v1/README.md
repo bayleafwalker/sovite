@@ -63,3 +63,7 @@ bindings. If none match, discovery reports the executor unavailable and retains
 the resolved repository IDs for diagnostics. A specific admission still
 resolves and checks its own binding. An issued attempt packet must retain the
 admitted binding ID and declared packet version before workspace preparation.
+A binding whose owner deadline has passed is unavailable. Discovery compares
+and orders timezone-aware deadlines as instants, so differing UTC offsets do not
+change which deadline is earliest. Invalid or timezone-naive owner deadlines
+fail closed, and ongoing authorization stops at the admitted run deadline.

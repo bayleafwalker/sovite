@@ -229,7 +229,10 @@ class RepositoryRunOwner:
             grouped.setdefault(binding.executor_id, []).append(binding)
         executors = []
         for executor_id, rows in sorted(grouped.items()):
-            issues = [_profile_issue(self.execution_profile, row) for row in rows]
+            issues = [(_profile_issue(self.execution_profile, row)
+                       or ("repository_deadline_expired"
+                           if _timestamp(row.latest_deadline, "latest_deadline") <= now else None))
+                      for row in rows]
             eligible = [row for row, issue in zip(rows, issues) if issue is None]
             launchable = self.profile_enabled and bool(eligible)
             issue = next((item for item in issues if item), "execution_profile_unavailable")
@@ -238,7 +241,8 @@ class RepositoryRunOwner:
             displayed_rows = eligible if launchable else rows
             blockers = ([] if launchable else [{
                 "code": issue if self.profile_enabled else "execution_profile_unavailable",
-                "message": "A current qualified mutable execution profile is required for this binding.",
+                "message": ("The repository owner deadline has expired." if self.profile_enabled and issue == "repository_deadline_expired"
+                            else "A current qualified mutable execution profile is required for this binding."),
             }])
             executors.append({
                 "id": executor_id,
@@ -254,7 +258,8 @@ class RepositoryRunOwner:
                 "limits": {
                     "max_cost_usd": min(row.max_cost_usd for row in displayed_rows),
                     "max_concurrency": min(row.max_concurrency for row in displayed_rows),
-                    "latest_deadline": min(row.latest_deadline for row in displayed_rows),
+                    "latest_deadline": min((row.latest_deadline for row in displayed_rows),
+                                           key=lambda value: _timestamp(value, "latest_deadline")),
                 },
             })
         aggregate = [] if any(item["launch_supported"] for item in executors) else [{

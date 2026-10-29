@@ -283,6 +283,89 @@ def test_expired_profile_cannot_advertise_or_admit(setup, tmp_path):
         submit(owner, packet(base), idempotency_key="expired-profile-000000")
 
 
+def test_expired_owner_deadline_is_not_advertised_or_admitted(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    resolver.latest_deadline = "2000-01-01T00:00:00+00:00"
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
+    assert not capability["launch_supported"]
+    assert capability["blockers"][0]["code"] == "repository_deadline_expired"
+    with pytest.raises(RepositoryRunError, match="deadline"):
+        submit(owner, packet(base), idempotency_key="expired-owner-limit-000000")
+
+
+@pytest.mark.parametrize("bad", [None, "", "2029-01-01T00:00:00", "not-a-date"])
+def test_invalid_owner_deadline_fails_closed(setup, tmp_path, bad):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    resolver.latest_deadline = bad
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    assert owner.capabilities("workspace-1", "cloud-codex")["availability"] == "unavailable"
+    with pytest.raises(RepositoryRunError):
+        submit(owner, packet(base), idempotency_key="invalid-owner-limit-000000")
+
+
+def test_attempt_cannot_continue_past_admitted_deadline(setup, tmp_path, monkeypatch):
+    import sovite.repository_runs as runs
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    async def stub(*_args):
+        pass
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "deadline-state", stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
+    created = submit(owner, packet(base, deadline=deadline.isoformat()),
+                     idempotency_key="run-deadline-000000")
+    class AfterDeadline(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (deadline + timedelta(seconds=1)).astimezone(tz)
+    monkeypatch.setattr(runs, "datetime", AfterDeadline)
+    with platform.db.sessions() as session:
+        job = session.get(Job, created["id"])
+        with pytest.raises(RuntimeFailure, match="repository_binding_revoked"):
+            lifecycle.check_authorization(job)
+
+
+def test_discovery_filters_expired_binding_but_keeps_current_binding(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    def bindings(workspace_id, principal_id):
+        current = resolver.resolve_dispatch_binding(workspace_id, "repo-1", principal_id)
+        return [current | {"repository_id": "expired-repo", "latest_deadline": "2000-01-01T00:00:00+00:00"}, current]
+    resolver.list_dispatch_bindings = bindings
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
+    assert capability["launch_supported"]
+    assert capability["repository_ids"] == ["repo-1"]
+    assert capability["limits"]["latest_deadline"] == resolver.latest_deadline
+    assert submit(owner, packet(base), idempotency_key="current-owner-limit-000000")["id"]
+
+
+def test_discovery_deadline_uses_instant_not_iso_lexical_order(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    now = datetime.now(timezone.utc)
+    earlier = (now + timedelta(hours=2)).astimezone(timezone(timedelta(hours=14))).isoformat()
+    later = (now + timedelta(hours=3)).astimezone(timezone(timedelta(hours=-12))).isoformat()
+    assert later < earlier
+    def bindings(workspace_id, principal_id):
+        current = resolver.resolve_dispatch_binding(workspace_id, "repo-1", principal_id)
+        return [current | {"repository_id": "repo-1", "latest_deadline": earlier},
+                current | {"repository_id": "repo-2", "latest_deadline": later}]
+    resolver.list_dispatch_bindings = bindings
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
+    assert capability["launch_supported"]
+    assert capability["limits"]["latest_deadline"] == earlier
+
+
 def test_discovery_reports_only_profile_matching_repositories(setup, tmp_path):
     _, platform = setup
     mirror, base = make_repo(tmp_path)
