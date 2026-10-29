@@ -115,6 +115,14 @@ body and response shapes, including completion bounds and finite errors, are
 recorded in the [remote operation requirements](worker-execution-remote-operations-requirements.md)
 and [API contract](../API_CONTRACT.md).
 
+A lookup of an exact idle pull returns `job_id: null` and `fence: null`, with
+`operation_kind: pull` and `result_state: idle`. There was no reservation to
+bind. A restarted worker can reconcile that recorded result without repeating
+the pull. Null bindings for other results, extra fields in an idle owner result,
+or a job/fence attached to an idle result remain owner-corruption errors.
+Lookup does not change the journal, audit, queue or lease rows. The caller's
+existing workload and instance scope still applies.
+
 Status reports only the exact fence's state, finite Job status, phase, lease
 expiry and deadline. If the supplied generation or fence has been replaced,
 the response retains that caller-supplied tuple and sets phase, job status,

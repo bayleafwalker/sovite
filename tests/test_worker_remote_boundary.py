@@ -493,3 +493,80 @@ def test_execution_client_real_http_contract_lifecycle(owner):
         assert found["result_state"] == "completed"
     finally:
         app_client.close()
+
+
+def test_idle_pull_lookup_preserves_exact_owner_result_and_scope(owner, tmp_path):
+    admit_agent_http_owner(owner)
+    client = execution_client(owner)
+    key = {"instance_id": owner.instance, "operation_id": "idle-recovery-http"}
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    try:
+        pulled = client.post("/internal/execution/v1/pull", headers=headers, json=key)
+        assert pulled.status_code == 200
+        assert pulled.json() == {"state": "idle"}
+        before = snapshot(owner.platform)
+        found = client.post("/internal/execution/v1/lookup", headers=headers, json=key)
+        assert found.status_code == 200
+        assert found.json() == {"state": "found", "operation_id": key["operation_id"],
+            "operation_kind": "pull", "job_id": None, "fence": None, "result_state": "idle"}
+        assert snapshot(owner.platform) == before
+        import httpx
+        from sovite.execution_client import ExecutionClient
+        from sovite.remote_journal import ExecutionJournal
+        from sovite.worker import RemoteWorker
+        def send(request):
+            response = client.request(request.method, request.url.path,
+                headers=dict(request.headers), content=request.content)
+            return httpx.Response(response.status_code, content=response.content,
+                headers={"content-type": "application/json"})
+        remote = ExecutionClient("https://control.test", TOKEN,
+            transport=httpx.MockTransport(send))
+        path = tmp_path / "pending-idle.json"
+        journal = ExecutionJournal(path)
+        worker = RemoteWorker(remote, owner.instance, journal=journal)
+        worker._journal_write("pending_pull", key["operation_id"], "pull")
+        journal.close()  # A process boundary retains the pending operation key.
+        journal = ExecutionJournal(path)
+        restarted = RemoteWorker(remote, owner.instance, journal=journal)
+        assert restarted._startup_reconcile() is True
+        assert journal.load() is None
+        assert not restarted.stop.is_set()
+        journal.close()
+        assert snapshot(owner.platform) == before
+        denied = client.post("/internal/execution/v1/lookup",
+            headers={"Authorization": f"Bearer {OTHER_TOKEN}"}, json=key)
+        assert denied.status_code == 404
+        foreign = client.post("/internal/execution/v1/lookup", headers=headers,
+            json=dict(key, instance_id="another-instance"))
+        assert foreign.status_code == 404
+    finally:
+        client.close()
+
+
+def test_lookup_nullable_idle_fields_do_not_accept_corrupt_bindings(owner):
+    from sqlalchemy import select
+    from sovite.db import WorkerExecutionOperation
+    admit_agent_http_owner(owner)
+    client = execution_client(owner)
+    key = {"instance_id": owner.instance, "operation_id": "invalid-idle-lookup-http"}
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    try:
+        assert client.post("/internal/execution/v1/pull", headers=headers, json=key).json() == {"state": "idle"}
+        for kind, result, job_id, fence in [
+            ("pull", {"state": "reserved"}, None, None),
+            ("renew", {"state": "idle"}, None, None),
+            ("pull", {"state": "idle"}, "unexpected-job", "a" * 32),
+            ("pull", {"state": "reserved"}, "job", None),
+            ("pull", {"state": "idle", "unexpected": True}, None, None),
+        ]:
+            with owner.platform.db.sessions.begin() as session:
+                row = session.scalar(select(WorkerExecutionOperation).where(
+                    WorkerExecutionOperation.instance_id == key["instance_id"],
+                    WorkerExecutionOperation.operation_id == key["operation_id"]))
+                row.operation_kind, row.result, row.job_id, row.fence = kind, result, job_id, fence
+            before = snapshot(owner.platform)
+            response = client.post("/internal/execution/v1/lookup", headers=headers, json=key)
+            assert response.status_code == 503
+            assert snapshot(owner.platform) == before
+    finally:
+        client.close()

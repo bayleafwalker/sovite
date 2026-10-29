@@ -7,7 +7,7 @@ from importlib import import_module, resources
 from vuoro_contracts import ContractBundle
 
 CONTRACT_PACKAGE = "sovite.execution_contract.vuoro_contract_c3c73ae52d117dd8407c15d4b4b549461e753e30de4783134a2cad02f5dd1ab4_client"
-DATA_INTEGRITY_SHA256 = "afe312a6a0ed9a446d69a9ca6e9c8b00b2c5574cf3ac852a0ea27912ce74741a"
+DATA_INTEGRITY_SHA256 = "9cc4d082e2243729ab36f1f88b55722435128e770f5af19e4c007bdb080c5679"
 OPERATIONS = {
     "pull": "executionPull",
     "start": "executionStart",

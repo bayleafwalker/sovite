@@ -499,6 +499,19 @@ class RemoteExecution:
             state = row.result.get("state")
             if state not in _RESULT_STATES:
                 raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503)
+            # An idle pull has no assigned job or fence. Other results must
+            # retain their binding; nullability is not a corruption escape.
+            if state == "idle":
+                valid_binding = (row.operation_kind == "pull"
+                    and row.result == {"state": "idle"}
+                    and row.job_id is None and row.fence is None)
+            else:
+                valid_binding = (isinstance(row.job_id, str)
+                    and _INSTANCE_RE.fullmatch(row.job_id) is not None
+                    and isinstance(row.fence, str)
+                    and _FENCE_RE.fullmatch(row.fence) is not None)
+            if not valid_binding:
+                raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503)
             response = {
                 "state": "found",
                 "operation_id": row.operation_id,

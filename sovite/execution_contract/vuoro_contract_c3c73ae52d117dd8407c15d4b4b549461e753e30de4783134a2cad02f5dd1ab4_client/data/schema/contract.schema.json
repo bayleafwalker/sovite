@@ -736,10 +736,24 @@
                     ]
                 },
                 "job_id": {
-                    "$ref": "JobId.json"
+                    "anyOf": [
+                        {
+                            "$ref": "JobId.json"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
                 },
                 "fence": {
-                    "$ref": "Fence.json"
+                    "anyOf": [
+                        {
+                            "$ref": "Fence.json"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
                 },
                 "result_state": {
                     "anyOf": [

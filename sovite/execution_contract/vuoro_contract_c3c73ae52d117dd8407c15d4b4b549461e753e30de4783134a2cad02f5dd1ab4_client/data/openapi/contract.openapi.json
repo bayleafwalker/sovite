@@ -1054,10 +1054,22 @@
             ]
           },
           "job_id": {
-            "$ref": "#/components/schemas/JobId"
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JobId"
+              }
+            ],
+            "nullable": true
           },
           "fence": {
-            "$ref": "#/components/schemas/Fence"
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Fence"
+              }
+            ],
+            "nullable": true
           },
           "result_state": {
             "type": "string",

@@ -83,6 +83,6 @@ assert data.joinpath('schema', 'contract.schema.json').is_file()
     env["PYTHONPATH"] = str(target)
     env["EXPECTED_PACKAGE_ROOT"] = str(target)
     script = script.replace("__ASSET_NAMES__", repr(ASSETS))
-    script = script.replace("__DATA_INTEGRITY_SHA256__", repr("afe312a6a0ed9a446d69a9ca6e9c8b00b2c5574cf3ac852a0ea27912ce74741a"))
+    script = script.replace("__DATA_INTEGRITY_SHA256__", repr("9cc4d082e2243729ab36f1f88b55722435128e770f5af19e4c007bdb080c5679"))
     subprocess.run([sys.executable, "-c", script], check=True, cwd=tmp_path, env=env,
                    capture_output=True, text=True, timeout=30)
