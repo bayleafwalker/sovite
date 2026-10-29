@@ -34,3 +34,41 @@ settle the actual charge even when it exceeds its reservation. Overages must be
 recorded and stop further work. A provider integration that cannot reserve
 before calls and reconcile actual usage does not enforce a hard spend ceiling
 and must not claim one or enable the mutable profile.
+
+### Trusted mutable execution profile
+
+A composition must supply a callable returning the current closed
+`sovite-repository-execution-profile/v1` record to both the owner and attempt
+executor. It must bind the exact executor ID, publication revision,
+qualification reference, digest, and expiry selected by the repository
+resolver. The mode must be `mutable-native`, and these claims must all be
+true: per-attempt isolation, credential containment, exact binding, durable
+checkpoint and candidate, predecessor reconciliation, and bounded usage.
+Missing, malformed, unsupported, expired, or mismatched records deny discovery
+readiness and admission. The worker reads the current profile again when it
+checks attempt authorization; revocation after an effect begins makes the
+attempt uncertain and prevents release. A callable that fails is unavailable.
+No production profile or execution host is supplied here.
+
+These fields are claims made by the trusted commissioning owner; this code
+validates their presence and binding, not the physical isolation, actual native
+lifecycle, spending controls, or the authenticity of qualification evidence.
+An installation must establish those properties independently. The profile is
+internal and does not change the versioned caller capability response shape.
+
+When an executor has several repository bindings, an available discovery
+entry lists only repositories whose current bindings match the installed
+profile; its publication revision and conservative limits come from those same
+bindings. If none match, discovery reports the executor unavailable and retains
+the resolved repository IDs for diagnostics. A specific admission still
+resolves and checks its own binding. An issued attempt packet must retain the
+admitted binding ID and declared packet version before workspace preparation.
+A binding whose owner deadline has passed is unavailable. Discovery compares
+and orders timezone-aware deadlines as instants, so differing UTC offsets do not
+change which deadline is earliest. Invalid or timezone-naive owner deadlines
+fail closed, and ongoing authorization stops at the admitted run deadline.
+For an available entry, the advertised deadline is the earliest owner deadline
+or qualification expiry across the listed bindings, compared as instants. Its
+cost limit is also capped by the portable packet's maximum. Discovery reports
+binding and profile readiness; it does not replace admission's per-request
+checks or the platform's grant and policy authorization.

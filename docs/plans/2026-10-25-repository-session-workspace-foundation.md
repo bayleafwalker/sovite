@@ -83,3 +83,14 @@ reused attempt identity, main and sibling repository non-mutation, add/rename/
 delete path evidence, untracked and out-of-scope paths, symlink diagnostics,
 candidate immutability, partial temporary-receipt writes, bounded/slow Git
 subprocess output, and expired evidence handling.
+
+## Dormant owner binding continuity
+
+The repository-run owner seam records the resolved grant, input class and exact
+mirror path alongside the admitted repository binding. Before and during an
+attempt it requires the live binding to retain those values, and it rejects an
+attempt packet that selects a different mirror before preparing a worktree.
+These fields remain private to owner state and are not returned in the run
+projection. Older dormant run records lacking these fields fail closed on
+reauthorization; they need a new admission rather than automatic replay. This
+does not install or qualify a mutable executor.

@@ -163,15 +163,51 @@ class RepositoryRunResolver(Protocol):
                              generation: str, fence: str, deadline: str) -> Mapping[str, Any]: ...
 
 
+_PROFILE_REQUIREMENTS = {
+    "per_attempt_isolation", "credential_containment", "exact_binding",
+    "durable_checkpoint_and_candidate", "predecessor_reconciliation",
+    "bounded_usage",
+}
+_PROFILE_FIELDS = _PROFILE_REQUIREMENTS | {
+    "schema_version", "mode", "executor_id", "publication_revision",
+    "qualification_ref", "qualification_sha256", "qualification_expires_at",
+}
+
+
+def _profile_issue(provider: Any, binding: RepositoryRunBinding) -> str | None:
+    """Check current trusted composition claims, not physical enforcement."""
+    try:
+        profile = provider() if callable(provider) else None
+        if not isinstance(profile, Mapping) or set(profile) != _PROFILE_FIELDS:
+            return "execution_profile_unavailable"
+        if (profile["schema_version"] != "sovite-repository-execution-profile/v1"
+                or profile["mode"] != "mutable-native"
+                or any(profile[name] is not True for name in _PROFILE_REQUIREMENTS)):
+            return "execution_profile_requirements_missing"
+        if (profile["executor_id"] != binding.executor_id
+                or profile["publication_revision"] != binding.publication_revision
+                or profile["qualification_ref"] != binding.qualification_ref
+                or profile["qualification_sha256"] != binding.qualification_sha256
+                or profile["qualification_expires_at"] != binding.qualification_expires_at):
+            return "execution_profile_binding_mismatch"
+        if _timestamp(binding.qualification_expires_at, "qualification_expires_at") <= datetime.now(timezone.utc):
+            return "execution_profile_expired"
+        return None
+    except Exception:
+        return "execution_profile_unavailable"
+
+
 class RepositoryRunOwner:
     """Authenticated owner adapter; disabled unless explicitly composed."""
 
     def __init__(self, platform: Platform, resolver: RepositoryRunResolver, *,
-                 profile_enabled: bool = False, stub_or_qualified_executor: Any = None):
+                 profile_enabled: bool = False, stub_or_qualified_executor: Any = None,
+                 execution_profile: Any = None):
         self.platform = platform
         self.resolver = resolver
-        self.profile_enabled = profile_enabled and stub_or_qualified_executor is not None
+        self.profile_enabled = profile_enabled is True and stub_or_qualified_executor is not None
         self.executor = stub_or_qualified_executor
+        self.execution_profile = execution_profile
 
     def capabilities(self, workspace_id: str, principal_id: str) -> dict[str, Any]:
         try:
@@ -193,28 +229,38 @@ class RepositoryRunOwner:
             grouped.setdefault(binding.executor_id, []).append(binding)
         executors = []
         for executor_id, rows in sorted(grouped.items()):
-            current = [row for row in rows
-                       if _timestamp(row.qualification_expires_at, "qualification_expires_at") > now]
-            launchable = self.profile_enabled and bool(current)
+            issues = [(_profile_issue(self.execution_profile, row)
+                       or ("repository_deadline_expired"
+                           if _timestamp(row.latest_deadline, "latest_deadline") <= now else None))
+                      for row in rows]
+            eligible = [row for row, issue in zip(rows, issues) if issue is None]
+            launchable = self.profile_enabled and bool(eligible)
+            issue = next((item for item in issues if item), "execution_profile_unavailable")
+            # An available entry describes only bindings that admission can use.
+            # An unavailable entry retains the resolver's IDs for diagnostics.
+            displayed_rows = eligible if launchable else rows
             blockers = ([] if launchable else [{
-                "code": "mutable_profile_unqualified",
-                "message": "No qualified mutable repository executor is installed for this binding.",
+                "code": issue if self.profile_enabled else "execution_profile_unavailable",
+                "message": ("The repository owner deadline has expired." if self.profile_enabled and issue == "repository_deadline_expired"
+                            else "A current qualified mutable execution profile is required for this binding."),
             }])
             executors.append({
                 "id": executor_id,
                 "workspace_id": workspace_id,
                 "label": executor_id,
                 "owner": "Sovite",
-                "publication_revision": rows[0].publication_revision,
+                "publication_revision": displayed_rows[0].publication_revision,
                 "observed_at": now.isoformat(),
                 "launch_supported": launchable,
                 "availability": "available" if launchable else "unavailable",
                 "blockers": blockers,
-                "repository_ids": sorted({row.repository_id for row in rows}),
+                "repository_ids": sorted({row.repository_id for row in displayed_rows}),
                 "limits": {
-                    "max_cost_usd": min(row.max_cost_usd for row in rows),
-                    "max_concurrency": min(row.max_concurrency for row in rows),
-                    "latest_deadline": min(row.latest_deadline for row in rows),
+                    "max_cost_usd": min(100_000, *(row.max_cost_usd for row in displayed_rows)),
+                    "max_concurrency": min(row.max_concurrency for row in displayed_rows),
+                    "latest_deadline": min((deadline for row in displayed_rows
+                                            for deadline in (row.latest_deadline, row.qualification_expires_at)),
+                                           key=lambda value: _timestamp(value, "deadline")),
                 },
             })
         aggregate = [] if any(item["launch_supported"] for item in executors) else [{
@@ -241,7 +287,7 @@ class RepositoryRunOwner:
             raise RepositoryRunError("binding_mismatch", "Packet does not match the owner-issued executor and base", 409)
         deadline = _timestamp(packet["deadline"], "deadline")
         qualification_expires = _timestamp(binding.qualification_expires_at, "qualification_expires_at")
-        if not self.profile_enabled or qualification_expires <= datetime.now(timezone.utc):
+        if not self.profile_enabled or _profile_issue(self.execution_profile, binding) is not None:
             raise RepositoryRunError("executor_unavailable", "No qualified mutable repository executor is installed", 409)
         if deadline > qualification_expires:
             raise RepositoryRunError("deadline_outside_qualification", "Run deadline exceeds the executor qualification", 409)
@@ -274,6 +320,9 @@ class RepositoryRunOwner:
             "repository_id": binding.repository_id,
             "principal_id": binding.principal_id,
             "binding_id": binding.binding_id,
+            "mirror_root": binding.mirror_root,
+            "grant_id": binding.grant_id,
+            "input_class": binding.input_class,
             "base_sha": binding.base_sha,
             "allowed_areas": list(binding.allowed_areas),
             "executor_id": binding.executor_id,
@@ -473,11 +522,13 @@ class RepositoryRunAttemptExecutor:
     """
 
     def __init__(self, platform: Platform, resolver: RepositoryRunResolver,
-                 state_root: str | Path, executor: Any, *, timeout_seconds: int = 300):
+                 state_root: str | Path, executor: Any, *, timeout_seconds: int = 300,
+                 execution_profile: Any = None):
         if not callable(executor) or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
             raise ValueError("An executor and a bounded timeout are required")
         self.platform, self.resolver = platform, resolver
         self.state_root, self.executor, self.timeout_seconds = Path(state_root), executor, timeout_seconds
+        self.execution_profile = execution_profile
 
     def _persist(self, job_id: str, fence: str, mutate) -> None:
         with self.platform.db.sessions.begin() as session:
@@ -513,10 +564,14 @@ class RepositoryRunAttemptExecutor:
             current = RepositoryRunBinding.from_mapping(self.resolver.resolve_dispatch_binding(
                 record["workspace_id"], record["repository_id"], record["principal_id"]))
             deadline = _timestamp(record["deadline"], "deadline")
-            if (current.workspace_id != record["workspace_id"]
+            if (_profile_issue(self.execution_profile, current) is not None
+                    or current.workspace_id != record["workspace_id"]
                     or current.repository_id != record["repository_id"]
                     or current.principal_id != record["principal_id"]
                     or current.binding_id != record["binding_id"]
+                    or current.mirror_root != record["mirror_root"]
+                    or current.grant_id != record["grant_id"]
+                    or current.input_class != record["input_class"]
                     or current.base_sha != record["base_sha"]
                     or list(current.allowed_areas) != record["allowed_areas"]
                     or current.executor_id != record["executor_id"]
@@ -570,13 +625,14 @@ class RepositoryRunAttemptExecutor:
             )}
             if packet_value.get("job_id") != job.id or packet_value.get("attempt_id") != attempt_id or packet_value.get("generation") != job.generation or packet_value.get("fence") != fence:
                 raise ValueError
-            if (packet_value.get("workspace_id") != record.get("workspace_id")
+            if (packet_value.get("binding_id") != record.get("binding_id")
+                    or raw.get("mirror_root") != record.get("mirror_root")
+                    or packet_value.get("workspace_id") != record.get("workspace_id")
                     or packet_value.get("repository_id") != record.get("repository_id")
                     or packet_value.get("base_sha") != record.get("base_sha")
                     or sorted(packet_value.get("allowed_areas", [])) != sorted(record.get("allowed_areas", []))
                     or packet_value.get("deadline") != record.get("deadline")):
                 raise ValueError
-            packet_value["schema_version"] = "sovite-repository-session/v1"
             from .repository_sessions import validate_packet
             packet = validate_packet(packet_value)
         except Exception:

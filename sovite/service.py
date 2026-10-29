@@ -297,7 +297,7 @@ class Platform:
             # makes idempotency cover the repository, base and run limits.
             required_repository_fields = {
                 "schema_version", "packet_sha256", "preview_id", "workspace_id", "repository_id",
-                "idempotency_key", "principal_id", "binding_id", "base_sha", "allowed_areas",
+                "idempotency_key", "principal_id", "binding_id", "mirror_root", "grant_id", "input_class", "base_sha", "allowed_areas",
                 "executor_id", "publication_revision", "generation",
                 "qualification_ref", "qualification_sha256", "qualification_expires_at",
                 "max_cost_usd", "deadline", "concurrency", "usage_usd", "peak_concurrency",
@@ -306,7 +306,9 @@ class Platform:
             if (not isinstance(repository_run, dict)
                     or set(repository_run) != required_repository_fields
                     or repository_run.get("schema_version") != "sovite-repository-run/v1"
-                    or repository_run.get("principal_id") != caller):
+                    or repository_run.get("principal_id") != caller
+                    or repository_run.get("grant_id") != grant_id
+                    or repository_run.get("input_class") != input_class):
                 raise PlatformError("invalid_repository_run", "Repository-run owner binding is invalid", 422)
             request["repository_run"] = repository_run
         if expected_generation is not None:
