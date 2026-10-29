@@ -1,9 +1,15 @@
 """The local qualification explicitly migrates its own disposable database."""
 import json
+import importlib.util
 import sys
+from pathlib import Path
 
 import pytest
-from scripts import qualify_agentic_setup as qualification
+
+spec = importlib.util.spec_from_file_location(
+    'qualify_agentic_setup', Path(__file__).resolve().parents[1] / 'scripts/qualify_agentic_setup.py')
+qualification = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(qualification)
 
 
 def test_qualification_initializes_explicitly_migrated_disposable_db(tmp_path, monkeypatch):
