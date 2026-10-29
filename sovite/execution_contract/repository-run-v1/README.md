@@ -34,3 +34,24 @@ settle the actual charge even when it exceeds its reservation. Overages must be
 recorded and stop further work. A provider integration that cannot reserve
 before calls and reconcile actual usage does not enforce a hard spend ceiling
 and must not claim one or enable the mutable profile.
+
+### Trusted mutable execution profile
+
+A composition must supply a callable returning the current closed
+`sovite-repository-execution-profile/v1` record to both the owner and attempt
+executor. It must bind the exact executor ID, publication revision,
+qualification reference, digest, and expiry selected by the repository
+resolver. The mode must be `mutable-native`, and these claims must all be
+true: per-attempt isolation, credential containment, exact binding, durable
+checkpoint and candidate, predecessor reconciliation, and bounded usage.
+Missing, malformed, unsupported, expired, or mismatched records deny discovery
+readiness and admission. The worker reads the current profile again when it
+checks attempt authorization; revocation after an effect begins makes the
+attempt uncertain and prevents release. A callable that fails is unavailable.
+No production profile or execution host is supplied here.
+
+These fields are claims made by the trusted commissioning owner; this code
+validates their presence and binding, not the physical isolation, actual native
+lifecycle, spending controls, or the authenticity of qualification evidence.
+An installation must establish those properties independently. The profile is
+internal and does not change the versioned caller capability response shape.

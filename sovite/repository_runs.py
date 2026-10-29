@@ -163,15 +163,51 @@ class RepositoryRunResolver(Protocol):
                              generation: str, fence: str, deadline: str) -> Mapping[str, Any]: ...
 
 
+_PROFILE_REQUIREMENTS = {
+    "per_attempt_isolation", "credential_containment", "exact_binding",
+    "durable_checkpoint_and_candidate", "predecessor_reconciliation",
+    "bounded_usage",
+}
+_PROFILE_FIELDS = _PROFILE_REQUIREMENTS | {
+    "schema_version", "mode", "executor_id", "publication_revision",
+    "qualification_ref", "qualification_sha256", "qualification_expires_at",
+}
+
+
+def _profile_issue(provider: Any, binding: RepositoryRunBinding) -> str | None:
+    """Check current trusted composition claims, not physical enforcement."""
+    try:
+        profile = provider() if callable(provider) else None
+        if not isinstance(profile, Mapping) or set(profile) != _PROFILE_FIELDS:
+            return "execution_profile_unavailable"
+        if (profile["schema_version"] != "sovite-repository-execution-profile/v1"
+                or profile["mode"] != "mutable-native"
+                or any(profile[name] is not True for name in _PROFILE_REQUIREMENTS)):
+            return "execution_profile_requirements_missing"
+        if (profile["executor_id"] != binding.executor_id
+                or profile["publication_revision"] != binding.publication_revision
+                or profile["qualification_ref"] != binding.qualification_ref
+                or profile["qualification_sha256"] != binding.qualification_sha256
+                or profile["qualification_expires_at"] != binding.qualification_expires_at):
+            return "execution_profile_binding_mismatch"
+        if _timestamp(binding.qualification_expires_at, "qualification_expires_at") <= datetime.now(timezone.utc):
+            return "execution_profile_expired"
+        return None
+    except Exception:
+        return "execution_profile_unavailable"
+
+
 class RepositoryRunOwner:
     """Authenticated owner adapter; disabled unless explicitly composed."""
 
     def __init__(self, platform: Platform, resolver: RepositoryRunResolver, *,
-                 profile_enabled: bool = False, stub_or_qualified_executor: Any = None):
+                 profile_enabled: bool = False, stub_or_qualified_executor: Any = None,
+                 execution_profile: Any = None):
         self.platform = platform
         self.resolver = resolver
         self.profile_enabled = profile_enabled and stub_or_qualified_executor is not None
         self.executor = stub_or_qualified_executor
+        self.execution_profile = execution_profile
 
     def capabilities(self, workspace_id: str, principal_id: str) -> dict[str, Any]:
         try:
@@ -193,12 +229,12 @@ class RepositoryRunOwner:
             grouped.setdefault(binding.executor_id, []).append(binding)
         executors = []
         for executor_id, rows in sorted(grouped.items()):
-            current = [row for row in rows
-                       if _timestamp(row.qualification_expires_at, "qualification_expires_at") > now]
-            launchable = self.profile_enabled and bool(current)
+            issues = [_profile_issue(self.execution_profile, row) for row in rows]
+            launchable = self.profile_enabled and all(issue is None for issue in issues)
+            issue = next((item for item in issues if item), "execution_profile_unavailable")
             blockers = ([] if launchable else [{
-                "code": "mutable_profile_unqualified",
-                "message": "No qualified mutable repository executor is installed for this binding.",
+                "code": issue if self.profile_enabled else "execution_profile_unavailable",
+                "message": "A current qualified mutable execution profile is required for this binding.",
             }])
             executors.append({
                 "id": executor_id,
@@ -241,7 +277,7 @@ class RepositoryRunOwner:
             raise RepositoryRunError("binding_mismatch", "Packet does not match the owner-issued executor and base", 409)
         deadline = _timestamp(packet["deadline"], "deadline")
         qualification_expires = _timestamp(binding.qualification_expires_at, "qualification_expires_at")
-        if not self.profile_enabled or qualification_expires <= datetime.now(timezone.utc):
+        if not self.profile_enabled or _profile_issue(self.execution_profile, binding) is not None:
             raise RepositoryRunError("executor_unavailable", "No qualified mutable repository executor is installed", 409)
         if deadline > qualification_expires:
             raise RepositoryRunError("deadline_outside_qualification", "Run deadline exceeds the executor qualification", 409)
@@ -476,11 +512,13 @@ class RepositoryRunAttemptExecutor:
     """
 
     def __init__(self, platform: Platform, resolver: RepositoryRunResolver,
-                 state_root: str | Path, executor: Any, *, timeout_seconds: int = 300):
+                 state_root: str | Path, executor: Any, *, timeout_seconds: int = 300,
+                 execution_profile: Any = None):
         if not callable(executor) or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
             raise ValueError("An executor and a bounded timeout are required")
         self.platform, self.resolver = platform, resolver
         self.state_root, self.executor, self.timeout_seconds = Path(state_root), executor, timeout_seconds
+        self.execution_profile = execution_profile
 
     def _persist(self, job_id: str, fence: str, mutate) -> None:
         with self.platform.db.sessions.begin() as session:
@@ -516,7 +554,8 @@ class RepositoryRunAttemptExecutor:
             current = RepositoryRunBinding.from_mapping(self.resolver.resolve_dispatch_binding(
                 record["workspace_id"], record["repository_id"], record["principal_id"]))
             deadline = _timestamp(record["deadline"], "deadline")
-            if (current.workspace_id != record["workspace_id"]
+            if (_profile_issue(self.execution_profile, current) is not None
+                    or current.workspace_id != record["workspace_id"]
                     or current.repository_id != record["repository_id"]
                     or current.principal_id != record["principal_id"]
                     or current.binding_id != record["binding_id"]

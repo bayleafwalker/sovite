@@ -143,8 +143,23 @@ def make_owner(platform, resolver, executor=None, enabled=True):
     generation = platform.active()[1]
     if resolver.generation != generation:
         resolver.generation = generation
-    return RepositoryRunOwner(platform, resolver, profile_enabled=enabled,
-                              stub_or_qualified_executor=executor)
+    profile = {
+        "schema_version": "sovite-repository-execution-profile/v1", "mode": "mutable-native",
+        "executor_id": "repo-executor-1", "publication_revision": "rev-8",
+        "qualification_ref": resolver.qualification_ref,
+        "qualification_sha256": resolver.qualification_sha256,
+        "qualification_expires_at": resolver.qualification_expires_at,
+        "per_attempt_isolation": True, "credential_containment": True,
+        "exact_binding": True, "durable_checkpoint_and_candidate": True,
+        "predecessor_reconciliation": True, "bounded_usage": True,
+    }
+    provider = lambda: profile
+    if isinstance(executor, RepositoryRunAttemptExecutor):
+        executor.execution_profile = provider
+    owner = RepositoryRunOwner(platform, resolver, profile_enabled=enabled,
+                               stub_or_qualified_executor=executor, execution_profile=provider)
+    owner.test_profile = profile
+    return owner
 
 
 def submit(owner, value, *, principal_id="cloud-codex", idempotency_key="test-key-00000000"):
@@ -197,6 +212,73 @@ def test_default_owner_is_disabled_and_cannot_admit_a_queue_item(setup, tmp_path
     assert error.value.code == "executor_unavailable"
     with platform.db.sessions() as session:
         assert session.query(Job).count() == 0
+
+
+def test_executor_object_alone_does_not_advertise_or_admit_mutable_execution(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = RepositoryRunOwner(platform, resolver, profile_enabled=True,
+                               stub_or_qualified_executor=lambda *_: None)
+    assert owner.capabilities("workspace-1", "cloud-codex")["availability"] == "unavailable"
+    with pytest.raises(RepositoryRunError, match="qualified"):
+        submit(owner, packet(base), idempotency_key="missing-profile-000000")
+
+
+@pytest.mark.parametrize("field,value,code", [
+    ("mode", "answer-only", "execution_profile_requirements_missing"),
+    ("mode", "read-only", "execution_profile_requirements_missing"),
+    ("per_attempt_isolation", False, "execution_profile_requirements_missing"),
+    ("credential_containment", False, "execution_profile_requirements_missing"),
+    ("exact_binding", False, "execution_profile_requirements_missing"),
+    ("durable_checkpoint_and_candidate", False, "execution_profile_requirements_missing"),
+    ("predecessor_reconciliation", False, "execution_profile_requirements_missing"),
+    ("bounded_usage", False, "execution_profile_requirements_missing"),
+    ("executor_id", "other", "execution_profile_binding_mismatch"),
+    ("publication_revision", "other", "execution_profile_binding_mismatch"),
+    ("qualification_ref", "other", "execution_profile_binding_mismatch"),
+    ("qualification_sha256", "f" * 64, "execution_profile_binding_mismatch"),
+    ("qualification_expires_at", "2000-01-01T00:00:00+00:00", "execution_profile_binding_mismatch"),
+])
+def test_profile_must_match_qualified_mutable_requirements(setup, tmp_path, field, value, code):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    owner.test_profile[field] = value
+    capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
+    assert not capability["launch_supported"]
+    assert capability["blockers"][0]["code"] == code
+    with pytest.raises(RepositoryRunError, match="qualified"):
+        submit(owner, packet(base), idempotency_key="invalid-profile-000000")
+
+
+def test_profile_missing_field_or_provider_failure_is_unavailable(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    del owner.test_profile["credential_containment"]
+    capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
+    assert capability["blockers"][0]["code"] == "execution_profile_unavailable"
+    def unavailable():
+        raise RuntimeError("unavailable")
+    owner.execution_profile = unavailable
+    assert owner.capabilities("workspace-1", "cloud-codex")["availability"] == "unavailable"
+    with pytest.raises(RepositoryRunError, match="qualified"):
+        submit(owner, packet(base), idempotency_key="provider-down-000000")
+
+
+def test_expired_profile_cannot_advertise_or_admit(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    resolver.qualification_expires_at = "2000-01-01T00:00:00+00:00"
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
+    assert capability["blockers"][0]["code"] == "execution_profile_expired"
+    with pytest.raises(RepositoryRunError, match="qualified"):
+        submit(owner, packet(base), idempotency_key="expired-profile-000000")
 
 
 def test_binding_principal_repository_executor_limits_and_key_digest_are_enforced(setup, tmp_path):
@@ -411,7 +493,7 @@ def test_attempt_packet_cannot_redirect_admitted_mirror(setup, tmp_path):
     assert invoked == []
 
 
-@pytest.mark.parametrize("revocation", ["qualification", "grant", "input_class", "mirror"])
+@pytest.mark.parametrize("revocation", ["qualification", "grant", "input_class", "mirror", "profile"])
 def test_revocation_after_mutation_preserves_uncertain_attempt_and_candidate_workspace(setup, tmp_path, revocation):
     _, platform = setup
     mirror, base = make_repo(tmp_path)
@@ -429,8 +511,10 @@ def test_revocation_after_mutation_preserves_uncertain_attempt_and_candidate_wor
             resolver.grant_id = "replacement-grant"
         elif revocation == "input_class":
             resolver.input_class = "replacement-class"
-        else:
+        elif revocation == "mirror":
             resolver.mirror = tmp_path / "other.git"
+        else:
+            owner.test_profile["credential_containment"] = False
         authorize()
 
     lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "uncertain-state", stub)
