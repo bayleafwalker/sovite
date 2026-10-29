@@ -8,7 +8,7 @@ from dataclasses import replace
 from fastapi.testclient import TestClient
 
 from sovite.api import create_app
-from sovite.db import ResourceGatewayEnrollment
+from sovite.db import ResourceGatewayEnrollment, WorkerExecutionLease, Job, ResourceOwnerRequest
 from test_migrations import database  # noqa: F401
 from test_policy_v1alpha2 import bundle as gateway_bundle  # noqa: F401
 from test_worker_remote_boundary import (TOKEN, admit_agent_http_owner,
@@ -24,7 +24,7 @@ OBSERVATION = "pod-observation-a"
 POLICY_REVISION = "sha256:" + "a" * 64
 
 
-def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner):
+def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner, monkeypatch):
     admit_agent_http_owner(owner)
     owner.platform.submit("native-code-review", "synthetic resource task", "operations",
                           "resource-api-submit", input_class="C2")
@@ -100,17 +100,17 @@ def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner):
     assert "fence" not in request
     foreign_gateway = {"Authorization": "Bearer " + foreign.json()["bearer_token"]}
     assert client.post("/internal/resource-owner/v1/poll", headers=foreign_gateway,
-                       json={}).json() == {"requests": []}
+                       json={}).json() == {"requests": [], "next_cursor": None}
     for enrollment_row in (foreign_tenant, foreign_domain):
         response = client.post("/internal/resource-owner/v1/poll",
             headers={"Authorization": "Bearer " + enrollment_row.json()["bearer_token"]}, json={})
-        assert response.json() == {"requests": []}
+        assert response.json() == {"requests": [], "next_cursor": None}
     assert client.post("/internal/resource-owner/v1/poll",
         headers={"Authorization": "Bearer " + expired.json()["bearer_token"]}, json={}).status_code == 403
 
-    binding = {"request_id": request_id, "fence_fingerprint": request["fence_fingerprint"]}
+    binding = {"request_id": request_id, "fence_fingerprint": request["fence_fingerprint"], "policy_revision": POLICY_REVISION, "destination": "workbench", "actor": "operations"}
     assert client.post("/internal/resource-owner/v1/current", headers=gateway,
-                       json=binding).json() == {"current": True}
+                       json=binding).json() == {"current": False}
     changed_scope = dict(scope, observation_id="foreign-observation")
     assert client.put("/internal/resource-owner/v1/workload-scopes", headers=admin,
                       json=changed_scope).status_code == 200
@@ -133,6 +133,12 @@ def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner):
     assert client.post('/internal/resource-owner/v1/result', headers=gateway,
         json={**result_body, 'observation_b64': base64.b64encode(noncanonical).decode(),
               'observation_digest': 'sha256:' + hashlib.sha256(noncanonical).hexdigest()}).status_code == 422
+    for invalid_phase in ([], {}, True):
+        invalid = json.dumps(dict(projection, phase=invalid_phase), sort_keys=True,
+                             ensure_ascii=True, separators=(",", ":")).encode()
+        assert client.post('/internal/resource-owner/v1/result', headers=gateway,
+            json={**result_body, 'observation_b64': base64.b64encode(invalid).decode(),
+                  'observation_digest': 'sha256:' + hashlib.sha256(invalid).hexdigest()}).status_code == 422
     invalid_digest = dict(result_body, observation_digest="sha256:" + "0" * 64)
     assert client.post("/internal/resource-owner/v1/result", headers=gateway,
                        json=invalid_digest).status_code == 422
@@ -143,6 +149,7 @@ def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner):
         json={**{k: scope[k] for k in ("workload_id", "tenant_id", "workspace_id", "domain_id", "observation_id")},
               "principal_id": "operations", "policy_revision": POLICY_REVISION})
     assert grant.status_code == 200
+    assert client.post("/internal/resource-owner/v1/current", headers=gateway, json=binding).json() == {"current": True}
     for mutation in ({"actor": "foreign-principal"},
                      {"policy_revision": "sha256:" + "b" * 64},
                      {"destination": "external"}):
@@ -169,6 +176,46 @@ def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner):
     assert read.status_code == 200
     assert read.json()["observation"] == projection
     assert read.json()["sha256"] == digest
+    with owner.platform.db.sessions.begin() as db:
+        retained = db.get(ResourceOwnerRequest, request_id)
+        original_observation = retained.observation
+        retained.observation = json.dumps(dict(projection, extra="synthetic-private"))
+    assert client.post("/internal/resource-owner/v1/result/read", headers=worker, json=reader).status_code == 404
+    with owner.platform.db.sessions.begin() as db:
+        db.get(ResourceOwnerRequest, request_id).observation = original_observation
+    original_token = settings.execution_tokens.pop("actual-workload")
+    assert client.post("/internal/resource-owner/v1/current", headers=gateway, json=binding).json() == {"current": False}
+    settings.execution_tokens["actual-workload"] = "rotated-token"
+    assert client.post("/internal/resource-owner/v1/current", headers=gateway, json=binding).json() == {"current": False}
+    settings.execution_tokens["actual-workload"] = original_token
+    for field, value in (("observation_id", "changed"), ("namespace", "different"), ("pod_name", "other"), ("gateway_id", "different")):
+        assert client.put("/internal/resource-owner/v1/workload-scopes", headers=admin, json=dict(scope, **{field: value})).status_code == 200
+        assert client.post("/internal/resource-owner/v1/result/read", headers=worker, json=reader).status_code == 404
+        assert client.post("/internal/resource-owner/v1/requests", headers=worker, json=submit_body).status_code == 409
+        assert client.put("/internal/resource-owner/v1/workload-scopes", headers=admin, json=scope).status_code == 200
+    with owner.platform.db.sessions.begin() as db:
+        enrolled = db.get(ResourceGatewayEnrollment, enrollment.json()["enrollment_id"])
+        original_expiry = enrolled.expires_at
+        enrolled.expires_at = time.time() - 1
+    assert client.post("/internal/resource-owner/v1/result/read", headers=worker, json=reader).status_code == 404
+    with owner.platform.db.sessions.begin() as db:
+        db.get(ResourceGatewayEnrollment, enrollment.json()["enrollment_id"]).expires_at = original_expiry
+        lease = db.get(WorkerExecutionLease, job["job_id"])
+        job_row = db.get(Job, job["job_id"])
+        old_until = lease.lease_until
+        lease.lease_until = job_row.lease_until = time.time() + 0.25
+    original_lock = owner.platform.db.authority_lock
+    def slow_lock(session):
+        time.sleep(0.5)
+        return original_lock(session)
+    monkeypatch.setattr(owner.platform.db, "authority_lock", slow_lock)
+    assert client.post("/internal/resource-owner/v1/result/read", headers=worker, json=reader).status_code == 403
+    assert client.post("/internal/resource-owner/v1/requests", headers=worker, json=submit_body).status_code == 403
+    monkeypatch.setattr(owner.platform.db, "authority_lock", original_lock)
+    with owner.platform.db.sessions.begin() as db:
+        db.get(WorkerExecutionLease, job["job_id"]).lease_until = old_until
+        db.get(Job, job["job_id"]).lease_until = old_until
+    assert client.post("/internal/resource-owner/v1/result/read", headers=worker, json=reader).status_code == 200
     assert client.delete(f"/internal/resource-owner/v1/output-grants/{grant.json()['grant_id']}",
                          headers=admin).status_code == 200
     assert client.post("/internal/resource-owner/v1/result/read", headers=worker,

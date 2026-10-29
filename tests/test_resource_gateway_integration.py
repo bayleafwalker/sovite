@@ -51,7 +51,7 @@ def test_real_owner_gateway_and_target_over_tls(owner, tmp_path, monkeypatch):
     cert, key = tmp_path / 'cert.pem', tmp_path / 'key.pem'
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     admit_agent_http_owner(owner)
-    owner.platform.submit('native-code-review', 'synthetic', 'operations', 'gateway-tls', input_class='C2')
+    owner.platform.submit('native-code-review', 'synthetic', 'operations', 'gateway-tls', input_class='C1')
     settings = replace(owner.platform.settings, operator_token='synthetic-operator', execution_tokens={'actual-workload': TOKEN})
     app = create_app(settings=settings, platform=owner.platform)
     client = TestClient(app)
@@ -63,7 +63,6 @@ def test_real_owner_gateway_and_target_over_tls(owner, tmp_path, monkeypatch):
     assert client.put(prefix + 'workload-scopes', headers=admin, json=scope).status_code == 200
     revision = 'sha256:' + 'a' * 64
     grant = {k: scope[k] for k in ('workload_id', 'tenant_id', 'workspace_id', 'domain_id', 'observation_id')} | {'principal_id': 'operations', 'policy_revision': revision}
-    assert client.post(prefix + 'output-grants', headers=admin, json=grant).status_code == 200
     enrollment = client.post(prefix + 'enrollments', headers=admin, json={k: scope[k] for k in ('tenant_id', 'workspace_id', 'domain_id')} | {'gateway_id': 'gateway-a', 'expires_at': time.time() + 300})
     assert enrollment.status_code == 200
     submitted = client.post(prefix + 'requests', headers=worker, json=identity | {'operation_id': 'read-1'})
@@ -89,6 +88,10 @@ def test_real_owner_gateway_and_target_over_tls(owner, tmp_path, monkeypatch):
         store.set_policy(policy)
         gateway = Gateway(store, OwnerClient(owner_origin, enrollment.json()['bearer_token'], ca_file=str(cert)), AdapterRunner())
         packet = gateway.owner.call('poll', {})['requests'][0]
+        with pytest.raises(ResourceReadError, match='authorization_denied'):
+            asyncio.run(gateway.process(packet))
+        assert calls == []
+        assert client.post(prefix + 'output-grants', headers=admin, json=grant).status_code == 200
         real_call = gateway.owner.call
         def lost_response(action, body):
             result = real_call(action, body)

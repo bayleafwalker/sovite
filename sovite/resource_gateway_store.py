@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import stat
 from pathlib import Path
 
 
@@ -28,6 +30,15 @@ class ResourceOperationStore:
         self.path = str(path)
 
     def install(self) -> None:
+        self._check_directory()
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            self._check_file()
+        else:
+            os.close(fd)
+        for suffix in ('-wal', '-shm', '-journal'):
+            self._check_sidecar(suffix)
         with sqlite3.connect(self.path) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1):
@@ -37,13 +48,36 @@ class ResourceOperationStore:
             db.execute("PRAGMA user_version = 1")
 
     def _connect(self):
-        if not Path(self.path).is_file():
-            raise RuntimeError("resource_store_uninstalled")
+        self._check_directory()
+        self._check_file()
+        for suffix in ('-wal', '-shm', '-journal'):
+            self._check_sidecar(suffix)
         db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         if db.execute("PRAGMA user_version").fetchone()[0] != 1:
             db.close()
             raise RuntimeError("resource_store_uninstalled")
         return db
+
+    def _check_directory(self):
+        info = Path(self.path).parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise RuntimeError("resource_store_directory_not_private")
+
+    def _check_file(self):
+        try:
+            info = Path(self.path).lstat()
+        except FileNotFoundError:
+            raise RuntimeError("resource_store_uninstalled") from None
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise RuntimeError("resource_store_file_not_private")
+
+    def _check_sidecar(self, suffix):
+        try:
+            info = Path(self.path + suffix).lstat()
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise RuntimeError("resource_store_sidecar_not_private")
 
     def admit(self, operation_id: str, request: dict) -> dict:
         if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", operation_id):

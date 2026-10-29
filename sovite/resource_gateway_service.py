@@ -73,6 +73,7 @@ def admin_app(store: ResourceOperationStore, admin_token: str) -> FastAPI:
 class Gateway:
     def __init__(self, store: ResourceOperationStore, owner: OwnerClient, runner: AdapterRunner):
         self.store, self.owner, self.runner = store, owner, runner
+        self.cursor = None
 
     async def process(self, packet: dict) -> dict:
         policy = self.store.policy()
@@ -93,7 +94,9 @@ class Gateway:
         def current():
             try:
                 return (self.store.policy() == policy and time.time() < min(policy['expires_at'], packet['deadline']) and
-                        self.owner.call('current', {'request_id': operation_id, 'fence_fingerprint': fingerprint}) == {'current': True})
+                        self.owner.call('current', {'request_id': operation_id, 'fence_fingerprint': fingerprint,
+                                                    'policy_revision': policy['release_policy_revision'],
+                                                    'destination': b['destination'], 'actor': policy['principal_id']}) == {'current': True})
             except Exception:
                 return False
         if not current():
@@ -141,8 +144,20 @@ class Gateway:
                                          'release': 'allowed', **{k: metadata[k] for k in ('policy_revision', 'destination', 'actor')}})
 
     async def poll_once(self):
-        response = self.owner.call('poll', {})
+        response = self.owner.call('poll', {'after': self.cursor})
         requests = response.get('requests')
         if not isinstance(requests, list) or len(requests) > 100:
             raise ResourceReadError('owner_unavailable')
-        return [await self.process(packet) for packet in requests]
+        cursor = response.get('next_cursor')
+        if cursor is not None and (not isinstance(cursor, str) or not re.fullmatch(r'[0-9a-f]{64}', cursor)):
+            raise ResourceReadError('owner_unavailable')
+        self.cursor = cursor
+        results = []
+        for packet in requests:
+            try:
+                results.append(await self.process(packet))
+            except Exception:
+                # One malformed, denied or unavailable operation must not
+                # prevent other independently admitted requests progressing.
+                results.append({'state': 'unavailable'})
+        return results

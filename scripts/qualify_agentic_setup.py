@@ -71,6 +71,7 @@ def main():
             public_origin=origin, secure_cookies=False, setup_api_enabled=True, setup_installation_id='bayleaf-wf01',
             qualification_private_key=str(work / 'signer.pem'), qualification_public_keys=[str(work / 'public.pem')])
         platform = Platform(settings)
+        platform.db.migrate()
         platform.initialize()
         initialize_keys(settings)
         env = {**{key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL') if key in os.environ}, 'SOVITE_DATABASE_URL': settings.database_url, 'SOVITE_DATABASE_MIGRATE': 'never',
