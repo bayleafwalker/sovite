@@ -274,6 +274,9 @@ class RepositoryRunOwner:
             "repository_id": binding.repository_id,
             "principal_id": binding.principal_id,
             "binding_id": binding.binding_id,
+            "mirror_root": binding.mirror_root,
+            "grant_id": binding.grant_id,
+            "input_class": binding.input_class,
             "base_sha": binding.base_sha,
             "allowed_areas": list(binding.allowed_areas),
             "executor_id": binding.executor_id,
@@ -517,6 +520,9 @@ class RepositoryRunAttemptExecutor:
                     or current.repository_id != record["repository_id"]
                     or current.principal_id != record["principal_id"]
                     or current.binding_id != record["binding_id"]
+                    or current.mirror_root != record["mirror_root"]
+                    or current.grant_id != record["grant_id"]
+                    or current.input_class != record["input_class"]
                     or current.base_sha != record["base_sha"]
                     or list(current.allowed_areas) != record["allowed_areas"]
                     or current.executor_id != record["executor_id"]
@@ -570,7 +576,8 @@ class RepositoryRunAttemptExecutor:
             )}
             if packet_value.get("job_id") != job.id or packet_value.get("attempt_id") != attempt_id or packet_value.get("generation") != job.generation or packet_value.get("fence") != fence:
                 raise ValueError
-            if (packet_value.get("workspace_id") != record.get("workspace_id")
+            if (raw.get("mirror_root") != record.get("mirror_root")
+                    or packet_value.get("workspace_id") != record.get("workspace_id")
                     or packet_value.get("repository_id") != record.get("repository_id")
                     or packet_value.get("base_sha") != record.get("base_sha")
                     or sorted(packet_value.get("allowed_areas", [])) != sorted(record.get("allowed_areas", []))

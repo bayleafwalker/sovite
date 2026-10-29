@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from sovite import policy
 from sovite.api import create_app
 from sovite.db import Job
+from sovite.adapters import RuntimeFailure
 from sovite.repository_runs import (
     RUN_SCHEMA,
     RepositoryRunAttemptExecutor,
@@ -78,6 +79,9 @@ def setup(tmp_path):
 class BindingResolver:
     def __init__(self, mirror: Path, base: str, generation: str):
         self.mirror, self.base, self.generation = mirror, base, generation
+        self.grant_id = "incident-forensics"
+        self.input_class = None
+        self.attempt_mirror = None
         self.attempt_packets: list[dict] = []
         self.deadline = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
         self.latest_deadline = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
@@ -92,8 +96,8 @@ class BindingResolver:
             "binding_id": "owner-binding-1", "workspace_id": "workspace-1",
             "repository_id": "repo-1", "principal_id": "cloud-codex",
             "mirror_root": str(self.mirror), "base_sha": self.base,
-            "allowed_areas": ["src"], "grant_id": "incident-forensics",
-            "input_class": None, "generation": self.generation,
+            "allowed_areas": ["src"], "grant_id": self.grant_id,
+            "input_class": self.input_class, "generation": self.generation,
             "executor_id": "repo-executor-1", "publication_revision": "rev-8",
             "max_cost_usd": self.max_cost_usd, "max_concurrency": self.max_concurrency,
             "latest_deadline": self.latest_deadline,
@@ -116,7 +120,7 @@ class BindingResolver:
             "base_sha": self.base, "allowed_areas": ["src"],
             "deadline": deadline,
             "attempt_id": attempt_id, "generation": generation, "fence": fence,
-            "mirror_root": str(self.mirror),
+            "mirror_root": str(self.attempt_mirror or self.mirror),
         }
         self.attempt_packets.append(packet)
         return packet
@@ -356,7 +360,7 @@ def test_owner_budget_reserves_before_calls_and_stops_overruns(setup, tmp_path, 
         assert internal["peak_concurrency"] == 1
 
 
-@pytest.mark.parametrize("revocation", ["qualification", "limit"])
+@pytest.mark.parametrize("revocation", ["qualification", "limit", "grant", "input_class", "mirror"])
 def test_admitted_run_rechecks_live_owner_qualification_and_limits(setup, tmp_path, revocation):
     _, platform = setup
     mirror, base = make_repo(tmp_path)
@@ -372,8 +376,34 @@ def test_admitted_run_rechecks_live_owner_qualification_and_limits(setup, tmp_pa
                      idempotency_key=f"reauth-{revocation}-0000000")
     if revocation == "qualification":
         resolver.qualification_sha256 = "f" * 64
-    else:
+    elif revocation == "limit":
         resolver.max_cost_usd = 1.0
+    elif revocation == "grant":
+        resolver.grant_id = "replacement-grant"
+    elif revocation == "input_class":
+        resolver.input_class = "replacement-class"
+    else:
+        resolver.mirror = tmp_path / "other.git"
+    with platform.db.sessions() as session:
+        job = session.get(Job, created["id"])
+        with pytest.raises(RuntimeFailure, match="repository_binding_revoked"):
+            lifecycle.check_authorization(job)
+    assert invoked == []
+
+
+def test_attempt_packet_cannot_redirect_admitted_mirror(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    invoked = []
+
+    async def stub(*_args):
+        invoked.append(True)
+
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "packet-state", stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    created = submit(owner, packet(base), idempotency_key="mirror-packet-000000")
+    resolver.attempt_mirror = tmp_path / "unadmitted.git"
     assert asyncio.run(Worker(platform, repository_run_executor=lifecycle).run_once())
     observed = owner.get(created["id"], principal_id="cloud-codex")
     assert observed["state"] == "failed"
@@ -381,7 +411,8 @@ def test_admitted_run_rechecks_live_owner_qualification_and_limits(setup, tmp_pa
     assert invoked == []
 
 
-def test_revocation_after_mutation_preserves_uncertain_attempt_and_candidate_workspace(setup, tmp_path):
+@pytest.mark.parametrize("revocation", ["qualification", "grant", "input_class", "mirror"])
+def test_revocation_after_mutation_preserves_uncertain_attempt_and_candidate_workspace(setup, tmp_path, revocation):
     _, platform = setup
     mirror, base = make_repo(tmp_path)
     resolver = BindingResolver(mirror, base, platform.active()[1])
@@ -392,7 +423,14 @@ def test_revocation_after_mutation_preserves_uncertain_attempt_and_candidate_wor
         git("add", "-A", cwd=worktree)
         git("-c", "user.name=Run stub", "-c", "user.email=stub@example.invalid",
             "commit", "-m", "partial", cwd=worktree)
-        resolver.qualification_ref = "replacement-profile-qualification"
+        if revocation == "qualification":
+            resolver.qualification_ref = "replacement-profile-qualification"
+        elif revocation == "grant":
+            resolver.grant_id = "replacement-grant"
+        elif revocation == "input_class":
+            resolver.input_class = "replacement-class"
+        else:
+            resolver.mirror = tmp_path / "other.git"
         authorize()
 
     lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "uncertain-state", stub)
