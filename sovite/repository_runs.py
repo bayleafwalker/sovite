@@ -230,8 +230,12 @@ class RepositoryRunOwner:
         executors = []
         for executor_id, rows in sorted(grouped.items()):
             issues = [_profile_issue(self.execution_profile, row) for row in rows]
-            launchable = self.profile_enabled and all(issue is None for issue in issues)
+            eligible = [row for row, issue in zip(rows, issues) if issue is None]
+            launchable = self.profile_enabled and bool(eligible)
             issue = next((item for item in issues if item), "execution_profile_unavailable")
+            # An available entry describes only bindings that admission can use.
+            # An unavailable entry retains the resolver's IDs for diagnostics.
+            displayed_rows = eligible if launchable else rows
             blockers = ([] if launchable else [{
                 "code": issue if self.profile_enabled else "execution_profile_unavailable",
                 "message": "A current qualified mutable execution profile is required for this binding.",
@@ -241,16 +245,16 @@ class RepositoryRunOwner:
                 "workspace_id": workspace_id,
                 "label": executor_id,
                 "owner": "Sovite",
-                "publication_revision": rows[0].publication_revision,
+                "publication_revision": displayed_rows[0].publication_revision,
                 "observed_at": now.isoformat(),
                 "launch_supported": launchable,
                 "availability": "available" if launchable else "unavailable",
                 "blockers": blockers,
-                "repository_ids": sorted({row.repository_id for row in rows}),
+                "repository_ids": sorted({row.repository_id for row in displayed_rows}),
                 "limits": {
-                    "max_cost_usd": min(row.max_cost_usd for row in rows),
-                    "max_concurrency": min(row.max_concurrency for row in rows),
-                    "latest_deadline": min(row.latest_deadline for row in rows),
+                    "max_cost_usd": min(row.max_cost_usd for row in displayed_rows),
+                    "max_concurrency": min(row.max_concurrency for row in displayed_rows),
+                    "latest_deadline": min(row.latest_deadline for row in displayed_rows),
                 },
             })
         aggregate = [] if any(item["launch_supported"] for item in executors) else [{
@@ -615,14 +619,14 @@ class RepositoryRunAttemptExecutor:
             )}
             if packet_value.get("job_id") != job.id or packet_value.get("attempt_id") != attempt_id or packet_value.get("generation") != job.generation or packet_value.get("fence") != fence:
                 raise ValueError
-            if (raw.get("mirror_root") != record.get("mirror_root")
+            if (packet_value.get("binding_id") != record.get("binding_id")
+                    or raw.get("mirror_root") != record.get("mirror_root")
                     or packet_value.get("workspace_id") != record.get("workspace_id")
                     or packet_value.get("repository_id") != record.get("repository_id")
                     or packet_value.get("base_sha") != record.get("base_sha")
                     or sorted(packet_value.get("allowed_areas", [])) != sorted(record.get("allowed_areas", []))
                     or packet_value.get("deadline") != record.get("deadline")):
                 raise ValueError
-            packet_value["schema_version"] = "sovite-repository-session/v1"
             from .repository_sessions import validate_packet
             packet = validate_packet(packet_value)
         except Exception:

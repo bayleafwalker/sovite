@@ -82,6 +82,8 @@ class BindingResolver:
         self.grant_id = "incident-forensics"
         self.input_class = None
         self.attempt_mirror = None
+        self.attempt_binding_id = None
+        self.attempt_schema = "sovite-repository-session/v1"
         self.attempt_packets: list[dict] = []
         self.deadline = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
         self.latest_deadline = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
@@ -114,8 +116,8 @@ class BindingResolver:
     def issue_attempt_packet(self, binding_id: str, *, job_id: str, attempt_id: str,
                              generation: str, fence: str, deadline: str):
         packet = {
-            "schema_version": "sovite-repository-session/v1",
-            "binding_id": "attempt-binding-" + fence[:8],
+            "schema_version": self.attempt_schema,
+            "binding_id": self.attempt_binding_id or binding_id,
             "job_id": job_id, "workspace_id": "workspace-1", "repository_id": "repo-1",
             "base_sha": self.base, "allowed_areas": ["src"],
             "deadline": deadline,
@@ -279,6 +281,26 @@ def test_expired_profile_cannot_advertise_or_admit(setup, tmp_path):
     assert capability["blockers"][0]["code"] == "execution_profile_expired"
     with pytest.raises(RepositoryRunError, match="qualified"):
         submit(owner, packet(base), idempotency_key="expired-profile-000000")
+
+
+def test_discovery_reports_only_profile_matching_repositories(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    original_list = resolver.list_dispatch_bindings
+    def mixed_bindings(workspace_id, principal_id):
+        current = original_list(workspace_id, principal_id)[0]
+        other = current | {"repository_id": "repo-other", "qualification_ref": "other-profile",
+                           "publication_revision": "old-revision", "max_cost_usd": 0.5}
+        return [other, current]
+    resolver.list_dispatch_bindings = mixed_bindings
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
+    assert capability["launch_supported"]
+    assert capability["repository_ids"] == ["repo-1"]
+    assert capability["publication_revision"] == "rev-8"
+    assert capability["limits"]["max_cost_usd"] == 5.0
+    assert submit(owner, packet(base), idempotency_key="matched-profile-000000")["id"]
 
 
 def test_binding_principal_repository_executor_limits_and_key_digest_are_enforced(setup, tmp_path):
@@ -470,6 +492,28 @@ def test_admitted_run_rechecks_live_owner_qualification_and_limits(setup, tmp_pa
         job = session.get(Job, created["id"])
         with pytest.raises(RuntimeFailure, match="repository_binding_revoked"):
             lifecycle.check_authorization(job)
+    assert invoked == []
+
+
+@pytest.mark.parametrize("bad_packet", ["binding", "schema"])
+def test_attempt_packet_cannot_replace_admitted_binding(setup, tmp_path, bad_packet):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    invoked = []
+    async def stub(*_args):
+        invoked.append(True)
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "binding-state", stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    created = submit(owner, packet(base), idempotency_key="binding-packet-000000")
+    if bad_packet == "binding":
+        resolver.attempt_binding_id = "different-owner-binding"
+    else:
+        resolver.attempt_schema = "sovite-repository-session/v2"
+    assert asyncio.run(Worker(platform, repository_run_executor=lifecycle).run_once())
+    observed = owner.get(created["id"], principal_id="cloud-codex")
+    assert observed["state"] == "failed"
+    assert observed["attempts"] == []
     assert invoked == []
 
 

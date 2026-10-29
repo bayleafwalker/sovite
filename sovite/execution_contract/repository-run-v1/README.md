@@ -55,3 +55,11 @@ validates their presence and binding, not the physical isolation, actual native
 lifecycle, spending controls, or the authenticity of qualification evidence.
 An installation must establish those properties independently. The profile is
 internal and does not change the versioned caller capability response shape.
+
+When an executor has several repository bindings, an available discovery
+entry lists only repositories whose current bindings match the installed
+profile; its publication revision and conservative limits come from those same
+bindings. If none match, discovery reports the executor unavailable and retains
+the resolved repository IDs for diagnostics. A specific admission still
+resolves and checks its own binding. An issued attempt packet must retain the
+admitted binding ID and declared packet version before workspace preparation.
