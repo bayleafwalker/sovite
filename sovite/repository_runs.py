@@ -205,7 +205,7 @@ class RepositoryRunOwner:
                  execution_profile: Any = None):
         self.platform = platform
         self.resolver = resolver
-        self.profile_enabled = profile_enabled and stub_or_qualified_executor is not None
+        self.profile_enabled = profile_enabled is True and stub_or_qualified_executor is not None
         self.executor = stub_or_qualified_executor
         self.execution_profile = execution_profile
 
@@ -256,10 +256,11 @@ class RepositoryRunOwner:
                 "blockers": blockers,
                 "repository_ids": sorted({row.repository_id for row in displayed_rows}),
                 "limits": {
-                    "max_cost_usd": min(row.max_cost_usd for row in displayed_rows),
+                    "max_cost_usd": min(100_000, *(row.max_cost_usd for row in displayed_rows)),
                     "max_concurrency": min(row.max_concurrency for row in displayed_rows),
-                    "latest_deadline": min((row.latest_deadline for row in displayed_rows),
-                                           key=lambda value: _timestamp(value, "latest_deadline")),
+                    "latest_deadline": min((deadline for row in displayed_rows
+                                            for deadline in (row.latest_deadline, row.qualification_expires_at)),
+                                           key=lambda value: _timestamp(value, "deadline")),
                 },
             })
         aggregate = [] if any(item["launch_supported"] for item in executors) else [{

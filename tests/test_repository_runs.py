@@ -331,6 +331,31 @@ def test_attempt_cannot_continue_past_admitted_deadline(setup, tmp_path, monkeyp
             lifecycle.check_authorization(job)
 
 
+def test_advertised_limits_respect_packet_and_qualification_ceiling(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    resolver.max_cost_usd = 200_000.0
+    owner = make_owner(platform, resolver, executor=lambda *_: None)
+    capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
+    assert capability["limits"]["max_cost_usd"] == 100_000
+    assert capability["limits"]["latest_deadline"] == resolver.qualification_expires_at
+    after_qualification = (datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)).isoformat()
+    with pytest.raises(RepositoryRunError) as error:
+        submit(owner, packet(base, deadline=after_qualification), idempotency_key="outside-qualification-000000")
+    assert error.value.code == "deadline_outside_qualification"
+
+
+def test_profile_enable_requires_boolean_true(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    owner = make_owner(platform, resolver, executor=lambda *_: None, enabled="yes")
+    assert owner.capabilities("workspace-1", "cloud-codex")["availability"] == "unavailable"
+    with pytest.raises(RepositoryRunError, match="qualified"):
+        submit(owner, packet(base), idempotency_key="nonboolean-enable-000000")
+
+
 def test_discovery_filters_expired_binding_but_keeps_current_binding(setup, tmp_path):
     _, platform = setup
     mirror, base = make_repo(tmp_path)
@@ -343,7 +368,7 @@ def test_discovery_filters_expired_binding_but_keeps_current_binding(setup, tmp_
     capability = owner.capabilities("workspace-1", "cloud-codex")["executors"][0]
     assert capability["launch_supported"]
     assert capability["repository_ids"] == ["repo-1"]
-    assert capability["limits"]["latest_deadline"] == resolver.latest_deadline
+    assert capability["limits"]["latest_deadline"] == resolver.qualification_expires_at
     assert submit(owner, packet(base), idempotency_key="current-owner-limit-000000")["id"]
 
 
@@ -427,7 +452,7 @@ def test_authenticated_api_scopes_run_list_status_and_cancel(setup, tmp_path):
         assert capability["launch_supported"] is True
         assert capability["limits"] == {
             "max_cost_usd": 5.0, "max_concurrency": 2,
-            "latest_deadline": resolver.latest_deadline,
+            "latest_deadline": resolver.qualification_expires_at,
         }
         request_packet = packet(base)
         request_packet = packet(base)

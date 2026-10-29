@@ -67,3 +67,8 @@ A binding whose owner deadline has passed is unavailable. Discovery compares
 and orders timezone-aware deadlines as instants, so differing UTC offsets do not
 change which deadline is earliest. Invalid or timezone-naive owner deadlines
 fail closed, and ongoing authorization stops at the admitted run deadline.
+For an available entry, the advertised deadline is the earliest owner deadline
+or qualification expiry across the listed bindings, compared as instants. Its
+cost limit is also capped by the portable packet's maximum. Discovery reports
+binding and profile readiness; it does not replace admission's per-request
+checks or the platform's grant and policy authorization.
