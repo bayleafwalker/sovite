@@ -551,3 +551,20 @@ loopback Ollama endpoint and expected digest; it refuses non-C0/non-synthetic in
 never downloads a model or substitutes a synthetic adapter, and writes private bytes
 only to the explicitly supplied `--private-artifact` path. The summary is bounded
 execution evidence; it does not accept Vuoro work or qualify hosted operation.
+
+
+### Candidate 0.1.22
+
+The fresh 0.1.22 candidate includes the native-harness startup credential guard
+and the qualified repository-session, resource-read and candidate-export source
+seams. The previously published 0.1.21 tag and artifacts remain immutable.
+This version adds no database migration. Keep the existing explicit migration,
+backup and startup compatibility procedures when upgrading an older schema.
+
+Native harness startup refuses inherited control/store settings and execution
+tokens before loading configuration or starting the native process. This is
+separate from the remaining default worker SQL/S3 boundary, remote-host
+commissioning, per-user caller identity and enrollment/lifecycle qualification.
+Source packaging or a rendered chart does not establish those live properties.
+The repository seams remain subject to their documented source-only admission
+and do not enable automatic worker launch, publication or merge.
