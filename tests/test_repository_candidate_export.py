@@ -55,6 +55,29 @@ def release(platform, job, content):
         actor='cloud-codex')['release_id']
 
 
+def reconstruct_from_base_only(tmp_path, mirror, data, *, name):
+    target = tmp_path / name
+    target.mkdir()
+    git('init', str(target))
+    bundle = tmp_path / (name + '.bundle')
+    bundle.write_bytes(base64.b64decode(data['bundle_base64']))
+    verify = lambda: subprocess.run(['git', '-C', str(target), 'bundle', 'verify', str(bundle)],
+                                     capture_output=True, text=True)
+    # An empty consumer must not have the prerequisite or candidate object.
+    assert verify().returncode != 0
+    git('fetch', mirror.as_uri(), 'refs/heads/main:refs/heads/base', cwd=target)
+    assert git('rev-parse', 'refs/heads/base', cwd=target) == data['base_sha']
+    missing = subprocess.run(['git', '-C', str(target), 'cat-file', '-e', data['tip_sha']+'^{commit}'],
+                             capture_output=True)
+    assert missing.returncode != 0
+    assert verify().returncode == 0
+    heads = git('bundle', 'list-heads', str(bundle), cwd=target).splitlines()
+    assert heads == [data['tip_sha'] + ' refs/heads/candidate']
+    git('fetch', str(bundle), 'refs/heads/candidate:refs/heads/imported', cwd=target)
+    assert git('rev-parse', 'refs/heads/imported', cwd=target) == data['tip_sha']
+    return target
+
+
 def test_export_exact_candidate_bundle_and_release(prepared, tmp_path):
     platform, exporter, job, attempt, mirror, base=prepared
     content=exporter._prepare_for_owner_review(job.id, attempt, principal_id='cloud-codex',workspace_id='workspace-1')
@@ -66,12 +89,8 @@ def test_export_exact_candidate_bundle_and_release(prepared, tmp_path):
     receipt_bytes=json.dumps(data['receipt_projection'], sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
     assert hashlib.sha256(receipt_bytes).hexdigest()==data['receipt_projection_sha256']
     assert data['receipt_projection']['tip_sha']==data['tip_sha']
-    target=tmp_path/'consumer'; git('clone',str(mirror),str(target))
-    bundle=tmp_path/'candidate.bundle'; bundle.write_bytes(base64.b64decode(data['bundle_base64']))
-    heads = git('bundle','list-heads',str(bundle),cwd=target).splitlines()
-    assert heads == [data['tip_sha'] + ' refs/heads/candidate']
-    git('fetch',str(bundle),'refs/heads/candidate:refs/heads/imported',cwd=target)
-    assert git('rev-parse','refs/heads/imported',cwd=target)==data['tip_sha']
+    target=reconstruct_from_base_only(tmp_path, mirror, data, name='consumer')
+    assert git('show','refs/heads/imported:src/main.txt',cwd=target)=='candidate'
 
 
 def test_export_refuses_wrong_recipient_or_destination(prepared):
@@ -186,11 +205,7 @@ def test_post_capture_replacement_ref_cannot_change_exported_candidate(prepared,
     git('replace',data['tip_sha'],replacement,cwd=worktree)
     result=exporter.export(job.id,attempt,release_id=approved,destination='private-state',principal_id='cloud-codex',workspace_id='workspace-1')
     assert result == content
-    target=tmp_path/'receiving'; git('clone',str(mirror),str(target))
-    # The receiving clone must ignore copied local replacement refs too.
-    git('replace','-d',data['tip_sha'],cwd=target) if git('replace','-l',cwd=target) else None
-    bundle=tmp_path/'retained.bundle'; bundle.write_bytes(base64.b64decode(data['bundle_base64']))
-    git('fetch',str(bundle),'refs/heads/candidate:refs/heads/imported',cwd=target)
+    target=reconstruct_from_base_only(tmp_path, mirror, data, name='receiving')
     assert 'outside.txt' not in git('ls-tree','--name-only','refs/heads/imported',cwd=target).splitlines()
 
 
