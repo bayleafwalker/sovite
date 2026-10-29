@@ -43,6 +43,7 @@ def authority_env(database, tmp_path, v2_bundle):
     platform = Platform(settings)
     platform.db.engine.dispose()
     platform.db = database
+    platform.db.migrate()
     platform.initialize()
     job = platform.submit('incident-forensics', 'private-task', 'operations', 'request-1')
     worker = Worker(platform)

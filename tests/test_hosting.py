@@ -75,6 +75,7 @@ def build_hosted(tmp_path):
             entry["workspace"] = envelope["workspace"]
         settings.qualification_issuers.append(entry)
     platform = Platform(settings)
+    platform.db.migrate()
     platform.initialize()
     generation = platform.compile(bundle, "author")
     platform.activate(generation, "activator")
@@ -515,6 +516,7 @@ def test_nonhosted_generation_hashes_and_operator_qualification_unchanged(tmp_pa
     from sovite.qualification import initialize_keys
     initialize_keys(settings)
     platform = Platform(settings)
+    platform.db.migrate()
     platform.initialize()
     generation = platform.active()[1]
     row = issue_qualification(platform.db, settings, generation, "local", {"generation": generation, "profile": "local", "scope": "Legacy synthetic fixture", "checks": [{"name": "receipt-boundary", "status": "passed"}]})
@@ -691,6 +693,7 @@ def test_worker_health_command_loads_credential_free_role_and_server_stays_prote
         database_url=database_url, operator_token="", artifact_path=artifact_path,
         require_qualification=False,
     ))
+    platform.db.migrate()
     platform.initialize()
     Worker(platform).heartbeat()
     monkeypatch.setenv("SOVITE_DATABASE_URL", database_url)
@@ -713,6 +716,7 @@ def test_review_1_standalone_has_no_bundle_mutation_api(tmp_path):
     settings = Settings(database_url=f"sqlite:///{tmp_path}/standalone.db", operator_token=OPERATOR,
                         public_origin="http://testserver", secure_cookies=False)
     platform = Platform(settings)
+    platform.db.migrate()
     with TestClient(create_app(settings, platform)) as client:
         bundle, generation = platform.active()
         assert not any(route.path.startswith("/api/bundles") for route in client.app.routes)
@@ -786,7 +790,9 @@ def test_review_2b_cli_only_author_credentials_cannot_activate(hosted, monkeypat
 
 def test_review_3_standalone_outputs_preserved(tmp_path, monkeypatch, capsys):
     settings = Settings(database_url=f"sqlite:///{tmp_path}/standalone.db", operator_token=OPERATOR)
-    with TestClient(create_app(settings)) as client:
+    platform = Platform(settings)
+    platform.db.migrate()
+    with TestClient(create_app(settings, platform)) as client:
         assert client.get("/api/flows", headers={"Authorization": "Bearer " + OPERATOR}).json() == policy.flow_projection(policy.load_bundle(settings.bundle_path)[0])
     cli_env(monkeypatch, replace(settings, hosting_envelope_path=""))
     monkeypatch.setenv("SOVITE_BUNDLE_PATH", "/missing/ignored-for-standalone-validate.yaml")

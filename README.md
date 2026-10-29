@@ -27,6 +27,10 @@ python3 scripts/local_platform.py init
 python3 scripts/local_platform.py start
 ```
 
+The local initializer runs the explicit database migration before its first
+platform initialization. Runtime startup only checks schema compatibility and
+refuses a fresh or older database until `sovite db migrate` completes.
+
 Open **http://127.0.0.1:8080**. The generated operator credential is in `.state/local/installation.json`; the script does not print credentials. The local profile runs the same operator application, API, independent worker, signed development qualification, durable SQLite database and private filesystem artifacts. Inference is explicitly synthetic in this profile.
 
 ```sh
@@ -48,6 +52,10 @@ python3 scripts/installation.py up
 python3 scripts/installation.py stage-model
 ```
 
+Compose `up` starts PostgreSQL and Garage, runs `sovite db migrate` in a
+one-shot control container, then starts the runtime services. It refuses to
+migrate while control, worker, or native writer services are running.
+
 `config/platform.ollama.yaml` contains real bindings for a Qwen3 4B analysis agent and a native Codex agent through Ollama's Responses endpoint. The initializer persists the native overlay selection for later build and lifecycle commands. Add `--workspace /path/to/approved-input` at initialization to mount a selected source snapshot read-only; no host input directory is mounted by default. See [Operations](docs/OPERATIONS.md) for workspace, GPU and deployment options. A local model outage queues or fails the request under its existing grant; it never redirects private data to a cloud provider.
 
 The operator console can be used before a grant is qualified. Dispatch remains blocked until a trusted qualification for the current bundle and runtime placement is present. The built-in synthetic assessment cannot qualify a real or enforced installation. [Qualification and security](docs/SECURITY.md) explains the evidence contract and how to prepare a deployment qualification.
@@ -61,6 +69,8 @@ The Helm chart includes the control plane, worker, PostgreSQL, Garage, Ollama, o
 ```
 
 Use `scripts/install_kubernetes.py` with an explicit context, the platform bundle, reviewed Helm values, the runtime secret input and qualification public keys. `--render-only` produces reviewable manifests without contacting a cluster. The full reference values require the actual Kubernetes API CIDRs and installation endpoints. See [Operations](docs/OPERATIONS.md) for the complete invocation and model staging steps.
+
+Before a Helm rollout, stop old control/worker writers and run the candidate image's `sovite db migrate` once with the migration-role Secret. The chart has no migration Job; [Operations](docs/OPERATIONS.md#database-migrations-and-hosted-startup) includes a concrete Job manifest and wait/check sequence. Runtime pods use the runtime database role and check schema compatibility without DDL.
 
 `config/platform.kubernetes.yaml` and `deploy/examples/reference-values.yaml` describe the full reference installation. The default chart can also use externally managed PostgreSQL and S3. Enforced mode refuses mutable workload image tags, missing qualification, insecure operator access and unrestricted network exceptions. Image pins must be actual resolved digests; `scripts/lock_images.py` resolves registry manifests.
 

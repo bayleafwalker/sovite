@@ -111,6 +111,7 @@ def owner(request, database, gateway_bundle, tmp_path, monkeypatch):  # noqa: F8
     platform = Platform(settings)
     platform.db.engine.dispose()
     platform.db = database
+    platform.db.migrate()
     platform.initialize()
     principal = leases.ExecutionPrincipal("actual-workload", "local")
     service = leases.LeaseService(platform, "unbound-owner-service", {})
@@ -168,10 +169,10 @@ def reopen(owner):
     return leases.LeaseService(fresh, "reopened-unbound-service", {})
 
 
-def test_owner_fixture_actual_schema5_submit_and_authorize_control(owner):
+def test_owner_fixture_actual_schema6_submit_and_authorize_control(owner):
     job = submit(owner)
     with owner.platform.db.sessions() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 5}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 6}
         assert (
             owner.platform.authorize(
                 session, job.grant_id, job.caller, generation=job.generation

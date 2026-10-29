@@ -43,6 +43,7 @@ def setup(tmp_path, request):
             connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
         settings = replace(settings, database_url=url, database_schema=schema)
     platform = Platform(settings)
+    platform.db.migrate()
     try:
         with TestClient(create_app(settings, platform)) as client:
             yield settings, platform, client

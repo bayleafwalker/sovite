@@ -31,7 +31,7 @@ def prepared(tmp_path):
         artifact_path=str(tmp_path/'artifacts'), operator_token='operator-repo-test-token-0000000000',
         caller_tokens={'cloud-codex':CALLER, 'other-user':OTHER}, public_origin='http://testserver',
         secure_cookies=False, require_qualification=False)
-    platform=Platform(settings); platform.initialize()
+    platform=Platform(settings); platform.db.migrate(); platform.initialize()
     mirror, base=make_repo(tmp_path)
     resolver=BindingResolver(mirror,base,platform.active()[1])
     async def worker(worktree, *_args):
