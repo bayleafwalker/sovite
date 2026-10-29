@@ -130,6 +130,13 @@ def main(argv: list[str] | None = None) -> int:
     if not journal_path or not Path(journal_path).is_absolute():
         print("SOVITE_EXECUTION_JOURNAL_PATH must be an absolute path", file=sys.stderr)
         return 2
+    from .remote_worker_health import _health_path
+
+    try:
+        _health_path()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     try:
         poll_seconds = _bounded_seconds("SOVITE_EXECUTION_POLL_SECONDS", 2.0, 0.1, 60.0)
         lease_seconds = _bounded_seconds("SOVITE_EXECUTION_LEASE_SECONDS", 90.0, 1.0, 3600.0)

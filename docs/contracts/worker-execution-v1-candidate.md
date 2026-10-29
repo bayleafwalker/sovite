@@ -168,6 +168,13 @@ This composition is source-level and opt-in. It does not authorize rollout or
 prove a site's secret, network, or credential bindings. The local SQL/S3 worker
 and its existing composition are unchanged.
 
+The remote-worker process requires `SOVITE_REMOTE_WORKER_HEALTH_PATH` to name
+an absolute heartbeat path, alongside its explicit instance and journal path.
+Missing or relative heartbeat configuration exits with configuration status 2
+before creating or locking the execution journal or contacting the owner. The
+offline `--inspect-journal` command needs no heartbeat configuration and keeps
+the stopped journal unchanged.
+
 ## Error boundary
 
 The route uses the existing bounded `PlatformError` body. Worker operations use
