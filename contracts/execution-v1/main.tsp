@@ -110,8 +110,8 @@ model OperationFound {
   state: "found";
   operation_id: OperationId;
   operation_kind: "pull" | "start" | "renew" | "handback" | "complete";
-  job_id: JobId;
-  fence: Fence;
+  job_id: JobId | null;
+  fence: Fence | null;
   result_state: "idle" | "reserved" | "started" | "already_started" | "renewed" | "handed_back" | "completed" | "failed" | "cancelled" | "retry_wait" | "blocked";
 }
 
