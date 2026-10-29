@@ -24,7 +24,10 @@ private Git repository names the retained candidate commit directly and includes
 no unrelated refs. Candidate history must be linear from that base. The owner
 validates the retained immutable receipt, its exact stored digest and execution
 packet/fence binding, and a clean worktree snapshot before and after bundle
-construction. Internal fence values and filesystem paths are not included in the
+construction. Shared owner Git invocations disable replacement refs, grafts and
+repository-configured fsmonitor hooks, so snapshot and bundle inspect the same
+original objects without executing an fsmonitor command. Internal fence values
+and filesystem paths are not included in the
 export envelope. Candidate bytes can themselves contain sensitive content and
 remain subject to the installed output contract and its review procedure.
 

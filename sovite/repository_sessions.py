@@ -196,9 +196,13 @@ def _git_env() -> dict[str, str]:
                  "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
                  "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF"):
         env.pop(name, None)
+    # Replacement refs and grafts can make Git inspect a different tree or
+    # ancestry from the immutable object later exported to another repository.
+    # Override even caller-supplied values for every candidate Git operation.
     env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
-                "GIT_NO_LAZY_FETCH": "1"})
+                "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+                "GIT_GRAFT_FILE": os.devnull})
     return env
 
 
@@ -256,7 +260,7 @@ def _consume_process(process: subprocess.Popen, *, max_bytes: int, timeout: floa
 def _run_git(*args: str, cwd: Path | None = None, max_bytes: int = _MAX_GIT_OUTPUT,
              timeout: float = 30, digest_only: bool = False) -> tuple[int, bytes | str]:
     try:
-        process = subprocess.Popen(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=cwd,
+        process = subprocess.Popen(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args], cwd=cwd,
                                    env=_git_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL)
     except OSError:
