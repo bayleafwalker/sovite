@@ -83,6 +83,15 @@ def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner, 
                           operation_id="resource-wrong-instance")
     assert client.post("/internal/resource-owner/v1/requests", headers=worker,
                        json=wrong_instance).status_code == 403
+    # Rotate after bearer authentication but before authority lock acquisition.
+    original_lock = owner.platform.db.authority_lock
+    def rotate_before_lock(session):
+        settings.execution_tokens["actual-workload"] = "synthetic-rotated-token"
+        return original_lock(session)
+    monkeypatch.setattr(owner.platform.db, "authority_lock", rotate_before_lock)
+    assert client.post("/internal/resource-owner/v1/requests", headers=worker, json=submit_body).status_code == 403
+    monkeypatch.setattr(owner.platform.db, "authority_lock", original_lock)
+    settings.execution_tokens["actual-workload"] = TOKEN
     submitted = client.post("/internal/resource-owner/v1/requests", headers=worker,
                             json=submit_body)
     assert submitted.status_code == 200
@@ -149,6 +158,15 @@ def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner, 
         json={**{k: scope[k] for k in ("workload_id", "tenant_id", "workspace_id", "domain_id", "observation_id")},
               "principal_id": "operations", "policy_revision": POLICY_REVISION})
     assert grant.status_code == 200
+    original_lock = owner.platform.db.authority_lock
+    def rotate_gateway_after_auth(session):
+        original_lock(session)
+        session.get(ResourceGatewayEnrollment, enrollment.json()["enrollment_id"]).token_digest = "0" * 64
+    monkeypatch.setattr(owner.platform.db, "authority_lock", rotate_gateway_after_auth)
+    assert client.post("/internal/resource-owner/v1/current", headers=gateway, json=binding).json() == {"current": False}
+    monkeypatch.setattr(owner.platform.db, "authority_lock", original_lock)
+    with owner.platform.db.sessions.begin() as db:
+        db.get(ResourceGatewayEnrollment, enrollment.json()["enrollment_id"]).token_digest = hashlib.sha256(gateway_token.encode()).hexdigest()
     assert client.post("/internal/resource-owner/v1/current", headers=gateway, json=binding).json() == {"current": True}
     for mutation in ({"actor": "foreign-principal"},
                      {"policy_revision": "sha256:" + "b" * 64},
@@ -156,10 +174,36 @@ def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner, 
         denied = client.post("/internal/resource-owner/v1/result", headers=gateway,
                              json={**result_body, **mutation})
         assert denied.json() == {"accepted": False, "state": "withheld"}
+    from sqlalchemy.orm import Session
+    with owner.platform.db.sessions.begin() as db:
+        lease = db.get(WorkerExecutionLease, job["job_id"])
+        job_row = db.get(Job, job["job_id"])
+        old_until = lease.lease_until
+        lease.lease_until = job_row.lease_until = time.time() + .25
+    original_scalars = Session.scalars
+    def delayed_scalars(session, statement, *args, **kwargs):
+        if "resource_output_grants" in str(statement): time.sleep(.5)
+        return original_scalars(session, statement, *args, **kwargs)
+    monkeypatch.setattr(Session, "scalars", delayed_scalars)
+    assert client.post("/internal/resource-owner/v1/result", headers=gateway, json=result_body).json() == {"accepted": False, "state": "fenced"}
+    monkeypatch.setattr(Session, "scalars", original_scalars)
+    with owner.platform.db.sessions.begin() as db:
+        db.get(WorkerExecutionLease, job["job_id"]).lease_until = old_until
+        db.get(Job, job["job_id"]).lease_until = old_until
     accepted = client.post("/internal/resource-owner/v1/result", headers=gateway, json=result_body)
     assert accepted.json() == {"accepted": True, "state": "stored"}
     assert client.post("/internal/resource-owner/v1/result", headers=gateway,
                        json=result_body).json() == accepted.json()
+    with owner.platform.db.sessions.begin() as db:
+        lease = db.get(WorkerExecutionLease, job["job_id"])
+        job_row = db.get(Job, job["job_id"])
+        lease.lease_until = job_row.lease_until = time.time() + .25
+    monkeypatch.setattr(Session, "scalars", delayed_scalars)
+    assert client.post("/internal/resource-owner/v1/result", headers=gateway, json=result_body).json() == {"accepted": False, "state": "fenced"}
+    monkeypatch.setattr(Session, "scalars", original_scalars)
+    with owner.platform.db.sessions.begin() as db:
+        db.get(WorkerExecutionLease, job["job_id"]).lease_until = old_until
+        db.get(Job, job["job_id"]).lease_until = old_until
     changed_projection = dict(projection, phase="Succeeded")
     changed_content = json.dumps(changed_projection, sort_keys=True, ensure_ascii=True,
                                  separators=(",", ":")).encode()
@@ -172,6 +216,11 @@ def test_enrolled_gateway_flow_binds_scope_fence_output_and_fresh_reader(owner, 
     reader = {"request_id": request_id, "instance_id": owner.instance,
         "job_id": job["job_id"], "generation": job["generation"],
         "fence": job["fence"], "operation_id": "resource-result-read-1"}
+    original_lock = owner.platform.db.authority_lock
+    monkeypatch.setattr(owner.platform.db, "authority_lock", rotate_before_lock)
+    assert client.post("/internal/resource-owner/v1/result/read", headers=worker, json=reader).status_code == 403
+    monkeypatch.setattr(owner.platform.db, "authority_lock", original_lock)
+    settings.execution_tokens["actual-workload"] = TOKEN
     read = client.post("/internal/resource-owner/v1/result/read", headers=worker, json=reader)
     assert read.status_code == 200
     assert read.json()["observation"] == projection

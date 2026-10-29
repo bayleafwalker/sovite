@@ -110,7 +110,7 @@ def install_routes(app, platform, settings):
         token = authorization[7:]
         for key, expected in settings.execution_tokens.items():
             if secrets.compare_digest(token.encode(), expected.encode()):
-                return key
+                return key, hashlib.sha256(token.encode()).hexdigest()
         raise HTTPException(403, "workload_denied")
 
     def gateway(authorization: str = Header(default="")):
@@ -127,7 +127,7 @@ def install_routes(app, platform, settings):
                 ResourceGatewayEnrollment.audience == "resource-gateway")).all()
             for row in rows:
                 if secrets.compare_digest(row.token_digest, hashlib.sha256(token.encode()).hexdigest()):
-                    return row.id
+                    return row.id, hashlib.sha256(token.encode()).hexdigest()
         raise HTTPException(403, "gateway_denied")
 
     @app.post("/internal/resource-owner/v1/enrollments")
@@ -201,8 +201,14 @@ def install_routes(app, platform, settings):
             row.active = False
         return {"revoked": True}
 
+    def workload_current(identity):
+        workload_id, authenticated_digest = identity
+        token = settings.execution_tokens.get(workload_id)
+        return bool(token and secrets.compare_digest(authenticated_digest, hashlib.sha256(token.encode()).hexdigest()))
+
     @app.post("/internal/resource-owner/v1/requests")
-    def submit(body: Submit, workload_id=Depends(workload)):
+    def submit(body: Submit, identity=Depends(workload)):
+        workload_id, authenticated_digest = identity
         remote = RemoteExecution(platform)
         principal = ExecutionPrincipal(workload_id, settings.compute_id)
         context = ExecutionContext(instance_id=body.instance_id, operation_id=body.operation_id,
@@ -210,6 +216,8 @@ def install_routes(app, platform, settings):
         with platform.db.sessions.begin() as session:
             platform.db.authority_lock(session)
             now = time.time()
+            if not workload_current(identity):
+                raise HTTPException(403, "workload_denied")
             job = session.get(Job, body.job_id)
             try:
                 owner = remote._owner(principal, context)
@@ -237,17 +245,19 @@ def install_routes(app, platform, settings):
                             prior.observation_id, prior.namespace, prior.pod_name)
                         != (scope.gateway_id, scope.tenant_id, scope.workspace_id, scope.domain_id,
                             scope.observation_id, scope.namespace, scope.pod_name)
-                        or prior.workload_token_digest != hashlib.sha256(settings.execution_tokens[workload_id].encode()).hexdigest()):
+                        or prior.workload_token_digest != authenticated_digest):
                     raise HTTPException(409, "operation_conflict")
                 try:
                     remote._require_started(job, lease, time.time())
+                    if not workload_current(identity):
+                        raise ValueError
                 except Exception:
                     raise HTTPException(403, "execution_scope_denied") from None
                 return {"request_id": prior.id, "state": prior.state,
                         "fence_fingerprint": "sha256:" + hashlib.sha256(prior.fence.encode()).hexdigest()}
             row = ResourceOwnerRequest(id=request_id, job_id=job.id, instance_id=body.instance_id,
                 generation=body.generation, workload_id=workload_id, gateway_id=scope.gateway_id,
-                workload_token_digest=hashlib.sha256(settings.execution_tokens[workload_id].encode()).hexdigest(),
+                workload_token_digest=authenticated_digest,
                 principal_id=job.caller, fence=lease.fence, tenant_id=scope.tenant_id,
                 workspace_id=scope.workspace_id, domain_id=scope.domain_id,
                 observation_id=scope.observation_id, namespace=scope.namespace,
@@ -256,12 +266,14 @@ def install_routes(app, platform, settings):
             session.add(row)
             try:
                 remote._require_started(job, lease, time.time())
+                if not workload_current(identity):
+                    raise ValueError
             except Exception:
                 raise HTTPException(403, "execution_scope_denied") from None
             return {"request_id": request_id, "state": "pending",
                     "fence_fingerprint": "sha256:" + hashlib.sha256(lease.fence.encode()).hexdigest()}
 
-    def valid_request(session, row, enrollment_id, fingerprint):
+    def valid_request(session, row, enrollment_id, fingerprint, gateway_digest=None):
         enrollment = session.get(ResourceGatewayEnrollment, enrollment_id)
         job = session.get(Job, row.job_id)
         lease = session.get(WorkerExecutionLease, row.job_id)
@@ -269,7 +281,8 @@ def install_routes(app, platform, settings):
         now = time.time()
         current_token = settings.execution_tokens.get(row.workload_id)
         valid = bool(current_token and secrets.compare_digest(row.workload_token_digest, hashlib.sha256(current_token.encode()).hexdigest())
-            and enrollment and not enrollment.revoked and enrollment.expires_at > now
+            and enrollment and (gateway_digest is None or secrets.compare_digest(enrollment.token_digest, gateway_digest))
+            and not enrollment.revoked and enrollment.expires_at > now
             and enrollment.audience == "resource-gateway" and enrollment.tenant_id == row.tenant_id
             and enrollment.gateway_id == row.gateway_id
             and enrollment.workspace_id == row.workspace_id and enrollment.domain_id == row.domain_id
@@ -306,13 +319,19 @@ def install_routes(app, platform, settings):
                     and not execution_authority_current(platform, session, current_job, current_lease,
                                                        row.workload_id, now)):
                 return False
+            remote._require_started(current_job, current_lease, time.time())
+            latest_token = settings.execution_tokens.get(row.workload_id)
+            if (not latest_token or not secrets.compare_digest(row.workload_token_digest, hashlib.sha256(latest_token.encode()).hexdigest())
+                    or enrollment.revoked or enrollment.expires_at <= time.time()
+                    or (gateway_digest is not None and not secrets.compare_digest(enrollment.token_digest, gateway_digest))):
+                return False
         except Exception:
             return False
         return True
 
     @app.post("/internal/resource-owner/v1/poll")
-    def poll(body: Poll, enrollment_id=Depends(gateway)):
-        now = time.time()
+    def poll(body: Poll, identity=Depends(gateway)):
+        enrollment_id, gateway_digest = identity
         with platform.db.sessions.begin() as session:
             platform.db.authority_lock(session)
             enrollment = session.get(ResourceGatewayEnrollment, enrollment_id)
@@ -328,7 +347,7 @@ def install_routes(app, platform, settings):
             rows = session.scalars(query.order_by(ResourceOwnerRequest.id)).yield_per(100)
             items = []
             for row in rows:
-                if valid_request(session, row, enrollment_id, "sha256:" + hashlib.sha256(row.fence.encode()).hexdigest()):
+                if valid_request(session, row, enrollment_id, "sha256:" + hashlib.sha256(row.fence.encode()).hexdigest(), gateway_digest):
                     lease = session.get(WorkerExecutionLease, row.job_id)
                     items.append({"request_id": row.id, "job_id": row.job_id,
                         "principal_id": row.principal_id, "audience": enrollment.audience,
@@ -343,11 +362,12 @@ def install_routes(app, platform, settings):
             return {"requests": items, "next_cursor": items[-1]["request_id"] if len(items) == 100 else None}
 
     @app.post("/internal/resource-owner/v1/current")
-    def current(body: Current, enrollment_id=Depends(gateway)):
+    def current(body: Current, identity=Depends(gateway)):
+        enrollment_id, gateway_digest = identity
         with platform.db.sessions.begin() as session:
             platform.db.authority_lock(session)
             row = session.get(ResourceOwnerRequest, body.request_id)
-            if not row or not valid_request(session, row, enrollment_id, body.fence_fingerprint):
+            if not row or not valid_request(session, row, enrollment_id, body.fence_fingerprint, gateway_digest):
                 return {"current": False}
             grant = session.scalars(select(ResourceOutputGrant).where(
                 ResourceOutputGrant.active.is_(True), ResourceOutputGrant.workload_id == row.workload_id,
@@ -358,10 +378,11 @@ def install_routes(app, platform, settings):
                 ResourceOutputGrant.destination == body.destination,
                 ResourceOutputGrant.policy_revision == body.policy_revision)).first()
             return {"current": bool(grant and body.actor == row.principal_id
-                                    and valid_request(session, row, enrollment_id, body.fence_fingerprint))}
+                                    and valid_request(session, row, enrollment_id, body.fence_fingerprint, gateway_digest))}
 
     @app.post("/internal/resource-owner/v1/result")
-    def result(body: Result, enrollment_id=Depends(gateway)):
+    def result(body: Result, identity=Depends(gateway)):
+        enrollment_id, gateway_digest = identity
         try:
             content = base64.b64decode(body.observation_b64, validate=True)
         except (ValueError, TypeError):
@@ -382,7 +403,7 @@ def install_routes(app, platform, settings):
         with platform.db.sessions.begin() as session:
             platform.db.authority_lock(session)
             row = session.get(ResourceOwnerRequest, body.request_id)
-            current = bool(row and valid_request(session, row, enrollment_id, body.fence_fingerprint))
+            current = bool(row and valid_request(session, row, enrollment_id, body.fence_fingerprint, gateway_digest))
             if not current:
                 return {"accepted": False, "state": "fenced"}
             scope = session.get(ResourceWorkloadScope, row.workload_id)
@@ -405,6 +426,10 @@ def install_routes(app, platform, settings):
             if (grant is None or body.actor != row.principal_id or body.release != "allowed"
                     or scope is None or observation != expected):
                 return {"accepted": False, "state": "withheld"}
+            # The owner lock serializes policy mutations. This fresh check is
+            # the authorization decision immediately before replay or mutation.
+            if not valid_request(session, row, enrollment_id, body.fence_fingerprint, gateway_digest):
+                return {"accepted": False, "state": "fenced"}
             if row.observation is not None:
                 replay = (row.observation == content.decode("utf-8")
                     and row.observation_digest == body.observation_digest[7:]
@@ -428,13 +453,16 @@ def install_routes(app, platform, settings):
             return {"accepted": True, "state": "stored"}
 
     @app.post("/internal/resource-owner/v1/result/read")
-    def read_result(body: ResultRead, workload_id=Depends(workload)):
+    def read_result(body: ResultRead, identity=Depends(workload)):
+        workload_id, _ = identity
         principal = ExecutionPrincipal(workload_id, settings.compute_id)
         context = ExecutionContext(instance_id=body.instance_id, operation_id=body.operation_id,
             job_id=body.job_id, generation=body.generation, fence=body.fence)
         with platform.db.sessions.begin() as session:
             platform.db.authority_lock(session)
             now = time.time()
+            if not workload_current(identity):
+                raise HTTPException(403, "workload_denied")
             row = session.get(ResourceOwnerRequest, body.request_id)
             if (row is None or row.job_id != body.job_id or row.workload_id != workload_id
                     or row.fence != body.fence or row.observation is None or row.release != "allowed"):
@@ -483,7 +511,7 @@ def install_routes(app, platform, settings):
                     raise ValueError
             except (ValueError, TypeError, KeyError, UnicodeError):
                 raise HTTPException(404, "result_withheld") from None
-            if not valid_request(session, row, row.enrollment_id, fingerprint):
+            if not workload_current(identity) or not valid_request(session, row, row.enrollment_id, fingerprint):
                 raise HTTPException(404, "result_withheld")
             return {"request_id": row.id, "observation": observation,
                 "sha256": "sha256:" + row.observation_digest,
