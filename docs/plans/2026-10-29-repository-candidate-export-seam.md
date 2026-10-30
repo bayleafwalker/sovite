@@ -40,3 +40,9 @@ must obtain the exact base separately and independently verify its objects. A
 later integration must add qualified authentication, source continuity, work
 owner currentness and authorized delivery; this helper never settles work or
 proves a candidate is correct.
+
+The [portable workflow capture/release requirements](2026-10-24-portable-agent-workflows.md#sv-pw5-classify-and-release-the-exact-export)
+apply this exact-byte boundary to future session evidence. They require a
+separate redacted export and its lineage, rather than treating a scan result or
+raw-log reference as disclosure authority. No transcript export profile or
+additional accepted payload is introduced by that plan.
