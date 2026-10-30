@@ -8,6 +8,13 @@ The first generated `agent-http-v1` contract is recorded in
 broader document also retains later-profile requirements; qualification and
 deployment remain separate work.
 
+The [portable repository workflow amendment](../plans/2026-10-24-portable-agent-workflows.md#2026-10-30-capture-ownership-and-recovery-requirements)
+adds the next-profile requirements for progress observations, exact capture and
+export references, native continuation and effect/usage evidence. Those are
+implementation requirements, not fields accepted by the generated
+`agent-http-v1` candidate. Their rollout must preserve the identity, replay,
+fencing and current-authority rules below.
+
 The existing Platform jobs, queue, authorization, audit, and universal execution
 lease remain the only state authority. The identity, fence, digest, and
 transaction rules below inherit the internal owner decisions in
