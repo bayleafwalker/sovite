@@ -7,12 +7,13 @@ The API's embedded worker uses the same lifecycle executor as its repository
 owner and candidate exporter; a standalone `sovite worker` builds the same
 composition from its installed configuration.
 
-This source slice does not ship `sovite.repository_native_vm`. Configuring a
-runtime therefore remains unavailable until that fixed builtin implementation
-and its qualification are installed. The actual provider VM lifecycle, native
-process boundary, and credential-contained native model bridge remain separate
-implementation and commissioning work. The existing model helper is explicitly
-development-only; this composition does not promote it.
+The fixed builtin [native VM driver](native-vm-runtime.md) is source-only and
+remains unavailable without an installed independent Cloud observer and current
+signed qualification of the exact VM, image, native/helper closures, provider
+accounting, and process controls. Source or configuration does not establish
+those facts. Actual automatic provider allocation/reclamation and commissioning
+remain separate work. The existing model helper is explicitly development-only;
+this composition does not promote it.
 
 The file is host-owner configuration, not a grant database or an API request.
 The file and every parent must have canonical paths without symbolic links.
