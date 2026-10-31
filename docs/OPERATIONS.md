@@ -625,6 +625,22 @@ worker authority. The candidate also preserves the existing hosted migration
 procedure; release packaging, source tests, or a rendered chart do not
 establish live adoption or qualification.
 
+### Candidate 0.1.24
+
+This source candidate adds the schema-7 resource-owner catalogue/request
+migration and repository recovery release API 1.3. Schema 7 preserves existing
+resource records and requires an explicit migration; schema-6 runtimes refuse
+schema 7, and schema-7 runtimes refuse older schemas. Follow the schema-7
+preflight, backup, migration, and rollback boundary in
+[the resource-owner v2 contract](contracts/resource-owner-v2.md).
+
+The repository recovery release API records source-backed recovery copies
+under the current caller authority. Its source tests do not establish production
+deployment, hosted qualification, merge authority, or native execution
+qualification. Other bundled inference and native-runtime source does not
+qualify Responses C0 or any model/service for production use. Source packaging
+and rendered deployment configuration likewise do not establish live adoption.
+
 ### Repository execution host composition
 
 The optional [installed repository runtime](repository-runtime.md) connects a
