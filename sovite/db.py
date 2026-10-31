@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Boolean, Float, Index, Integer, JSON, String, Text, UniqueConstraint, create_engine, event, inspect, select
+from sqlalchemy import Boolean, CheckConstraint, Float, Index, Integer, JSON, String, Text, UniqueConstraint, create_engine, event, inspect, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -174,10 +174,14 @@ class ResourceWorkloadScope(Base):
     tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
     workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
     domain_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    observation_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    namespace: Mapped[str] = mapped_column(String(63), nullable=False)
-    pod_name: Mapped[str] = mapped_column(String(253), nullable=False)
+    observation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    namespace: Mapped[str | None] = mapped_column(String(63), nullable=True)
+    pod_name: Mapped[str | None] = mapped_column(String(253), nullable=True)
+    target_catalog: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+    __table_args__ = (CheckConstraint(
+        '(target_catalog IS NULL AND observation_id IS NOT NULL AND namespace IS NOT NULL AND pod_name IS NOT NULL) OR (target_catalog IS NOT NULL AND observation_id IS NULL AND namespace IS NULL AND pod_name IS NULL)',
+        name='resource_scope_target_shape'),)
 
 
 class ResourceOutputGrant(Base):
@@ -212,8 +216,8 @@ class ResourceOwnerRequest(Base):
     workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
     domain_id: Mapped[str] = mapped_column(String(128), nullable=False)
     observation_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    namespace: Mapped[str] = mapped_column(String(63), nullable=False)
-    pod_name: Mapped[str] = mapped_column(String(253), nullable=False)
+    namespace: Mapped[str | None] = mapped_column(String(63), nullable=True)
+    pod_name: Mapped[str | None] = mapped_column(String(253), nullable=True)
     request: Mapped[dict] = mapped_column(JSON, nullable=False)
     state: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
     observation: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -226,6 +230,9 @@ class ResourceOwnerRequest(Base):
     output_actor: Mapped[str | None] = mapped_column(String(160), nullable=True)
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
+    __table_args__ = (CheckConstraint(
+        '(namespace IS NULL AND pod_name IS NULL) OR (namespace IS NOT NULL AND pod_name IS NOT NULL)',
+        name='resource_request_target_shape'),)
 
 
 class HelperEnrollment(Base):
@@ -300,13 +307,17 @@ class SetupDraft(Base):
     created_at: Mapped[float] = mapped_column(Float, default=time.time)
 
 
+from .resource_schema import legacy_tables
+_RESOURCE_V6 = legacy_tables()
+
 MIGRATIONS = (
     (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations", "resource_gateway_enrollments", "resource_workload_scopes", "resource_output_grants", "resource_owner_requests"})),
     (2, (BindingState.__table__,)),
     (3, (ExecutionAuthority.__table__, HelperEnrollment.__table__, HelperSession.__table__, RequestLedger.__table__)),
     (4, (SetupPrincipal.__table__, SetupDraft.__table__)),
     (5, (WorkerExecutionLease.__table__, WorkerExecutionOperation.__table__)),
-    (6, (ResourceGatewayEnrollment.__table__, ResourceWorkloadScope.__table__, ResourceOutputGrant.__table__, ResourceOwnerRequest.__table__)),
+    (6, _RESOURCE_V6),
+    (7, (ResourceWorkloadScope.__table__, ResourceOwnerRequest.__table__)),
 )
 
 
@@ -422,7 +433,8 @@ class Database:
                 raise DatabaseSchemaError("database_schema_missing", "Provision the configured PostgreSQL schema before migration")
             version = self._version(connection)
             if version:
-                self._structure(connection, [table for number, tables in MIGRATIONS if number <= version for table in tables])
+                required={table.name:table for number,tables in MIGRATIONS if number<=version for table in tables}
+                self._structure(connection, required.values())
                 self._audit_head(connection)
             if connection.dialect.name == "sqlite" and version < self.schema_version:
                 connection.exec_driver_sql("PRAGMA journal_mode=WAL")
@@ -430,6 +442,10 @@ class Database:
             for number, tables in MIGRATIONS:
                 if number <= version:
                     continue
+                if number == 7:
+                    from .resource_schema import migrate
+                    migrate(connection,schema=self.schema,old_scope=_RESOURCE_V6[1],old_request=_RESOURCE_V6[3],
+                        scope=ResourceWorkloadScope.__table__,request=ResourceOwnerRequest.__table__)
                 for table in tables:
                     table.create(connection, checkfirst=True)
                 if number == 1:

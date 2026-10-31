@@ -40,3 +40,40 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.lock && pip install -e '.[test,retention]'
       - run: python -m pytest tests/test_repository_candidate_retention.py tests/test_repository_repairs.py tests/test_repository_repair_feedback_context.py tests/test_repository_currentness_retention.py tests/test_repository_recovery_retention.py -q
+
+  resource-targets:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_PASSWORD: resource-fixture-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 12
+    env:
+      SOVITE_TEST_POSTGRES_URL: postgresql+psycopg://sovite_resource_test:resource-fixture-only@127.0.0.1:5432/sovite_resource_test
+      SOVITE_RESOURCE_REQUIRE_PG: '1'
+      SOVITE_TEST_POSTGRES_ROLE_ADMIN_URL: postgresql+psycopg://postgres:resource-fixture-only@127.0.0.1:5432/sovite_resource_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.lock && pip install -e '.[test]'
+      - name: Create unprivileged disposable resource owner
+        run: |
+          python - <<'PYSETUP'
+          import psycopg
+          with psycopg.connect('host=127.0.0.1 port=5432 dbname=postgres user=postgres password=resource-fixture-only',autocommit=True) as connection:
+              connection.execute("CREATE ROLE sovite_resource_test LOGIN PASSWORD 'resource-fixture-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
+              connection.execute("CREATE DATABASE sovite_resource_test OWNER sovite_resource_test")
+              connection.execute("COMMENT ON DATABASE sovite_resource_test IS 'sovite:disposable-resource-integration-test'")
+          PYSETUP
+      - run: >-
+          python -m pytest tests/test_resource_schema_v2.py tests/test_resource_owner_v2.py
+          tests/test_resource_gateway_v2.py tests/test_resource_contract_v2.py
+          tests/test_resource_target_executors.py tests/test_resource_gateway_v2_cli.py
+          tests/test_resource_owner_api.py tests/test_resource_gateway_store.py
+          tests/test_resource_gateway_service.py tests/test_migrations.py -q
