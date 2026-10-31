@@ -20,9 +20,10 @@
     "scope": "Actual native host-RPC privilege seam, no admitted-model-tool escalation claim"
   },
   "fixture": {
-    "immutable_needed_store_roots": 171,
+    "immutable_needed_store_roots": 118,
     "no_entire_store_mount": true,
-    "profile_sha256": "45e9dca22b8436809c1db988610c2c5459227a3f50109f2d2a58a134861ba92f",
+    "profile_sha256": "6682d18dd3c4474a4335ad929d7e3577daa042aecdb02df94d82d851349482c4",
+    "python": "Bare Python stdlib closure; owner API dependencies excluded",
     "synthetic_parent_credentials_only": true,
     "uid": 1000
   },
@@ -56,6 +57,6 @@
     "sovite/repository_native_isolation_child.py": "84d9caef9a6caa810ca370df3fd7b0a73c28f9ccd718e848eb4d3dc2d24cb93a",
     "sovite/repository_native_runtime.py": "598ea471ea5ddf4cd9f833c15afbba9d0782580a007419e199d0a1626b18b753",
     "sovite/repository_native_vm.py": "ca160a016e82730b9007fab1d2ebd7ad97a629713cbb0bc1238740bcdeae3b20",
-    "tests/probes/native_supervisor_containment.py": "c100080e0e6b2a0b96fd8332b8f4b23786cd1877107accf9b3ec6a6f4862de0c"
+    "tests/probes/native_supervisor_containment.py": "8af2b02697ec6f087e2e9a757682acb99e47afe3d152ec89bc356810bdca018e"
   }
 }

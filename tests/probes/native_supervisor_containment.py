@@ -26,10 +26,11 @@ async def probe(args):
     runtime=load_runtime(args.runtime_module)
     # Declared immutable source-only test inputs. Production always reads the
     # fixed installed profile and fixed adjacent child module, with no setting.
+    import sovite.repository_native_isolation as isolation
     if args.fixture_profile:
-        import sovite.repository_native_isolation as isolation
         isolation._PROFILE=args.fixture_profile
         isolation._CHILD=args.fixture_child
+    guest_python=isolation.load_profile().python
     with tempfile.TemporaryDirectory(prefix='native-containment-proof-')as directory:
         root=Path(directory);root.chmod(0o700)
         home=root/'native-home';home.mkdir(mode=0o700)
@@ -58,7 +59,7 @@ async def probe(args):
             own=home/'own-home-marker';own.write_text(SENTINEL)
             assert await visible(own,SENTINEL.encode()),'The own-home positive control must work'
             command='import urllib.request; urllib.request.urlopen("http://127.0.0.1:'+str(port)+'",timeout=1)'
-            network=await app.request('command/exec',{'command':[sys.executable,'-c',command],
+            network=await app.request('command/exec',{'command':[guest_python,'-c',command],
                 'cwd':str(home),'sandboxPolicy':{'type':'dangerFullAccess'},'timeoutMs':3000,'outputBytesCap':4096})
             daemon=home/'bounded-daemon-marker'
             # Finite self-expiry keeps a damaged fixture bounded too. Private
@@ -66,8 +67,8 @@ async def probe(args):
             source=('import time,pathlib; p=pathlib.Path('+repr(str(daemon))+'); '
                 'end=time.monotonic()+2; '\
                 '\nwhile time.monotonic()<end:\n with p.open("a")as f:f.write("x")\n time.sleep(.01)')
-            launch='import subprocess; subprocess.Popen(['+repr(sys.executable)+',"-c",'+repr(source)+'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)'
-            launched=await app.request('command/exec',{'command':[sys.executable,'-c',launch],
+            launch='import subprocess; subprocess.Popen(['+repr(guest_python)+',"-c",'+repr(source)+'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)'
+            launched=await app.request('command/exec',{'command':[guest_python,'-c',launch],
                 'cwd':str(home),'sandboxPolicy':{'type':'dangerFullAccess'},'timeoutMs':3000,'outputBytesCap':4096})
             assert launched['exitCode']==0
             for _ in range(100):
@@ -88,7 +89,7 @@ async def probe(args):
                 # repr(source) appears in the launcher; replace that encoded
                 # literal rather than depending on source whitespace escaping.
                 deadline_launch=launch.replace(repr(source),repr(deadline_source))
-                launched=await deadline_app.request('command/exec',{'command':[sys.executable,'-c',deadline_launch],
+                launched=await deadline_app.request('command/exec',{'command':[guest_python,'-c',deadline_launch],
                     'cwd':str(deadline_home),'sandboxPolicy':{'type':'dangerFullAccess'},'timeoutMs':1000,'outputBytesCap':4096})
                 assert launched['exitCode']==0
                 for _ in range(100):
