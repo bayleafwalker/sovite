@@ -327,3 +327,99 @@ def test_installed_scope_must_be_valid_and_canonical_before_composition(installe
     config["bindings"][0]["allowed_areas"] = areas
     save(path, config)
     assert compose_repository_runtime(settings, platform, driver_factory=lambda _: driver).owner is None
+
+
+def test_world_writable_state_parent_cannot_enable_runtime(installed, tmp_path):
+    settings, platform, path, config, runtime, base, driver = installed
+    unsafe = tmp_path / "world-writable-parent"
+    unsafe.mkdir(mode=0o700)
+    unsafe.chmod(0o777)
+    config["state_root"] = str(unsafe / "private-state")
+    save(path, config)
+    assert compose_repository_runtime(settings, platform, driver_factory=lambda _: driver).owner is None
+
+
+@pytest.mark.parametrize("bad_layout", ["parent-link", "leaf-link", "leaf-permissions"])
+def test_unsafe_state_directory_layout_disables_runtime(installed, tmp_path, bad_layout):
+    settings, platform, path, config, runtime, base, driver = installed
+    protected = tmp_path / "directory-root"
+    protected.mkdir(mode=0o700)
+    state = protected / "private-state"
+    state.mkdir(mode=0o700)
+    if bad_layout == "parent-link":
+        link = tmp_path / "directory-link"
+        link.symlink_to(protected, target_is_directory=True)
+        state = link / "private-state"
+    elif bad_layout == "leaf-link":
+        link = protected / "state-link"
+        link.symlink_to(state, target_is_directory=True)
+        state = link
+    else:
+        state.chmod(0o750)
+    config["state_root"] = str(state)
+    save(path, config)
+    closed = compose_repository_runtime(settings, platform, driver_factory=lambda _: driver)
+    assert closed.owner is None and closed.execution is None
+    assert closed.diagnostic == "repository_runtime_unavailable"
+
+
+def test_private_directory_walk_validates_leaf_owner_and_sticky_ancestors(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+    from sovite.repository_runtime import protected_directory
+    state = tmp_path / "private-state"
+    assert protected_directory(state, create=True) == state
+    assert state.stat().st_mode & 0o777 == 0o700
+    actual_stat = os.fstat
+    leaf_identity = (state.stat().st_dev, state.stat().st_ino)
+    def wrong_leaf_owner(fd):
+        info = actual_stat(fd)
+        if (info.st_dev, info.st_ino) == leaf_identity:
+            return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1)
+        return info
+    monkeypatch.setattr("sovite.repository_runtime.os.fstat", wrong_leaf_owner)
+    with pytest.raises(ValueError, match="repository_runtime_unavailable"):
+        protected_directory(state)
+    monkeypatch.setattr("sovite.repository_runtime.os.fstat", actual_stat)
+    # A service-owned sticky directory is not a substitute for a root-owned
+    # sticky ancestor. It must still be refused when writable by other users.
+    if os.getuid() != 0:
+        writable = tmp_path / "service-sticky"
+        writable.mkdir(mode=0o700)
+        writable.chmod(0o1777)
+        with pytest.raises(ValueError):
+            protected_directory(writable / "child", create=True)
+        assert not (writable / "child").exists()
+
+
+def test_retention_state_rejects_world_writable_parent(installed, tmp_path):
+    settings, platform, path, config, runtime, base, driver = installed
+    credential = tmp_path / "retention-token"
+    credential.write_text("synthetic-workspace-token-0000000000\n")
+    credential.chmod(0o600)
+    profile_path = tmp_path / "retention-profile.json"
+    save(profile_path, {"schema_version": "vuoro-client-profile/v1", "id": "retention-test",
+        "revision": 1, "source_environment_id": "test",
+        "target": {"environment_id": "workspace-test", "environment_class": "development",
+                   "endpoint": "https://workspace.invalid"},
+        "credential_ref": "file:" + str(credential),
+        "required_authorities": ["knowledge:read", "knowledge:contribute"],
+        "production_endpoint_denied": True})
+    unsafe = tmp_path / "writable-publication-parent"
+    unsafe.mkdir(mode=0o700)
+    unsafe.chmod(0o777)
+    target = {"endpoint": "https://workspace.invalid", "workspace_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              "destination": "workspace-01ARZ3NDEKTSV4RRFFQ69G5FAV", "allowed_classes": ["C3"]}
+    config["retention"] = {"root": str(unsafe / "publication-state"),
+                           "profile_path": str(profile_path), "credential_file": str(credential),
+                           "target": target}
+    save(path, config)
+    driver_calls = []
+    def factory(value):
+        driver_calls.append(value)
+        return driver
+    closed = compose_repository_runtime(settings, platform, driver_factory=factory)
+    assert driver_calls == []
+    assert closed.owner is None and closed.publication is None
+    assert closed.diagnostic == "repository_runtime_unavailable"
+    assert not (unsafe / "publication-state").exists()

@@ -67,6 +67,55 @@ def protected_bytes(value: str | Path, *, limit: int = _LIMIT) -> bytes:
         os.close(directory)
 
 
+def protected_directory(value: str | Path, *, create: bool = False) -> Path:
+    """Validate the full private-state path through pinned, no-follow directory FDs.
+
+    A protected leaf alone is insufficient: an unrelated writer of a parent can
+    rename that leaf and substitute its pathname. Every ancestor must therefore
+    be root/service-owned and non-writable by other identities. Root-owned
+    sticky ancestors (not the leaf) preserve ordinary /tmp test installations:
+    unrelated users cannot rename the service-owned entry there. Root and the
+    service UID remain trusted; this is not a same-UID or privileged-owner fence.
+    """
+    path = Path(value)
+    _need(path.is_absolute() and path == Path(os.path.normpath(path)))
+    parts = path.parts[1:]
+    _need(bool(parts))
+    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for index, part in enumerate(parts):
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=directory)
+            except FileNotFoundError:
+                _need(create)
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=directory)
+                except FileExistsError:
+                    # A concurrent trusted creator may have installed it. Open
+                    # without following links and validate its actual identity.
+                    pass
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=directory)
+            try:
+                info = os.fstat(child)
+                leaf = index == len(parts) - 1
+                if leaf:
+                    _need(info.st_uid == os.getuid() and not info.st_mode & 0o077)
+                else:
+                    sticky_root = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+                    _need(info.st_uid in {0, os.getuid()} and
+                          (not info.st_mode & 0o022 or sticky_root))
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(directory)
+            directory = child
+        return path
+    finally:
+        os.close(directory)
+
+
 def _read_config(path):
     data = json.loads(protected_bytes(path), object_pairs_hook=_unique_pairs,
                       parse_constant=lambda _: _need(False))
@@ -201,8 +250,7 @@ def _retention(exporter, config):
     target = WorkspaceTarget(**{**target_config,
                               "allowed_classes": frozenset(target_config["allowed_classes"])})
     _need(profile.endpoint.rstrip("/") == target.endpoint.rstrip("/"))
-    from .repository_sessions import _canonical_root
-    root = _canonical_root(Path(config["root"]), create=True)
+    root = protected_directory(config["root"], create=True)
     def credential(ref):
         _need(ref == profile.credential_ref and
               protected_bytes(config["profile_path"]) == raw_profile)
@@ -231,8 +279,10 @@ def compose_repository_runtime(settings, platform, *, driver_factory=None):
         return RepositoryRuntime()
     try:
         config = _read_config(path)
-        from .repository_sessions import _canonical_root
-        _canonical_root(Path(config["state_root"]), create=True)
+        protected_directory(config["state_root"], create=True)
+        if config["retention"] is not None:
+            _need(type(config["retention"]) is dict)
+            protected_directory(config["retention"]["root"], create=True)
         resolver = InstalledRepositoryResolver(platform, path, config)
         driver = (driver_factory or _builtin_driver)(copy.deepcopy(config["driver"]))
         _need(callable(driver) and callable(driver.execution_profile))
