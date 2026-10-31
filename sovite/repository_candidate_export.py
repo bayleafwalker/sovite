@@ -90,6 +90,8 @@ class CandidateExportOwner:
             worktree = manager._worktree_path(key)
             _need(record.get("mirror_root") == mirror and record.get("worktree") == str(worktree))
             evidence = run.get("evidence")
+            if isinstance(evidence, list):
+                evidence = [entry for entry in evidence if entry.get("label") == "candidate"]
             expected_uri = f"sovite://repository-runs/{job.id}/{attempt_id}/candidate"
             _need(isinstance(evidence, list) and len(evidence) == 1 and evidence[0].get("label") == "candidate"
                   and evidence[0].get("uri") == expected_uri)
@@ -157,6 +159,11 @@ class CandidateExportOwner:
             raise CandidateExportError("candidate-export-unavailable") from None
 
     def export(self, run_id, attempt_id, *, release_id, destination, principal_id, workspace_id):
+        return self.release_snapshot(run_id, attempt_id, release_id=release_id, destination=destination,
+                                     principal_id=principal_id, workspace_id=workspace_id)["content"]
+
+    def release_snapshot(self, run_id, attempt_id, *, release_id, destination, principal_id, workspace_id):
+        """Exact released bytes and disclosure provenance, not a future read grant."""
         try:
             _need(isinstance(destination, str) and _ID.fullmatch(destination))
             with self.platform.db.sessions.begin() as session:
@@ -173,6 +180,26 @@ class CandidateExportOwner:
                 self.platform.db.audit(session, principal_id, "repository_candidate.exported", run_id,
                                        {"attempt_id": attempt_id, "release_id": release_id,
                                         "destination": destination, "bundle_sha256": json.loads(content)["bundle_sha256"]})
-                return released
+                return {"content": released, "release_id": release_id,
+                        "output_class": record["output_class"], "destination": destination,
+                        "contract_id": record["contract_id"], "contract_revision": record["contract_revision"],
+                        "sha256": hashlib.sha256(released.encode("utf-8")).hexdigest(),
+                        "destination_hosts": next(d for d in self.platform.active(session)[0]["destinations"] if d["id"] == destination).get("allowed_hosts", [])}
+        except Exception:
+            raise CandidateExportError("candidate-export-unavailable") from None
+
+    def recheck_snapshot(self, snapshot, *, principal_id, workspace_id):
+        """Reauthorize saved exact bytes before a new external upload."""
+        try:
+            data = json.loads(snapshot["content"])
+            with self.platform.db.sessions.begin() as session:
+                self.platform.db.authority_lock(session)
+                self._job(session, data["run_id"], data["attempt_id"], principal_id, workspace_id)
+                record, contract, content = outputs._read(self.platform, session, snapshot["release_id"])
+                outputs._require_approver(self.platform, contract, principal_id, "caller")
+                destination = next(d for d in self.platform.active(session)[0]["destinations"] if d["id"] == snapshot["destination"])
+                _need(content == snapshot["content"] and record["output_class"] == snapshot["output_class"]
+                      and snapshot["destination"] in record["destinations"]
+                      and destination.get("allowed_hosts", []) == snapshot["destination_hosts"])
         except Exception:
             raise CandidateExportError("candidate-export-unavailable") from None

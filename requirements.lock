@@ -51,3 +51,7 @@ vuoro-adapter-kit @ https://github.com/bayleafwalker/vuoro/releases/download/vuo
 vuoro-contracts @ https://github.com/bayleafwalker/vuoro/releases/download/vuoro-contracts-v0.2.0/vuoro_contracts-0.2.0-py3-none-any.whl#sha256=7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9
 PyJWT==2.15.1
 vuoro-service @ https://github.com/bayleafwalker/vuoro/releases/download/vuoro-service-v0.1.97/vuoro_service-0.1.97-py3-none-any.whl#sha256=38b08a352617d88592dbc93da0f91afc1d5f5f230729761ca7e041de9fb32a56
+
+vuoro-client @ https://github.com/bayleafwalker/vuoro/releases/download/vuoro-client-v0.1.6/vuoro_client-0.1.6-py3-none-any.whl#sha256=b2267290ed28e89e522c94616e46e1167d155334888cbe6bc0bc287b14fcb59d
+vuoro-workspace @ https://github.com/bayleafwalker/vuoro/releases/download/vuoro-workspace-v0.1.1/vuoro_workspace-0.1.1-py3-none-any.whl#sha256=f9c67ec2a731c64bef03821d3e656699f7a6530080b70a1273bd59c688d135f9
+vuoro-schema-runtime @ https://github.com/bayleafwalker/vuoro/releases/download/vuoro-schema-runtime-v0.1.0/vuoro_schema_runtime-0.1.0-py3-none-any.whl#sha256=b66c9357c99aa9e1a7353991ce54105a8621958ecfac47f8c121d80b90b77912

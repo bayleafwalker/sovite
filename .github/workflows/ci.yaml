@@ -16,3 +16,25 @@ jobs:
         with:
           version: v4.3.1
       - run: python scripts/validate_deployment.py
+
+  candidate-retention:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_PASSWORD: retention-fixture-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 12
+    env:
+      SOVITE_WORKSPACE_TEST_DSN: host=127.0.0.1 port=5432 user=postgres password=retention-fixture-only dbname=postgres
+      SOVITE_WORKSPACE_REQUIRE_PG: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.lock && pip install -e '.[test,retention]'
+      - run: python -m pytest tests/test_repository_candidate_retention.py -q

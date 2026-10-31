@@ -78,6 +78,12 @@ class RepositoryRunSubmission(StrictBody):
     packet: dict
 
 
+class CandidateRetentionRequest(StrictBody):
+    workspace_id: str = Field(min_length=1, max_length=128)
+    attempt_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    release_id: str = Field(pattern=r"^release_[0-9a-f]{64}$")
+
+
 class OutputApproval(StrictBody):
     source_job_id: str = Field(min_length=1, max_length=64)
     source_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$", min_length=71, max_length=71)
@@ -103,7 +109,7 @@ def token_identity(token: str, settings: Settings) -> tuple[str, str] | None:
 
 
 def create_app(settings: Settings | None = None, platform: Platform | None = None,
-               repository_run_owner=None) -> FastAPI:
+               repository_run_owner=None, candidate_publication_service=None) -> FastAPI:
     settings = settings or Settings.from_env()
     platform = platform or Platform(settings)
     active_worker: Worker | None = None
@@ -291,6 +297,21 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                                     auth=Depends(repository_caller)):
         owner = repository_owner()
         return {"run": owner.cancel(run_id, principal_id=auth[0], workspace_id=workspace_id)}
+
+    @app.post("/api/repository-runs/v1/runs/{run_id}/candidate-retention")
+    async def retain_repository_candidate(run_id: str, body: CandidateRetentionRequest,
+                                          auth=Depends(repository_caller)):
+        owner = repository_owner()
+        owner.get(run_id, principal_id=auth[0], workspace_id=body.workspace_id)
+        service = candidate_publication_service
+        if service is None or service.exporter.platform is not platform or service.exporter.execution is not owner.executor:
+            raise RepositoryRunError("candidate_retention_unavailable", "Retained candidate publication is not installed", 503)
+        from .repository_candidate_retention import CandidateRetentionError
+        try:
+            return {"receipt": await service.retain(run_id, body.attempt_id, body.release_id,
+                                                    principal_id=auth[0], workspace_id=body.workspace_id)}
+        except Exception:
+            raise RepositoryRunError("candidate_retention_unavailable", "Retained candidate publication could not be reconciled", 409) from None
 
     async def activator(auth=Depends(identity)) -> tuple[str, str]:
         platform.policy_role(auth[1], "activator", api=True)

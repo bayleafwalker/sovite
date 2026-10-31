@@ -1069,10 +1069,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+retention = [
+    { name = "vuoro-client", marker = "python_full_version >= '3.12'" },
+]
 test = [
     { name = "pytest" },
     { name = "setuptools" },
+    { name = "vuoro-client", marker = "python_full_version >= '3.12'" },
+    { name = "vuoro-schema-runtime", marker = "python_full_version >= '3.12'" },
     { name = "vuoro-service", marker = "python_full_version >= '3.12'" },
+    { name = "vuoro-workspace", marker = "python_full_version >= '3.12'" },
 ]
 
 [package.metadata]
@@ -1092,11 +1098,15 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.12,<5" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
     { name = "vuoro-adapter-kit", url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-adapter-kit-v0.2.2/vuoro_adapter_kit-0.2.2-py3-none-any.whl" },
+    { name = "vuoro-client", marker = "python_full_version >= '3.12' and extra == 'retention'", url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-client-v0.1.6/vuoro_client-0.1.6-py3-none-any.whl" },
+    { name = "vuoro-client", marker = "python_full_version >= '3.12' and extra == 'test'", url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-client-v0.1.6/vuoro_client-0.1.6-py3-none-any.whl" },
     { name = "vuoro-contracts", marker = "python_full_version >= '3.12'", url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-contracts-v0.2.0/vuoro_contracts-0.2.0-py3-none-any.whl" },
+    { name = "vuoro-schema-runtime", marker = "python_full_version >= '3.12' and extra == 'test'", url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-schema-runtime-v0.1.0/vuoro_schema_runtime-0.1.0-py3-none-any.whl" },
     { name = "vuoro-service", marker = "python_full_version >= '3.12' and extra == 'test'", git = "https://github.com/bayleafwalker/vuoro.git?subdirectory=packages%2Fvuoro-service&rev=7dfa23483773d778cb2fa65a152e87b3278d437c" },
+    { name = "vuoro-workspace", marker = "python_full_version >= '3.12' and extra == 'test'", url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-workspace-v0.1.1/vuoro_workspace-0.1.1-py3-none-any.whl" },
     { name = "websockets", specifier = ">=13,<16" },
 ]
-provides-extras = ["test"]
+provides-extras = ["retention", "test"]
 
 [[package]]
 name = "sqlalchemy"
@@ -1318,6 +1328,29 @@ requires-dist = [{ name = "pytest", marker = "extra == 'test'", specifier = ">=8
 provides-extras = ["test"]
 
 [[package]]
+name = "vuoro-client"
+version = "0.1.6"
+source = { url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-client-v0.1.6/vuoro_client-0.1.6-py3-none-any.whl" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jsonschema" },
+    { name = "pydantic" },
+]
+wheels = [
+    { url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-client-v0.1.6/vuoro_client-0.1.6-py3-none-any.whl", hash = "sha256:b2267290ed28e89e522c94616e46e1167d155334888cbe6bc0bc287b14fcb59d" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
+    { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3,<9" },
+    { name = "vuoro-contracts", marker = "extra == 'test'" },
+]
+provides-extras = ["test"]
+
+[[package]]
 name = "vuoro-contracts"
 version = "0.2.0"
 source = { url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-contracts-v0.2.0/vuoro_contracts-0.2.0-py3-none-any.whl" }
@@ -1338,6 +1371,18 @@ requires-dist = [
 provides-extras = ["test"]
 
 [[package]]
+name = "vuoro-schema-runtime"
+version = "0.1.0"
+source = { url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-schema-runtime-v0.1.0/vuoro_schema_runtime-0.1.0-py3-none-any.whl" }
+wheels = [
+    { url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-schema-runtime-v0.1.0/vuoro_schema_runtime-0.1.0-py3-none-any.whl", hash = "sha256:b66c9357c99aa9e1a7353991ce54105a8621958ecfac47f8c121d80b90b77912" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'test'", specifier = ">=8.3,<9" }]
+provides-extras = ["test"]
+
+[[package]]
 name = "vuoro-service"
 version = "0.1.97"
 source = { git = "https://github.com/bayleafwalker/vuoro.git?subdirectory=packages%2Fvuoro-service&rev=7dfa23483773d778cb2fa65a152e87b3278d437c#7dfa23483773d778cb2fa65a152e87b3278d437c" }
@@ -1349,6 +1394,32 @@ dependencies = [
     { name = "pyjwt" },
     { name = "uvicorn", extra = ["standard"] },
 ]
+
+[[package]]
+name = "vuoro-workspace"
+version = "0.1.1"
+source = { url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-workspace-v0.1.1/vuoro_workspace-0.1.1-py3-none-any.whl" }
+dependencies = [
+    { name = "psycopg", extra = ["binary"] },
+    { name = "vuoro-adapter-kit" },
+    { name = "vuoro-schema-runtime" },
+]
+wheels = [
+    { url = "https://github.com/bayleafwalker/vuoro/releases/download/vuoro-workspace-v0.1.1/vuoro_workspace-0.1.1-py3-none-any.whl", hash = "sha256:f9c67ec2a731c64bef03821d3e656699f7a6530080b70a1273bd59c688d135f9" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34,<2" },
+    { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27,<1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
+    { name = "pypdf", marker = "extra == 'pdf'", specifier = ">=4,<7" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3,<9" },
+    { name = "vuoro-adapter-kit" },
+    { name = "vuoro-schema-runtime" },
+    { name = "vuoro-service", marker = "extra == 'test'" },
+]
+provides-extras = ["pdf", "s3", "test"]
 
 [[package]]
 name = "watchfiles"
