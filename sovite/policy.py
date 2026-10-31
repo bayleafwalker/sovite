@@ -306,6 +306,17 @@ def validate_bundle(bundle: dict) -> dict:
 
     for dst in bundle["destinations"]:
         ref("data_classes", dst["clearance"], dst["id"])
+        if v2:
+            retention=dst['retention']
+            if (retention['in_memory_cache']['scope']=='provider'
+                or 'max_seconds' in retention or 'authorization_ref' in retention):
+                users=[model for model in bundle['models'] if model['destination']==dst['id']]
+                if (not users or bundle['mode']!='enforced' or dst['kind']!='cloud'
+                    or dst.get('boundary','public')!='public' or dst['trust_tier']!='provider'
+                    or dst['clearance']!='C0' or ranks.get('C0')!=0
+                    or any(model['adapter']!='opencode-go' or model.get('wire_api')!='responses'
+                           or not go_endpoint_matches(model) for model in users)):
+                    _fail(f"{dst['id']}: provider retention belongs only to its public C0 Go Responses destination")
         if v2 and "restricted_clearance" in dst:
             for cls in dst["restricted_clearance"]["classes"]:
                 ref("data_classes", cls, dst["id"])

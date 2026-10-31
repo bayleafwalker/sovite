@@ -191,3 +191,18 @@ def test_wire_positive_charge_cannot_underflow_into_known_zero(go_fixture,monkey
     assert result.usage['cost']==Decimal('1e-400')
     with pytest.raises(RuntimeFailure):
         Accounting(accounting,context.model['id'],adapter='opencode-go').go_observation(result.usage)
+
+
+@pytest.mark.parametrize('case',['nonmodel-C1','nonmodel-C2','orphan-C0','mixed-models'])
+def test_provider_cache_exception_cannot_escape_its_go_model_destination(public_go,case):
+    model=public_go['models'][0]
+    destination=next(item for item in public_go['destinations'] if item['id']==model['destination'])
+    if case=='mixed-models':
+        foreign=copy.deepcopy(model);foreign.update(id='foreign-shared-model',adapter='openai-compatible')
+        foreign.pop('identity_protocol',None)
+        public_go['models'].append(foreign)
+    else:
+        orphan=copy.deepcopy(destination);orphan['id']='orphan-cache-destination'
+        orphan['clearance']=case.split('-')[-1]
+        public_go['destinations'].append(orphan)
+    with pytest.raises(PolicyError):validate_bundle(public_go)
