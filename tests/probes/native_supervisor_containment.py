@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -31,6 +32,9 @@ async def probe(args):
         isolation._PROFILE=args.fixture_profile
         isolation._CHILD=args.fixture_child
     guest_python=isolation.load_profile().python
+    # Namespace-local PID 1 can be reused in a nested namespace. Bind the proc
+    # positive/negative control to a unique synthetic process name as well.
+    assert ctypes.CDLL(None,use_errno=True).prctl(15,b"sovite-owner",0,0,0)==0
     with tempfile.TemporaryDirectory(prefix='native-containment-proof-')as directory:
         root=Path(directory);root.chmod(0o700)
         home=root/'native-home';home.mkdir(mode=0o700)
@@ -55,7 +59,7 @@ async def probe(args):
                 except runtime.RuntimeFailure:return False
             exposed={name:await visible(path,SENTINEL.encode())for name,path in
                      [('parent_config',config),('mirror',mirror),('parent_proc','/proc/'+str(os.getpid())+'/environ')]}
-            exposed['parent_proc_status']=await visible('/proc/'+str(os.getpid())+'/status',('Pid:\t'+str(os.getpid())).encode())
+            exposed['parent_proc_status']=await visible('/proc/'+str(os.getpid())+'/status',b'Name:\tsovite-owner')
             own=home/'own-home-marker';own.write_text(SENTINEL)
             assert await visible(own,SENTINEL.encode()),'The own-home positive control must work'
             command='import urllib.request; urllib.request.urlopen("http://127.0.0.1:'+str(port)+'",timeout=1)'

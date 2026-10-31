@@ -1,4 +1,16 @@
 {
+  "additional_source_oci_feasibility": {
+    "constructor_results_sha256": "0b8471ef10908a15d42a02935094127b70c79f8aad3e3b6eab37b3ff57998d08",
+    "masked_proc_refusal": true,
+    "native_function_model_requests": 8,
+    "outer_user_namespace": true,
+    "owner_profile_sha256": "d00cec8ed0560ad7620cf6fdd01a63fe8ee40b3f33bab1f872950e75c0989aa8",
+    "paid_model_calls": 0,
+    "qualified": false,
+    "scope": "Standalone rootless source OCI with local namespace exec-server; actual installed-node equivalence and final image remain required",
+    "three_guard_removal_counterexamples": true,
+    "uid": 11001
+  },
   "after": {
     "deadline_child_stopped": true,
     "detached_child_stopped": true,
@@ -57,6 +69,6 @@
     "sovite/repository_native_isolation_child.py": "84d9caef9a6caa810ca370df3fd7b0a73c28f9ccd718e848eb4d3dc2d24cb93a",
     "sovite/repository_native_runtime.py": "598ea471ea5ddf4cd9f833c15afbba9d0782580a007419e199d0a1626b18b753",
     "sovite/repository_native_vm.py": "ca160a016e82730b9007fab1d2ebd7ad97a629713cbb0bc1238740bcdeae3b20",
-    "tests/probes/native_supervisor_containment.py": "8af2b02697ec6f087e2e9a757682acb99e47afe3d152ec89bc356810bdca018e"
+    "tests/probes/native_supervisor_containment.py": "46fb742d3584e592a432da4e7225687a3c376cf2c1ab10810332a17a5c04d1f4"
   }
 }
