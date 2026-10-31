@@ -49,6 +49,13 @@ SUBSCRIPTION_HARNESSES = {"codex-subscription": "native-codex", "claude-subscrip
 SUBSCRIPTION_HOSTS = {"codex-subscription": {"chatgpt.com", "auth.openai.com"},
                       "claude-subscription": {"api.anthropic.com"}}
 GO_ENDPOINT = "https://opencode.ai/inference/go/openai/v1"
+PUBLIC_RETENTION_SECONDS = 30 * 24 * 3600
+
+
+def go_endpoint_matches(model):
+    wire=model.get('wire_api','chat')
+    suffix={'chat':'/chat/completions','responses':'/responses'}.get(wire)
+    return suffix is not None and model.get('endpoint','').rstrip('/') in {GO_ENDPOINT,GO_ENDPOINT+suffix}
 
 
 def native_harness_kind(harness: dict) -> str | None:
@@ -204,10 +211,12 @@ V2_DESTINATION["properties"].update({
         "prompt_logging": {"type": "boolean"}, "response_logging": {"type": "boolean"},
         "persistent_context": {"type": "boolean"},
         "in_memory_cache": obj(["scope", "max_seconds", "clear_on_cancel", "clear_on_session_close"], {
-            "scope": {"const": "job"},
+            "scope": {"enum": ["job", "provider"]},
             "max_seconds": {"type": "integer", "minimum": 1},
             "clear_on_cancel": {"type": "boolean"}, "clear_on_session_close": {"type": "boolean"},
         }),
+        "max_seconds": {"type":"integer","minimum":1,"maximum":PUBLIC_RETENTION_SECONDS},
+        "authorization_ref": {**TEXT,"minLength":1,"pattern":"\\S"},
     }),
     "restricted_clearance": obj(["classes", "rationale", "authorization_ref"], {
         "classes": {**REFS, "minItems": 1},
@@ -321,14 +330,35 @@ def validate_bundle(bundle: dict) -> dict:
         if go:
             if model.get("identity_protocol") != "provider-service" or model.get("digest") or model.get("identity_endpoint"):
                 _fail(f"{model['id']}: OpenCode Go requires provider-service identity, not an immutable weights digest")
-            if model.get("endpoint", "").rstrip("/") not in {GO_ENDPOINT, GO_ENDPOINT + "/chat/completions"}:
+            if not go_endpoint_matches(model):
                 _fail(f"{model['id']}: OpenCode Go requires its declared Go service endpoint")
-            if not model.get("api_key_env") or model.get("wire_api", "chat") != "chat" or dest["kind"] != "cloud" or dest.get("boundary", "public") != "public":
-                _fail(f"{model['id']}: OpenCode Go requires an explicit Go key, chat API and cloud destination")
+            if not model.get("api_key_env") or dest["kind"] != "cloud" or dest.get("boundary", "public") != "public":
+                _fail(f"{model['id']}: OpenCode Go requires an explicit Go key, supported API and cloud destination")
+            if model.get('wire_api','chat')=='responses' and (not v2 or bundle['mode']!='enforced'):
+                _fail(f"{model['id']}: Go Responses requires enforced v1alpha2 public-data policy")
         elif model.get("identity_protocol") == "provider-service":
             _fail(f"{model['id']}: provider-service identity is supported only for the OpenCode Go adapter")
         if v2:
-            if any(dest["retention"][field] for field in ("prompt_logging", "response_logging", "persistent_context")):
+            retention=dest['retention']
+            declared='max_seconds' in retention or 'authorization_ref' in retention
+            public=(declared and go and model.get('wire_api')=='responses'
+                and bundle['mode']=='enforced' and dest['trust_tier']=='provider'
+                and dest['clearance']=='C0' and ranks.get('C0')==0
+                and {'max_seconds','authorization_ref'}<=retention.keys())
+            if declared and not public:
+                _fail(f"{model['id']}: declared upstream retention is limited to public C0 Go Responses")
+            if go and model.get('wire_api')=='responses' and not public:
+                _fail(f"{model['id']}: Go Responses requires explicit truthful public-data retention")
+            cache=retention['in_memory_cache']
+            if public:
+                if (not retention['prompt_logging'] or not retention['response_logging']
+                    or retention['persistent_context'] or retention['max_seconds']!=PUBLIC_RETENTION_SECONDS
+                    or cache['scope']!='provider' or cache['max_seconds']>retention['max_seconds']
+                    or cache['clear_on_cancel'] or cache['clear_on_session_close']):
+                    _fail(f"{model['id']}: public provider retention must declare its 30-day bound without local-clear claims")
+            elif cache['scope']!='job':
+                _fail(f"{model['id']}: provider-managed caching requires explicit public-data retention")
+            if not public and any(retention[field] for field in ("prompt_logging", "response_logging", "persistent_context")):
                 _fail(f"{model['id']}: inference retention requires prompt_logging, response_logging and persistent_context false (including upstream providers)")
             if "connection" in model:
                 if model["adapter"] not in {"ollama", "openai-compatible"}:
@@ -437,7 +467,7 @@ def validate_bundle(bundle: dict) -> dict:
             _fail(f"{agent['id']}: subscription credentials cannot be used with API model routing")
         if native and agent["tools"]:
             _fail(f"{agent['id']}: native harnesses do not translate declared HTTP tools into native tool authority")
-        if native == "native-codex" and model["adapter"] not in {"ollama", "openai-compatible", "codex-subscription"}:
+        if native == "native-codex" and model["adapter"] not in {"ollama", "openai-compatible", "codex-subscription",'opencode-go'}:
             _fail(f"{agent['id']}: native Codex requires a supported model endpoint")
         if native == "native-claude" and model["adapter"] != "claude-subscription":
             _fail(f"{agent['id']}: native Claude requires explicit Claude subscription model routing")
@@ -445,8 +475,10 @@ def validate_bundle(bundle: dict) -> dict:
             _fail(f"{agent['id']}: native OpenCode requires explicit OpenCode Go model routing")
         if v2 and harness["kind"] == "tool-agent" and model.get("wire_api", "chat") != "chat":
             _fail(f"{agent['id']}: tool-agent requires wire_api chat")
-        if v2 and native == "native-codex" and model["adapter"] != "codex-subscription" and (model["adapter"] != "openai-compatible" or model.get("wire_api") != "responses"):
-            _fail(f"{agent['id']}: native Codex requires openai-compatible wire_api responses")
+        if native=='native-codex' and model['adapter']=='opencode-go' and model.get('wire_api')!='responses':
+            _fail(f"{agent['id']}: native Codex Go requires Responses through the repository runtime")
+        if v2 and native == "native-codex" and model["adapter"] != "codex-subscription" and (model["adapter"] not in {"openai-compatible",'opencode-go'} or model.get("wire_api") != "responses"):
+            _fail(f"{agent['id']}: native Codex requires a supported wire_api responses service")
     for grant in bundle["grants"]:
         if v2 and any("connection" in model for model in bundle["models"]):
             if grant.get("on_outage", "queue") == "queue" and "availability_wait_seconds" not in grant:

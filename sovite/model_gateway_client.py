@@ -8,6 +8,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal,InvalidOperation
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -91,7 +92,7 @@ def _preflight(source: str) -> None:
         raise ValueError
 
 
-def _decode_json(raw: bytes) -> dict:
+def _decode_json(raw: bytes, *, exact_numbers=False) -> dict:
     if not raw or len(raw) > _RESPONSE_LIMIT:
         raise ValueError
     source = raw.decode("utf-8")
@@ -99,7 +100,7 @@ def _decode_json(raw: bytes) -> dict:
         raise ValueError
     _preflight(source)
     value = json.loads(source, object_pairs_hook=_pairs_no_duplicates,
-                       parse_constant=_reject_constant)
+                       parse_constant=_reject_constant,parse_float=Decimal if exact_numbers else float)
     if not isinstance(value, dict):
         raise ValueError
     return value
@@ -125,7 +126,7 @@ class ResponsesResult:
     events: tuple[dict, ...] = field(default=(), repr=False)
 
 
-def _responses_result(raw: bytes, model_id: str) -> ResponsesResult:
+def _responses_result(raw: bytes, model_id: str, *, exact_numbers=False) -> ResponsesResult:
     """Require one complete terminal event before disclosing buffered bytes."""
     try:
         source = raw.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
@@ -151,7 +152,7 @@ def _responses_result(raw: bytes, model_id: str) -> ResponsesResult:
                 if completed is None:
                     raise RuntimeFailure('external_execution_uncertain')
                 continue
-            value = _decode_json(payload.encode('utf-8'))
+            value = _decode_json(payload.encode('utf-8'),exact_numbers=exact_numbers)
             if event == 'sovite_error':
                 raise _gateway_failure(value.get('code', ''))
             events.append(value)
@@ -186,7 +187,7 @@ def _responses_result(raw: bytes, model_id: str) -> ResponsesResult:
         return ResponsesResult(raw, completed, usage, tuple(events))
     except RuntimeFailure:
         raise
-    except (ValueError, UnicodeError, RecursionError, OverflowError):
+    except (ValueError, UnicodeError, RecursionError, OverflowError,InvalidOperation):
         raise RuntimeFailure('model_protocol_error') from None
 
 
@@ -373,6 +374,12 @@ class ModelGatewayInference:
                    'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
         return self.origin + '/inference/' + quote(self.binding_id, safe='') + '/responses', headers
 
+    def _responses_adapter(self,model):
+        return model.get('adapter')=='openai-compatible'
+
+    def _responses_exact_numbers(self):
+        return False
+
     async def responses(self, model: dict, payload: dict, authorization_check=None) -> ResponsesResult:
         """Forward one native stateless request through this exact owner binding.
 
@@ -380,7 +387,7 @@ class ModelGatewayInference:
         This method never retries, launches tools, settles usage or qualifies a
         model helper. Session metadata/cache keys stop at the local bridge.
         """
-        if (model.get('adapter') != 'openai-compatible' or model.get('wire_api') != 'responses'
+        if (not self._responses_adapter(model) or model.get('wire_api') != 'responses'
                 or model.get('id') != self.binding_id or model.get('model') != self.model_id
                 or type(payload) is not dict or payload.get('model') != self.model_id
                 or payload.get('stream') is not True):
@@ -429,7 +436,7 @@ class ModelGatewayInference:
                             raise _gateway_failure(error.get('code', ''))
                         if response.headers.get('content-type', '').split(';', 1)[0].strip() != 'text/event-stream':
                             raise RuntimeFailure('model_protocol_error')
-                result = _responses_result(bytes(raw), self.model_id)
+                result = _responses_result(bytes(raw), self.model_id,exact_numbers=self._responses_exact_numbers())
                 if authorization_check is not None:
                     authorization_check()
                 if time.time() >= request_deadline:

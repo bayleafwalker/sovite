@@ -50,6 +50,10 @@ maximum billable input-token bound, output cap and reservation covering both.
 A request byte cap is not an input-token estimate. Unknown usage, cost, stream
 loss or cancellation retains the reservation/slot and forbids replay/new calls.
 Subscription fees remain unsupported rather than being settled as zero.
+The separate [public Go Responses source](opencode-go-responses.md) accepts
+explicit known zero balance charge while tracking list price and root-scoped
+allowance independently. It remains unavailable for real qualification until
+the service/account bounds are proved; it does not extend C1-C3 privacy claims.
 
 Cloud owns the installed `vuoro_cloud.native_vm_descriptor` validator, actual
 independent resource observation, and guest verb implementation. Sovite supplies
