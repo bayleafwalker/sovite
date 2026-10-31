@@ -73,12 +73,22 @@ def _exact_old(connection,tables,schema):
                 or inspector.get_check_constraints(table.name,schema=schema)
                 or inspector.get_unique_constraints(table.name,schema=schema)):
             raise ResourceSchemaError('resource_schema6_incompatible')
-        actual={(tuple(row['column_names']),bool(row['unique']))
-            for row in inspector.get_indexes(table.name,schema=schema)}
-        expected={(tuple(column.name for column in index.columns),bool(index.unique))
-            for index in table.indexes}
-        if actual != expected:
+        actual=inspector.get_indexes(table.name,schema=schema)
+        expected=[(tuple(column.name for column in index.columns),bool(index.unique))
+            for index in table.indexes]
+        actual_core=[(tuple(row['column_names']),bool(row['unique'])) for row in actual]
+        if (any(any(column is None for column in row['column_names']) for row in actual)
+                or len(actual) != len(expected) or sorted(actual_core) != sorted(expected)):
             raise ResourceSchemaError('resource_schema6_incompatible')
+        for row in actual:
+            if (row.get('include_columns')
+                    or row.get('column_sorting')):
+                raise ResourceSchemaError('resource_schema6_incompatible')
+            options=row.get('dialect_options') or {}
+            if any((key.endswith('_where') and value is not None)
+                   or (key.endswith(('_include','_ops')) and bool(value))
+                   for key,value in options.items()):
+                raise ResourceSchemaError('resource_schema6_incompatible')
         if any(row.get('default') is not None for row in columns):
             raise ResourceSchemaError('resource_schema6_incompatible')
     names=[table.name for table in tables]
