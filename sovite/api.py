@@ -142,7 +142,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             worker_task.cancel()
             await asyncio.gather(worker_task, return_exceptions=True)
 
-    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.24", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.25", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.platform = platform
     app.state.repository_run_owner = repository_run_owner
     app.state.repository_runtime = runtime
@@ -720,7 +720,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             if "protocolVersion" in params and not isinstance(requested, str):
                 return rpc_error(-32602, "Invalid parameters")
             version = requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-11-25"
-            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " task gateway", "version": "0.1.24"}, "instructions": "This service accepts private and public work under installed class and boundary policy. Class-aware grants return content to cleared callers; otherwise results require an explicitly scoped reader. Reference grants preserve receipt-only delivery."})
+            return reply({"protocolVersion": version, "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": settings.display_name + " task gateway", "version": "0.1.25"}, "instructions": "This service accepts private and public work under installed class and boundary policy. Class-aware grants return content to cleared callers; otherwise results require an explicitly scoped reader. Reference grants preserve receipt-only delivery."})
         if method == "ping":
             return reply({})
         if method == "tools/list":

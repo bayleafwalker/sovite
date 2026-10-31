@@ -133,7 +133,7 @@ def package(output: Path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "dist" / "sovite-platform-0.1.24.zip")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist" / "sovite-platform-0.1.25.zip")
     args = parser.parse_args()
     print(json.dumps(package(args.output), indent=2))
 
