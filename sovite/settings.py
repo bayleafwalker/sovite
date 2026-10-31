@@ -46,6 +46,7 @@ class Settings:
     qualification_revoked_keys: list[str] = field(default_factory=list)
     display_name: str = "Sovite"
     embedded_worker: bool = False
+    repository_worker_only: bool = False
     max_request_bytes: int = 65536
     compute_id: str = "local"
     deployment_binding: str = ""
@@ -82,6 +83,8 @@ class Settings:
             raise ValueError("The bounded setup API is local-only; hosted delegation is not qualified")
         if self.setup_api_enabled and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", self.setup_installation_id):
             raise ValueError("An explicit installation identity is required for the setup API")
+        if type(self.repository_worker_only)is not bool:
+            raise ValueError("repository_worker_only must be boolean")
         validate_database_schema(self.database_schema)
         if self.database_migrate not in {"startup", "never"}:
             raise ValueError("SOVITE_DATABASE_MIGRATE must be startup or never")
@@ -145,6 +148,7 @@ class Settings:
             qualification_revoked_keys=json.loads(env.get("SOVITE_QUALIFICATION_REVOKED_KEYS", "[]")),
             display_name=env.get("SOVITE_DISPLAY_NAME", defaults.display_name),
             embedded_worker=truth("EMBEDDED_WORKER", False),
+            repository_worker_only=truth("REPOSITORY_WORKER_ONLY", False),
             max_request_bytes=int(env.get("SOVITE_MAX_REQUEST_BYTES", "65536")),
             compute_id=env.get("SOVITE_COMPUTE_ID", "local"),
             deployment_binding=env.get("SOVITE_DEPLOYMENT_BINDING", ""),

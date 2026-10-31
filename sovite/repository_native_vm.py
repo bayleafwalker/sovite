@@ -54,7 +54,7 @@ def _source_digest():
                  'repository_native_inference.py','repository_native_git.py',
                  'repository_native_recovery.py','repository_recovery.py','model_gateway_client.py',
                  'repository_native_luna_catalog.json','repository_native_isolation.py',
-                 'repository_native_isolation_child.py'):
+                 'repository_native_isolation_child.py','repository_native_activation.py'):
         digest.update(name.encode()+b'\0'+Path(__file__).with_name(name).read_bytes())
     return digest.hexdigest()
 
@@ -224,6 +224,32 @@ class NativeVMDriver:
         from .repository_native_recovery import recover_attempt
         return await recover_attempt(self,job=job,packet=packet,worktree=worktree,
                                      authorization_check=authorization_check)
+
+    def activation_profile(self):
+        profile=self.execution_profile()
+        need(profile is not None,'native_vm_qualification_unavailable')
+        with self.platform.db.sessions()as session:
+            row=session.get(Qualification,profile['qualification_ref'])
+            need(row is not None and hashlib.sha256(canonical(row.payload)).hexdigest()==profile['qualification_sha256'])
+            return {**profile,'vm_id':row.payload['evidence']['native_vm']['vm_id']}
+
+    async def prepare_attempt(self,context,authorization_check):
+        from .repository_native_activation import publish_locator
+        await asyncio.to_thread(authorization_check)
+        await asyncio.to_thread(publish_locator,context)
+        until=min(context.deadline,time.time()+60)
+        while time.time()<until:
+            await asyncio.to_thread(authorization_check)
+            try:Path(self.config['descriptor_path']).lstat()
+            except FileNotFoundError:
+                await asyncio.sleep(min(.25,max(0,until-time.time())))
+                continue
+            # Pure validation; the same factory is checked again by lifecycle.
+            # A present wrong/invalid descriptor is never a missing-file retry.
+            await asyncio.to_thread(self.for_attempt,context)
+            await asyncio.to_thread(authorization_check)
+            return
+        raise RuntimeFailure('native_vm_activation_unavailable')
 
     def for_attempt(self, context):
         need(self.execution_profile() is not None,'native_vm_qualification_unavailable')

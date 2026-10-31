@@ -43,7 +43,8 @@ class Worker:
         self.stop = asyncio.Event()
         self.execution_fences = {}
         self.leases = LeaseService(platform, self.id, self.execution_fences,
-                                   repository_run_profile=repository_run_executor is not None)
+                                   repository_run_profile=repository_run_executor is not None,
+                                   repository_worker_only=platform.settings.repository_worker_only)
 
     def heartbeat(self, job_id: str | None = None):
         return self.leases.heartbeat(job_id)
@@ -99,7 +100,10 @@ class Worker:
                     # Shutdown (rollout, drain, eviction) is not a cancellation: hand the job back.
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
-                    self.hand_back(job.id, fence=captured_fence)
+                    if repository_run is not None and self.repository_run_executor.activation_not_started(job.id,captured_fence):
+                        self.finish(job.id,error=RuntimeFailure("native_vm_activation_cancelled"),fence=captured_fence)
+                    else:
+                        self.hand_back(job.id, fence=captured_fence)
                     return
                 self.heartbeat(job.id)
                 try:

@@ -58,7 +58,7 @@ def test_context_exposes_neither_bytes_nor_execution_eligibility(extra):
 def test_contract1_3_preserves_every_released1_2_named_definition():
     definitions=json.loads(resources.files(runtime.PACKAGE).joinpath('data/schema/contract.schema.json').read_text())['$defs']
     previous={name:value for name,value in definitions.items()
-              if name not in {'RecoveryContextRequest','RecoveryReleaseContext','RecoveryReleaseRequest','RecoveryReleased'}}
+              if name not in {'RecoveryContextRequest','RecoveryReleaseContext','RecoveryReleaseRequest','RecoveryReleased','NativeActivation'}}
     assert hashlib.sha256(json.dumps(previous,sort_keys=True,separators=(',',':')).encode()).hexdigest()==(
         '15a8847b792a9158272d35c86c1d48eec1e775dc8530ef7d9b2f05702a477f05')
 

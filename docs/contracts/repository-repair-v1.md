@@ -200,3 +200,40 @@ preceding1.1 definitions, remain byte-identical. Tests use the generated client,
 real loopback HTTP, both owner database backends and actual Workspace recovery.
 The original uncertain job, unknown charge reservations, active slots and
 repair/publication ineligibility remain unchanged.
+
+## Exact native activation read (contract1.4)
+
+`GET /api/repository-runs/v1/runs/{run_id}/attempts/{attempt_id}/activation`
+is an operator-only current owner read. The generated operation is
+`repositoryNativeActivationRead`. It accepts no query or request body and
+returns only the exact current job/attempt, workspace/repository/principal,
+generation, hashed fence and packet, executor/publication/qualification/VM,
+original execution deadline and current lease expiration. It discloses no raw
+fence, execution capability, task, model credential or configuration path. The
+same current lease may be observed while awaiting activation or running;
+revocation, cancellation, stale metadata, terminal state and expired leases
+refuse. Heartbeat expiration can change without changing the immutable tuple.
+All27 previous1.3 named definitions remain unchanged.
+
+The fixed native driver publishes only job and attempt IDs to a private atomic
+single-use locator. The locator is a transport hint: the separately protected
+Cloud publisher must resolve and recheck the actual owner operation before
+using its administrative enrollment authority. The API mounts no administrative
+credential. The driver waits at most60 seconds within the already-started
+execution deadline, checking current grant, Work, binding and lease on every
+poll. A missing descriptor waits; a present wrong descriptor refuses. Activation
+never extends the original deadline or starts native/model execution. The owner
+records `running` only immediately before the actual callback. Known activation
+failure/cancellation preserves nonexecution and existing unknown budget holds;
+it creates no automatic single-use replay. A crashed worker with an unknown
+outcome retains the existing conservative recovery behavior.
+
+The default-false `SOVITE_REPOSITORY_WORKER_ONLY` setting limits the local
+cohost's claim and recovery queries to actual repository-run metadata before
+the bounded queue scan. It also refuses ordinary job reservation replay/start,
+renewal and mutation. It does not change the API-wide compute identity or remote
+HTTP worker protocol. The fixed cohost wrapper requires and enables this setting;
+older owners without it must refuse cohost startup. API, worker, artifact store,
+mirror and state remain the same canonical Platform, with no new queue or lease
+ledger. Source tests use actual SQLite/PostgreSQL owners and explicitly
+unqualified fixture drivers; they do not qualify a deployed native service.

@@ -133,3 +133,25 @@ op repositoryRecoveryContext(@path run_id: Identity, @body body: RecoveryContext
 @route("/api/repository-runs/v1/runs/{run_id}/recovery-release") @post
 op repositoryRecoveryRelease(@path run_id: Identity, @body body: RecoveryReleaseRequest): JsonResponse<200, RecoveryReleased>
   | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;
+
+// Administrative currentness projection only: no fence bearer or model data.
+model NativeActivation {
+  schema_version: "sovite-native-activation/v1";
+  job_id: Identity;
+  attempt_id: Identity;
+  workspace_id: Identity;
+  repository_id: Identity;
+  principal_id: Identity;
+  generation: DigestRef;
+  fence_sha256: Sha256;
+  packet_sha256: Sha256;
+  executor_id: Identity;
+  publication_revision: Identity;
+  qualification_ref: Identity;
+  @minLength(1) @maxLength(20) @pattern("^[1-9][0-9]{0,19}$") vm_id: string;
+  @minValue(0) deadline: float64;
+  @minValue(0) lease_until: float64;
+}
+@route("/api/repository-runs/v1/runs/{run_id}/attempts/{attempt_id}/activation") @get
+op repositoryNativeActivationRead(@path run_id: Identity, @path attempt_id: Identity): JsonResponse<200, NativeActivation>
+  | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;

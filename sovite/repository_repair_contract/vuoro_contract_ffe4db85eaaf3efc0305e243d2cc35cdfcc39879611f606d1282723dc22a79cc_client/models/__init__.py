@@ -4,6 +4,8 @@ from .error_detail import ErrorDetail
 from .error_envelope import ErrorEnvelope
 from .feedback_context import FeedbackContext
 from .feedback_context_request import FeedbackContextRequest
+from .native_activation import NativeActivation
+from .native_activation_schema_version import NativeActivationSchemaVersion
 from .recovery_capture_request import RecoveryCaptureRequest
 from .recovery_captured import RecoveryCaptured
 from .recovery_captured_kind import RecoveryCapturedKind
@@ -25,6 +27,8 @@ __all__ = (
     "ErrorEnvelope",
     "FeedbackContext",
     "FeedbackContextRequest",
+    "NativeActivation",
+    "NativeActivationSchemaVersion",
     "RecoveryCaptureRequest",
     "RecoveryCaptured",
     "RecoveryCapturedKind",

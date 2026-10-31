@@ -674,6 +674,24 @@ class RepositoryRunAttemptExecutor:
             attempts = record.get("attempts", []) if isinstance(record, dict) else []
             return bool(attempts and attempts[-1].get("state") in {"running", "interrupted", "uncertain"})
 
+    def activation_not_started(self,job_id,fence):
+        if not isinstance(fence,str)or not fence:
+            return False
+        with self.platform.db.sessions()as session:
+            job=session.get(Job,job_id)
+            if job is None:return False
+            run=job.resolved.get("repository_run")
+            if type(run)is not dict:return False
+            attempts=run.get("attempts")
+            if type(attempts)is not list or not attempts or type(attempts[-1])is not dict:return False
+            attempt=attempts[-1];value=attempt.get("activation")
+            if type(value)is not dict:return False
+            return (attempt.get("state")in {"awaiting_activation","activation_cancelled"}
+                and value.get("schema_version")=="sovite-native-activation/v1"
+                and value.get("job_id")==job.id and value.get("generation")==job.generation
+                and value.get("attempt_id")==f"{job.id}-{job.attempts}"
+                and value.get("fence_sha256")==hashlib.sha256(fence.encode()).hexdigest())
+
     def check_authorization(self, job: Job, *, purpose: str = 'active') -> None:
         """Recheck the live repository binding and qualification during a run."""
         if purpose not in {'active','observe'}:
@@ -814,7 +832,6 @@ class RepositoryRunAttemptExecutor:
         try:
             manager = RepositorySessionManager(self.state_root, _AttemptBindingResolver(raw))
             workspace = manager.prepare(packet.as_dict())
-            self._persist(job.id, fence, lambda run: run["attempts"][-1].update({"state": "running"}))
             run_record = job.resolved["repository_run"]
             goal = job.task
             deadline = min(time.time() + self.timeout_seconds, _timestamp(run_record["deadline"], "deadline").timestamp())
@@ -841,7 +858,6 @@ class RepositoryRunAttemptExecutor:
                     from .repository_repairs import prepare_execution
                     kwargs["repair_context"] = prepare_execution(self.platform, job, workspace, manager.records_root)
                     authorization_check()
-                executor_started = True
                 attempt_executor = self.executor
                 for_attempt = getattr(attempt_executor, "for_attempt", None)
                 if for_attempt is not None:
@@ -849,11 +865,25 @@ class RepositoryRunAttemptExecutor:
                         raise RuntimeFailure("repository_execution_context_unavailable")
                     context = self._attempt_context(job, fence=fence, attempt_id=attempt_id,
                                                     deadline=deadline)
+                    prepare_attempt=getattr(attempt_executor,"prepare_attempt",None)
+                    if prepare_attempt is not None:
+                        if not callable(prepare_attempt):
+                            raise RuntimeFailure("repository_execution_context_unavailable")
+                        from .repository_native_activation import metadata
+                        activation=metadata(context,digest)
+                        self._persist(job.id,fence,lambda run:run["attempts"][-1].update(
+                            state="awaiting_activation",activation=activation))
+                        await asyncio.wait_for(prepare_attempt(context,authorization_check),
+                            timeout=max(.001,context.deadline-time.time()))
+                        authorization_check()
                     attempt_executor = for_attempt(context)
                     if not callable(attempt_executor):
                         raise RuntimeFailure("repository_execution_context_unavailable")
                     deadline = context.deadline
                     remaining = deadline - time.time()
+                authorization_check()
+                self._persist(job.id,fence,lambda run:run["attempts"][-1].update(state="running"))
+                executor_started = True
                 await asyncio.wait_for(
                     attempt_executor(workspace.worktree, goal, deadline, budget, authorization_check, **kwargs),
                     timeout=remaining)
@@ -880,7 +910,8 @@ class RepositoryRunAttemptExecutor:
                     "tip_sha": evidence["tip_sha"], "patch_sha256": evidence["patch_sha256"],
                     "changed_paths": evidence["changed_paths"], "evidence_sha256": evidence_projection["sha256"]}
         except asyncio.CancelledError:
-            self._mark_attempt(job.id, fence, attempt_id, "interrupted")
+            self._mark_attempt(job.id, fence, attempt_id,
+                               "interrupted" if executor_started else "activation_cancelled")
             raise
         except asyncio.TimeoutError:
             if executor_started:
