@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from . import policy
+from . import repository_currentness as currentness
 from .db import BundleRevision, Database, GrantState, Job, MetadataRow, canonical, digest
 from .hosting import compile_bundle, load_envelope
 from .qualification import is_qualified, validate_issuers
@@ -23,6 +24,7 @@ from .storage import ArtifactStore
 TERMINAL = {"completed", "failed", "cancelled", "blocked"}
 PUBLIC_STATUS = {"queued": "pending", "retry_wait": "pending", "running": "working", "completed": "available", "failed": "unavailable", "cancelled": "unavailable", "blocked": "unavailable"}
 _REAUTHORIZING = ContextVar("sovite_job_reauthorization", default=frozenset())
+_AUTHORIZATION_STARTED = ContextVar("sovite_authorization_started", default=None)
 
 
 class PlatformError(Exception):
@@ -33,8 +35,9 @@ class PlatformError(Exception):
 
 
 class Platform:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, repository_currentness_authorizer=None):
         self.settings = settings
+        self.repository_currentness_authorizer = repository_currentness_authorizer
         self.db = Database(settings.database_url, schema=settings.database_schema)
         self.store = ArtifactStore(settings)
 
@@ -158,12 +161,19 @@ class Platform:
         recipe["generation"] = active_generation
         return recipe
 
-    def authorize_existing_job(self, session, row: Job) -> dict:
+    def authorize_existing_job(self, session, row: Job, *, purpose: str = "active") -> dict:
         """Recheck the job and any approved source chain at every owner boundary."""
+        if purpose not in {"active", "observe"}:
+            raise PlatformError("invalid_authorization_purpose", "Authorization purpose is invalid", 500)
         seen = _REAUTHORIZING.get()
         if row.id in seen or len(seen) >= 128:
             raise PlatformError("invalid_source_chain", "Output source chain is cyclic or exceeds its bound", 409)
         token = _REAUTHORIZING.set(seen | {row.id})
+        started_token = None
+        started = _AUTHORIZATION_STARTED.get()
+        if started is None:
+            started = time.monotonic()
+            started_token = _AUTHORIZATION_STARTED.set(started)
         try:
             prior = row.resolved.get("previous_attempt")
             if prior is not None:
@@ -181,6 +191,8 @@ class Platform:
                 input_class=row.resolved.get("input_class", row.resolved["grant"]["input_class"]),
                 generation=row.generation, is_operator=row.resolved.get("submission_role") == "operator",
                 workflow_bound=selected is not None)
+            if purpose == "active":
+                currentness.check_job(self, row, recipe, authorization_started_at=started)
             source_release = row.resolved.get("source_release")
             if selected is not None and source_release:
                 from .output_contracts import transfer_content
@@ -193,8 +205,12 @@ class Platform:
             from .repository_repairs import recheck
             recheck(self, session, row, recipe)
             return recipe
+        except currentness.CurrentnessError as exc:
+            raise PlatformError(exc.code, exc.message, exc.status) from None
         finally:
             _REAUTHORIZING.reset(token)
+            if started_token is not None:
+                _AUTHORIZATION_STARTED.reset(started_token)
 
     def workflow_installation_id(self) -> str:
         envelope = load_envelope(self.settings.hosting_envelope_path)
@@ -371,6 +387,8 @@ class Platform:
                         from .repository_repairs import admit
                         admit(self, session, repository_run, caller, recipe, task)
                     recipe["repository_run"] = copy.deepcopy(repository_run)
+                admission = currentness.admit(self, session, repository_run=repository_run,
+                    task=task, caller=caller, recipe=recipe)
                 if len(task.encode()) > self.settings.max_request_bytes:
                     raise PlatformError("invalid_task", "Task and workflow context exceed the configured limit", 422)
                 if workflow_binding is not None:
@@ -378,10 +396,13 @@ class Platform:
                                   source_release=source_release, transfer_id=transfer_id)
                 recipe["submission_role"] = "operator" if is_operator else "caller"
                 row = Job(id=uuid.uuid4().hex, receipt="rcpt_" + secrets.token_urlsafe(24), idempotency_key=key, request_digest=request_digest, caller=caller, grant_id=grant_id, generation=recipe["generation"], resolved=recipe, task=task, status="queued", attempts=0, next_attempt_at=time.time())
+                currentness.bind_job(self, row, admission)
                 session.add(row)
                 self.db.audit(session, caller, "task.accepted", row.id, {"grant_id": grant_id, "generation": row.generation})
                 session.flush()
                 return row
+        except currentness.CurrentnessError as exc:
+            raise PlatformError(exc.code, exc.message, exc.status) from None
         except IntegrityError:
             with self.db.sessions() as session:
                 existing = session.scalar(select(Job).where(Job.idempotency_key == key))
@@ -406,7 +427,7 @@ class Platform:
             if row is None:
                 raise PlatformError("not_found", "Receipt not found", 404)
             try:
-                self.authorize_existing_job(session, row)
+                self.authorize_existing_job(session, row, purpose="observe")
             except PlatformError:
                 # Never return a formerly permitted result after current authority changes.
                 return {"receipt": row.receipt, "status": "unavailable"}

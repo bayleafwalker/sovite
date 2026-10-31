@@ -349,6 +349,9 @@ class LeaseService:
                         (409, "previous_attempt_unfinished"),
                         (409, "previous_effect_uncertain"),
                         (409, "repository_run_deadline"),
+                        (409, "repository_currentness_revoked"),
+                        (409, "repository_currentness_binding_invalid"),
+                        (409, "repository_currentness_required"),
                     }
                     if exc.status != 403 and not lineage_denial:
                         raise
@@ -718,7 +721,8 @@ class LeaseService:
                 return
             denied = None
             try:
-                self.platform.authorize_existing_job(session, row)
+                self.platform.authorize_existing_job(session, row,
+                    purpose="active" if artifact else "observe")
             except PlatformError as exc:
                 denied = exc.code
             if lease is not None and row.resolved.get("model", {}).get("connection", {}).get("kind") == "model-gateway":

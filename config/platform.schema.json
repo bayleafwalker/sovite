@@ -782,6 +782,9 @@
           "workflow_only": {
             "type": "boolean"
           },
+          "repository_currentness_required": {
+            "type": "boolean"
+          },
           "on_outage": {
             "const": "queue"
           },

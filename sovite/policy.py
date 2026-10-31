@@ -150,6 +150,7 @@ DEFINITIONS = {
         "return_contract": {"enum": ["reference", "class-aware"]}, "enabled": {"type": "boolean"},
         "result_readers": REFS,
         "workflow_only": {"type": "boolean"},
+        "repository_currentness_required": {"type": "boolean"},
         "on_outage": {"const": "queue"},
         "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10},
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},

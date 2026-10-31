@@ -228,10 +228,21 @@ class RepositoryRunOwner:
         for binding in bindings:
             grouped.setdefault(binding.executor_id, []).append(binding)
         executors = []
+        def currentness_issue(binding):
+            from .repository_currentness import check_installed, CurrentnessError
+            try:
+                with self.platform.db.sessions() as session:
+                    recipe = self.platform.authorize(session, binding.grant_id, binding.principal_id,
+                        binding.input_class, generation=binding.generation)
+                    check_installed(self.platform, recipe)
+            except (PlatformError, CurrentnessError) as exc:
+                return exc.code
+            return None
         for executor_id, rows in sorted(grouped.items()):
             issues = [(_profile_issue(self.execution_profile, row)
                        or ("repository_deadline_expired"
-                           if _timestamp(row.latest_deadline, "latest_deadline") <= now else None))
+                           if _timestamp(row.latest_deadline, "latest_deadline") <= now else None)
+                       or currentness_issue(row))
                       for row in rows]
             eligible = [row for row, issue in zip(rows, issues) if issue is None]
             launchable = self.profile_enabled and bool(eligible)
@@ -242,6 +253,7 @@ class RepositoryRunOwner:
             blockers = ([] if launchable else [{
                 "code": issue if self.profile_enabled else "execution_profile_unavailable",
                 "message": ("The repository owner deadline has expired." if self.profile_enabled and issue == "repository_deadline_expired"
+                            else "The required repository work authorizer is unavailable." if issue == "repository_currentness_unavailable"
                             else "A current qualified mutable execution profile is required for this binding."),
             }])
             executors.append({

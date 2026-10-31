@@ -58,7 +58,7 @@ def _row(platform: Platform, session, receipt: str, identity: str, *, reader: bo
 def _authorize(platform: Platform, session, row: Job, identity: str, *, reader: bool):
     # Recheck the producer and any exact released input it consumed. Revoking a
     # source after downstream execution must also prevent downstream disclosure.
-    recipe = platform.authorize_existing_job(session, row)
+    recipe = platform.authorize_existing_job(session, row, purpose="observe")
     grant = recipe["grant"]
     if reader and identity not in grant.get("result_readers", []):
         raise PlatformError("not_found", "Receipt not found", 404)
