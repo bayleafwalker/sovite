@@ -1,0 +1,100 @@
+{
+  "contractVersion": "2.0.0",
+  "exposures": {
+    "resourceScopeInstall": "internal",
+    "resourceOutputGrant": "internal",
+    "resourceSubmit": "internal",
+    "resourcePoll": "internal",
+    "resourceCurrent": "internal",
+    "resourceResult": "internal",
+    "resourceResultRead": "internal"
+  },
+  "byteBounds": {
+    "resourceScopeInstall": {
+      "requestMaxBytes": 4096,
+      "responseMaxBytes": {
+        "200": 16384,
+        "400": 4096,
+        "403": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
+    },
+    "resourceOutputGrant": {
+      "requestMaxBytes": 4096,
+      "responseMaxBytes": {
+        "200": 16384,
+        "400": 4096,
+        "403": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
+    },
+    "resourceSubmit": {
+      "requestMaxBytes": 4096,
+      "responseMaxBytes": {
+        "200": 16384,
+        "400": 4096,
+        "403": 4096,
+        "404": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
+    },
+    "resourcePoll": {
+      "requestMaxBytes": 256,
+      "responseMaxBytes": {
+        "200": 1048576,
+        "400": 4096,
+        "403": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
+    },
+    "resourceCurrent": {
+      "requestMaxBytes": 4096,
+      "responseMaxBytes": {
+        "200": 16384,
+        "400": 4096,
+        "403": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
+    },
+    "resourceResult": {
+      "requestMaxBytes": 16384,
+      "responseMaxBytes": {
+        "200": 16384,
+        "400": 4096,
+        "403": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
+    },
+    "resourceResultRead": {
+      "requestMaxBytes": 4096,
+      "responseMaxBytes": {
+        "200": 16384,
+        "400": 4096,
+        "403": 4096,
+        "404": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
+    }
+  }
+}

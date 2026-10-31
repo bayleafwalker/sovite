@@ -1,0 +1,2342 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Sovite closed resource owner v2",
+    "version": "0.0.0"
+  },
+  "tags": [],
+  "paths": {
+    "/internal/resource-owner/v2/current": {
+      "post": {
+        "operationId": "resourceCurrent",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Bearer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurrentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The server could not understand the request due to invalid syntax.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CurrentRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/resource-owner/v2/output-grants": {
+      "post": {
+        "operationId": "resourceOutputGrant",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Bearer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutputGrantInstalled"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The server could not understand the request due to invalid syntax.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutputGrantRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/resource-owner/v2/poll": {
+      "post": {
+        "operationId": "resourcePoll",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Bearer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PollResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The server could not understand the request due to invalid syntax.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PollRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/resource-owner/v2/requests": {
+      "post": {
+        "operationId": "resourceSubmit",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Bearer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Submitted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The server could not understand the request due to invalid syntax.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/resource-owner/v2/result": {
+      "post": {
+        "operationId": "resourceResult",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Bearer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Delivered"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The server could not understand the request due to invalid syntax.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/resource-owner/v2/result/read": {
+      "post": {
+        "operationId": "resourceResultRead",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Bearer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The server could not understand the request due to invalid syntax.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResultReadRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/resource-owner/v2/workload-scopes": {
+      "put": {
+        "operationId": "resourceScopeInstall",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Bearer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScopeInstalled"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The server could not understand the request due to invalid syntax.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkloadScope"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Bearer": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 4096
+      },
+      "BootId": {
+        "type": "string",
+        "minLength": 36,
+        "maxLength": 36,
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      },
+      "C0Profile": {
+        "type": "object",
+        "required": [
+          "source_class",
+          "output_class",
+          "destination"
+        ],
+        "properties": {
+          "source_class": {
+            "type": "string",
+            "enum": [
+              "C0"
+            ]
+          },
+          "output_class": {
+            "type": "string",
+            "enum": [
+              "C0"
+            ]
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Identity"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "C1Profile": {
+        "type": "object",
+        "required": [
+          "source_class",
+          "output_class",
+          "destination"
+        ],
+        "properties": {
+          "source_class": {
+            "type": "string",
+            "enum": [
+              "C1"
+            ]
+          },
+          "output_class": {
+            "type": "string",
+            "enum": [
+              "C1"
+            ]
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Identity"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "C2Profile": {
+        "type": "object",
+        "required": [
+          "source_class",
+          "output_class",
+          "destination"
+        ],
+        "properties": {
+          "source_class": {
+            "type": "string",
+            "enum": [
+              "C2"
+            ]
+          },
+          "output_class": {
+            "type": "string",
+            "enum": [
+              "C2"
+            ]
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Identity"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "CreateBinding": {
+        "type": "object",
+        "required": [
+          "create_request_id",
+          "principal_id",
+          "gateway_id",
+          "tenant_id",
+          "workspace_id",
+          "domain_id",
+          "target_id",
+          "target_revision",
+          "created_at",
+          "execution_deadline"
+        ],
+        "properties": {
+          "create_request_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "principal_id": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "gateway_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_revision": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "execution_deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "CurrentRequest": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "fence_fingerprint",
+          "policy_revision",
+          "destination",
+          "actor"
+        ],
+        "properties": {
+          "request_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "fence_fingerprint": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "policy_revision": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/Principal"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "CurrentResult": {
+        "type": "object",
+        "required": [
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "DataProfile": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/C0Profile"
+          },
+          {
+            "$ref": "#/components/schemas/C1Profile"
+          },
+          {
+            "$ref": "#/components/schemas/C2Profile"
+          }
+        ]
+      },
+      "Delivered": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "state"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "stored",
+              "conflict",
+              "withheld",
+              "fenced"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "DeliveryRequest": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "fence_fingerprint",
+          "policy_revision",
+          "destination",
+          "actor",
+          "observation_digest",
+          "observation_b64",
+          "release"
+        ],
+        "properties": {
+          "request_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "fence_fingerprint": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "policy_revision": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "observation_digest": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "observation_b64": {
+            "type": "string",
+            "maxLength": 6000
+          },
+          "release": {
+            "type": "string",
+            "enum": [
+              "allowed",
+              "denied"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Digest": {
+        "type": "string",
+        "minLength": 71,
+        "maxLength": 71,
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "Epoch": {
+        "type": "number",
+        "format": "double",
+        "minimum": 0,
+        "maximum": 1000000000000
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ExecutionContext": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "instance_id",
+          "generation",
+          "fence",
+          "operation_id"
+        ],
+        "properties": {
+          "job_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "instance_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "generation": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "fence": {
+            "$ref": "#/components/schemas/Fence"
+          },
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Fence": {
+        "type": "string",
+        "minLength": 32,
+        "maxLength": 32,
+        "pattern": "^[0-9a-f]{32}$"
+      },
+      "GatewayPolicy": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "gateway_id",
+          "audience",
+          "tenant_id",
+          "principal_id",
+          "workspace_id",
+          "domain_id",
+          "expires_at",
+          "catalog",
+          "release_policy_revision"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-policy/v2"
+            ]
+          },
+          "gateway_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "audience": {
+            "type": "string",
+            "enum": [
+              "resource-gateway"
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "principal_id": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "expires_at": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "catalog": {
+            "$ref": "#/components/schemas/TargetCatalog"
+          },
+          "release_policy_revision": {
+            "$ref": "#/components/schemas/Digest"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "GatewayRequest": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "job_id",
+          "principal_id",
+          "audience",
+          "instance_id",
+          "generation",
+          "gateway_id",
+          "tenant_id",
+          "workspace_id",
+          "domain_id",
+          "workload",
+          "fence_fingerprint",
+          "request",
+          "target",
+          "created_at",
+          "deadline"
+        ],
+        "properties": {
+          "request_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "job_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "principal_id": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "audience": {
+            "type": "string",
+            "enum": [
+              "resource-gateway"
+            ]
+          },
+          "instance_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "generation": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "gateway_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "workload": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "fence_fingerprint": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ResourceRequest"
+          },
+          "target": {
+            "$ref": "#/components/schemas/ResourceEntry"
+          },
+          "create": {
+            "$ref": "#/components/schemas/CreateBinding"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "HealthSelector": {
+        "type": "object",
+        "required": [
+          "operation",
+          "target_id"
+        ],
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "model-peer.health-read"
+            ]
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Identity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "InstalledCatalog": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "entries"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-installed-catalog/v2"
+            ]
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetConfiguration"
+            },
+            "minItems": 1,
+            "maxItems": 2
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabConfiguration": {
+        "type": "object",
+        "required": [
+          "kind",
+          "target_id",
+          "template_id",
+          "template_sha256",
+          "max_ttl_seconds"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "kvm-lab"
+            ]
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "template_id": {
+            "type": "string",
+            "enum": [
+              "diskless-kvm-lab-v1"
+            ]
+          },
+          "template_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "max_ttl_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 300
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabCreateSelector": {
+        "type": "object",
+        "required": [
+          "operation",
+          "target_id"
+        ],
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.create"
+            ]
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabCreated": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "state",
+          "effect_outcome",
+          "deadline",
+          "schema_version",
+          "operation"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "running",
+              "stopped",
+              "absent",
+              "unknown"
+            ]
+          },
+          "effect_outcome": {
+            "type": "string",
+            "enum": [
+              "known",
+              "unknown"
+            ]
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-lab-created/v1"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.create"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabEntry": {
+        "type": "object",
+        "required": [
+          "kind",
+          "target_id",
+          "target_revision",
+          "create_profile",
+          "observe_profile",
+          "stop_profile"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "kvm-lab"
+            ]
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_revision": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "create_profile": {
+            "$ref": "#/components/schemas/DataProfile"
+          },
+          "observe_profile": {
+            "$ref": "#/components/schemas/DataProfile"
+          },
+          "stop_profile": {
+            "$ref": "#/components/schemas/DataProfile"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabHostObservation": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "operation_id",
+          "create_operation_id",
+          "template_id",
+          "template_sha256",
+          "deadline",
+          "state",
+          "host_boot_id",
+          "created_boot_id",
+          "unit",
+          "invocation_id"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "cloud.kvm-lab-observation.v1"
+            ]
+          },
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "create_operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "template_id": {
+            "type": "string",
+            "enum": [
+              "diskless-kvm-lab-v1"
+            ]
+          },
+          "template_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "running",
+              "stopped",
+              "absent",
+              "unknown"
+            ]
+          },
+          "host_boot_id": {
+            "$ref": "#/components/schemas/BootId"
+          },
+          "created_boot_id": {
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BootId"
+              }
+            ],
+            "nullable": true
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "invocation_id": {
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Fence"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabHostRequest": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "verb",
+          "operation_id",
+          "create_operation_id",
+          "template_id",
+          "template_sha256",
+          "deadline"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "cloud.kvm-lab-control.v1"
+            ]
+          },
+          "verb": {
+            "type": "string",
+            "enum": [
+              "create",
+              "observe",
+              "stop"
+            ]
+          },
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "create_operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "template_id": {
+            "type": "string",
+            "enum": [
+              "diskless-kvm-lab-v1"
+            ]
+          },
+          "template_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabObservationFields": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "state",
+          "effect_outcome",
+          "deadline"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "running",
+              "stopped",
+              "absent",
+              "unknown"
+            ]
+          },
+          "effect_outcome": {
+            "type": "string",
+            "enum": [
+              "known",
+              "unknown"
+            ]
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabObserveSelector": {
+        "type": "object",
+        "required": [
+          "operation",
+          "target_id",
+          "create_request_id"
+        ],
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.observe"
+            ]
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "create_request_id": {
+            "$ref": "#/components/schemas/Sha256"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabObserved": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "state",
+          "effect_outcome",
+          "deadline",
+          "schema_version",
+          "operation"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "running",
+              "stopped",
+              "absent",
+              "unknown"
+            ]
+          },
+          "effect_outcome": {
+            "type": "string",
+            "enum": [
+              "known",
+              "unknown"
+            ]
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-lab-observed/v1"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.observe"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabStopSelector": {
+        "type": "object",
+        "required": [
+          "operation",
+          "target_id",
+          "create_request_id"
+        ],
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.stop"
+            ]
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "create_request_id": {
+            "$ref": "#/components/schemas/Sha256"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabStopped": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "state",
+          "effect_outcome",
+          "deadline",
+          "schema_version",
+          "operation"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "running",
+              "stopped",
+              "absent",
+              "unknown"
+            ]
+          },
+          "effect_outcome": {
+            "type": "string",
+            "enum": [
+              "known",
+              "unknown"
+            ]
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-lab-stopped/v1"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.stop"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Observation": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PeerHealthObservation"
+          },
+          {
+            "$ref": "#/components/schemas/LabCreated"
+          },
+          {
+            "$ref": "#/components/schemas/LabObserved"
+          },
+          {
+            "$ref": "#/components/schemas/LabStopped"
+          }
+        ]
+      },
+      "OperationId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_-]+$"
+      },
+      "OutputGrantInstalled": {
+        "type": "object",
+        "required": [
+          "grant_id",
+          "schema_version",
+          "destination",
+          "policy_revision"
+        ],
+        "properties": {
+          "grant_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-peer-health/v1",
+              "sovite-resource-lab-created/v1",
+              "sovite-resource-lab-observed/v1",
+              "sovite-resource-lab-stopped/v1"
+            ]
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "policy_revision": {
+            "$ref": "#/components/schemas/Digest"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "OutputGrantRequest": {
+        "type": "object",
+        "required": [
+          "workload_id",
+          "principal_id",
+          "tenant_id",
+          "workspace_id",
+          "domain_id",
+          "target_id",
+          "operation",
+          "policy_revision"
+        ],
+        "properties": {
+          "workload_id": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "principal_id": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ResourceOperation"
+          },
+          "policy_revision": {
+            "$ref": "#/components/schemas/Digest"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PeerHealthConfiguration": {
+        "type": "object",
+        "required": [
+          "kind",
+          "target_id",
+          "origin",
+          "method",
+          "path",
+          "ca_file",
+          "ca_sha256"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "model-peer-health"
+            ]
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "origin": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "enum": [
+              "/healthz"
+            ]
+          },
+          "ca_file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "ca_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PeerHealthEntry": {
+        "type": "object",
+        "required": [
+          "kind",
+          "target_id",
+          "target_revision",
+          "read_profile"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "model-peer-health"
+            ]
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_revision": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "read_profile": {
+            "$ref": "#/components/schemas/DataProfile"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PeerHealthMessage": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PeerHealthObservation": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "operation",
+          "health_scope",
+          "daemon_responsive"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-peer-health/v1"
+            ]
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "model-peer.health-read"
+            ]
+          },
+          "health_scope": {
+            "type": "string",
+            "enum": [
+              "peer-http-daemon"
+            ]
+          },
+          "daemon_responsive": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PeerHealthSource": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/PeerHealthMessage"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PollRequest": {
+        "type": "object",
+        "properties": {
+          "after": {
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Sha256"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PollResult": {
+        "type": "object",
+        "required": [
+          "requests",
+          "next_cursor"
+        ],
+        "properties": {
+          "requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GatewayRequest"
+            },
+            "maxItems": 100
+          },
+          "next_cursor": {
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Sha256"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Principal": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "ResourceEntry": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PeerHealthEntry"
+          },
+          {
+            "$ref": "#/components/schemas/LabEntry"
+          }
+        ]
+      },
+      "ResourceOperation": {
+        "type": "string",
+        "enum": [
+          "model-peer.health-read",
+          "kvm-lab.create",
+          "kvm-lab.observe",
+          "kvm-lab.stop"
+        ]
+      },
+      "ResourceRequest": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "workspace_id",
+          "resource_domain_id",
+          "resource",
+          "target_revision",
+          "execution_deadline"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-request/v2"
+            ]
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource": {
+            "$ref": "#/components/schemas/ResourceSelector"
+          },
+          "target_revision": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "execution_deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ResourceResult": {
+        "type": "object",
+        "required": [
+          "observation",
+          "sha256",
+          "output_class",
+          "destination",
+          "policy_revision"
+        ],
+        "properties": {
+          "observation": {
+            "$ref": "#/components/schemas/Observation"
+          },
+          "sha256": {
+            "$ref": "#/components/schemas/Digest"
+          },
+          "output_class": {
+            "type": "string",
+            "enum": [
+              "C0",
+              "C1",
+              "C2"
+            ]
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "policy_revision": {
+            "$ref": "#/components/schemas/Digest"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ResourceSelector": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/HealthSelector"
+          },
+          {
+            "$ref": "#/components/schemas/LabCreateSelector"
+          },
+          {
+            "$ref": "#/components/schemas/LabObserveSelector"
+          },
+          {
+            "$ref": "#/components/schemas/LabStopSelector"
+          }
+        ]
+      },
+      "ResultReadRequest": {
+        "type": "object",
+        "required": [
+          "execution",
+          "request_id"
+        ],
+        "properties": {
+          "execution": {
+            "$ref": "#/components/schemas/ExecutionContext"
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/Sha256"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ScopeInstalled": {
+        "type": "object",
+        "required": [
+          "workload_id",
+          "updated"
+        ],
+        "properties": {
+          "workload_id": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "updated": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Sha256": {
+        "type": "string",
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "SubmitRequest": {
+        "type": "object",
+        "required": [
+          "execution",
+          "resource"
+        ],
+        "properties": {
+          "execution": {
+            "$ref": "#/components/schemas/ExecutionContext"
+          },
+          "resource": {
+            "$ref": "#/components/schemas/ResourceSelector"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Submitted": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "state",
+          "fence_fingerprint"
+        ],
+        "properties": {
+          "request_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "observed"
+            ]
+          },
+          "fence_fingerprint": {
+            "$ref": "#/components/schemas/Digest"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "TargetCatalog": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "entries"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-catalog/v2"
+            ]
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResourceEntry"
+            },
+            "minItems": 1,
+            "maxItems": 2
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "TargetConfiguration": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PeerHealthConfiguration"
+          },
+          {
+            "$ref": "#/components/schemas/LabConfiguration"
+          }
+        ]
+      },
+      "WorkloadScope": {
+        "type": "object",
+        "required": [
+          "workload_id",
+          "gateway_id",
+          "tenant_id",
+          "workspace_id",
+          "domain_id",
+          "catalog"
+        ],
+        "properties": {
+          "workload_id": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "gateway_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "catalog": {
+            "$ref": "#/components/schemas/TargetCatalog"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      }
+    }
+  }
+}

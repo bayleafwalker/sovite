@@ -33,6 +33,7 @@ test = [
 [project.scripts]
 sovite = "sovite.cli:main"
 sovite-resource-gateway = "sovite.resource_gateway_cli:main"
+sovite-resource-gateway-v2 = "sovite.resource_gateway_v2_cli:main"
 sovite-remote-worker = "sovite.remote_worker_cli:main"
 sovite-remote-worker-health = "sovite.remote_worker_health:main"
 
@@ -40,7 +41,7 @@ sovite-remote-worker-health = "sovite.remote_worker_health:main"
 include = ["sovite*"]
 
 [tool.setuptools.package-data]
-sovite = ["static/*", "static/**/*", "execution_contract/**/*.json", "repository_repair_contract/**/*.json"]
+sovite = ["static/*", "static/**/*", "execution_contract/**/*.json", "repository_repair_contract/**/*.json", "resource_contract/**/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

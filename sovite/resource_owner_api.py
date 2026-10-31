@@ -130,6 +130,9 @@ def install_routes(app, platform, settings):
                     return row.id, hashlib.sha256(token.encode()).hexdigest()
         raise HTTPException(403, "gateway_denied")
 
+    from .resource_owner_v2 import install_routes as install_v2
+    install_v2(app,platform,settings,operator=operator,workload=workload,gateway=gateway)
+
     @app.post("/internal/resource-owner/v1/enrollments")
     def enroll(body: Enroll, _operator=Depends(operator)):
         now = time.time()
@@ -168,6 +171,7 @@ def install_routes(app, platform, settings):
                 session.add(row)
             for field in ("gateway_id", "tenant_id", "workspace_id", "domain_id", "observation_id", "namespace", "pod_name"):
                 setattr(row, field, getattr(body, field))
+            row.target_catalog = None
             row.updated_at = time.time()
         return {"workload_id": body.workload_id, "updated": True}
 
@@ -233,6 +237,9 @@ def install_routes(app, platform, settings):
             scope = session.get(ResourceWorkloadScope, workload_id)
             if scope is None or not job.caller:
                 raise HTTPException(403, "execution_scope_denied")
+            if scope.target_catalog is not None or any(value is None for value in
+                    (scope.observation_id, scope.namespace, scope.pod_name)):
+                raise HTTPException(403, "resource_scope_denied")
             request = {"workspace_id": scope.workspace_id,
                 "resource_domain_id": scope.domain_id, "observation_id": scope.observation_id}
             request_id = hashlib.sha256(f"{body.job_id}:{body.operation_id}".encode()).hexdigest()
@@ -274,6 +281,8 @@ def install_routes(app, platform, settings):
                     "fence_fingerprint": "sha256:" + hashlib.sha256(lease.fence.encode()).hexdigest()}
 
     def valid_request(session, row, enrollment_id, fingerprint, gateway_digest=None):
+        if row.namespace is None or row.pod_name is None:
+            return False
         enrollment = session.get(ResourceGatewayEnrollment, enrollment_id)
         job = session.get(Job, row.job_id)
         lease = session.get(WorkerExecutionLease, row.job_id)

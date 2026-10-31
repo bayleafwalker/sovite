@@ -95,6 +95,14 @@ class ResourceOperationStore:
             db.commit()
             return {"state": "admitted", "observation": None, "sha256": None, "release": None, "release_metadata": None}
 
+    def lookup(self, operation_id: str) -> dict | None:
+        """Read the exact existing local intent for a typed follow-up; no authority."""
+        if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", operation_id):
+            raise ValueError("invalid_operation_id")
+        with self._connect() as db:
+            row = db.execute("SELECT request,state FROM resource_operations WHERE operation_id=?", (operation_id,)).fetchone()
+            return {"request": json.loads(row[0]), "state": row[1]} if row else None
+
     def observe(self, operation_id: str, observation: bytes, release: str, metadata: dict | None = None) -> None:
         if not isinstance(observation, bytes) or len(observation) > 4096 or release not in {"allowed", "denied"}:
             raise ValueError("invalid_observation")

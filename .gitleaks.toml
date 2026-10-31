@@ -36,3 +36,10 @@ paths = ['''sovite/repository_repair_contract/vuoro_contract_ffe4db85eaaf3efc030
 regexes = ['''^\{"files":\{"openapi/contract\.openapi\.json":"cf288f6339f52b1c8dd41220140c710e65706ef208dba84d2a20bcd419c80242","operation\-manifest\.json":"20cab3623000392a00e5c9b06c9b4fdce02c174de126846b4d0574b006d2068d","schema/contract\.schema\.json":"2a713328429ec2455e3a4dccd02667cd563072c4889f687a1672705349dafaef"\},"schemaVersion":"vuoro\-contract\-integrity/v1"\}$''']
 regexTarget = "line"
 condition = "AND"
+
+[[allowlists]]
+description = "Generated closed resource inventory contains only these exact public file SHA-256 values"
+paths = ['''^sovite/resource_contract/vuoro_contract_62061d06ffdbd93279788f4478808b0e5f184642ac0c209f7dcbf462fc8ac33d_client/data/integrity\.json$''']
+regexes = ['''^\{"files":\{"openapi/contract\.openapi\.json":"a609e7653cb77b4207770df249b97611f91754f501a7461a9ffa11555ea3fdac","operation\-manifest\.json":"8250d6651e29261815a3b578ddc679ec2121aee1558fbf413182103f0190ae31","schema/contract\.schema\.json":"c579cd66ec6e15f7facc94469caee507f6253fe12593a8c68ca9033064e246d6"\},"schemaVersion":"vuoro\-contract\-integrity/v1"\}$''']
+regexTarget = "line"
+condition = "AND"
