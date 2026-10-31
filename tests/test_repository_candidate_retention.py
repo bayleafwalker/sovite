@@ -53,11 +53,16 @@ def served_workspace(tmp_path):
     from vuoro_client import AsyncVuoroClient
     from vuoro_client.profile import Profile
     class Loss(httpx.AsyncBaseTransport):
-        def __init__(self): self.inner = httpx.ASGITransport(app=app); self.operation = None; self.calls = []
+        def __init__(self):
+            self.inner = httpx.ASGITransport(app=app); self.operation = None; self.calls = []
+            self.pause = None; self.entered = None; self.resume = None
         async def handle_async_request(self, request):
             operation = json.loads(request.content).get('operation') if request.method == 'POST' else None
             if operation: self.calls.append(operation)
             response = await self.inner.handle_async_request(request)
+            if operation and operation == self.pause and response.status_code < 300:
+                self.entered.set()
+                await self.resume.wait()
             if operation and operation == self.operation and response.status_code < 300:
                 self.operation = None
                 raise httpx.ReadError('synthetic response loss')
@@ -217,4 +222,41 @@ def test_new_upload_rechecks_output_authority_but_lost_finalize_can_reconcile(pr
             receipt = await CandidateRetention(tmp_path/'publication', target, c).retain(exporter, key)
             assert await CandidateRetention(tmp_path/'reader', target, c).recover(receipt) == content.encode()
         assert loss.calls.count('knowledge.artifact.upload-v1') == before
+    asyncio.run(scenario())
+
+
+def test_concurrent_http_replay_does_not_duplicate_version_or_evidence(prepared, served_workspace, tmp_path):
+    from sovite.api import create_app
+    from sovite.repository_candidate_retention import CandidatePublicationService
+    from vuoro_client.profile import Profile
+    from test_repository_runs import make_owner, CALLER
+    platform, exporter, job, attempt, *_ = prepared
+    client, loss, ws, conn, schema = served_workspace
+    content = exporter._prepare_for_owner_review(job.id, attempt, principal_id='cloud-codex', workspace_id='workspace-1')
+    approved = release(platform, job, content)
+    service = CandidatePublicationService(exporter, tmp_path/'publisher',
+        WorkspaceTarget('https://workspace.invalid', ws, 'workspace-'+ws, frozenset({'C3'})),
+        Profile('retention','https://workspace.invalid','producer'), lambda ref:ref, transport=loss)
+    owner = make_owner(platform, exporter.resolver, executor=exporter.execution)
+    app = create_app(settings=platform.settings, platform=platform, repository_run_owner=owner, candidate_publication_service=service)
+    path = '/api/repository-runs/v1/runs/'+job.id+'/candidate-retention'
+    body = {'workspace_id':'workspace-1', 'attempt_id':attempt, 'release_id':approved}
+    async def scenario():
+        loss.pause = 'knowledge.artifact.begin-v1'
+        loss.entered, loss.resume = asyncio.Event(), asyncio.Event()
+        async with httpx.AsyncClient(base_url='https://sovite.invalid', transport=httpx.ASGITransport(app=app),
+                                     headers={'Authorization':'Bearer '+CALLER}) as c:
+            first = asyncio.create_task(c.post(path, json=body))
+            try:
+                await asyncio.wait_for(loss.entered.wait(), timeout=10)
+                second = await asyncio.wait_for(c.post(path, json=body), timeout=10)
+                assert second.status_code == 409  # bounded, no event-loop deadlock
+            finally:
+                loss.resume.set()
+            accepted = await asyncio.wait_for(first, timeout=10)
+            assert accepted.status_code == 200, accepted.text
+            replay = await c.post(path, json=body)
+            assert replay.status_code == 200 and replay.json() == accepted.json()
+        assert conn.execute(f'SELECT count(*) FROM "{schema}".artifact_version').fetchone()[0] == 1
+        assert len([e for e in platform.get_job(job.id).resolved['repository_run']['evidence'] if e['label']=='retained-candidate']) == 1
     asyncio.run(scenario())
