@@ -202,6 +202,111 @@
         }
       }
     },
+    "/api/repository-runs/v1/runs/{run_id}/attempts/{attempt_id}/activation": {
+      "get": {
+        "operationId": "repositoryNativeActivationRead",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Identity"
+            }
+          },
+          {
+            "name": "attempt_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Identity"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeActivation"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access is unauthorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/repository-runs/v1/runs/{run_id}/recovery": {
       "post": {
         "operationId": "repositoryRecoveryCapture",
@@ -638,6 +743,86 @@
         "minLength": 1,
         "maxLength": 128,
         "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "NativeActivation": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "job_id",
+          "attempt_id",
+          "workspace_id",
+          "repository_id",
+          "principal_id",
+          "generation",
+          "fence_sha256",
+          "packet_sha256",
+          "executor_id",
+          "publication_revision",
+          "qualification_ref",
+          "vm_id",
+          "deadline",
+          "lease_until"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-native-activation/v1"
+            ]
+          },
+          "job_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "attempt_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "repository_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "principal_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "generation": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "fence_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "packet_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "executor_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "publication_revision": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "qualification_ref": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "vm_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "deadline": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          },
+          "lease_until": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
       },
       "OutputRelease": {
         "type": "string",

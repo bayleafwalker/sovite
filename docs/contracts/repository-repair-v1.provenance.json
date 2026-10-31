@@ -8,13 +8,13 @@
     "runtimeWheelSha256": "7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9"
   },
   "sourceSha256": {
-    "contract.json": "8ff906329beb34c31cd983de96bcb0f816d9fe00b554572f2b48214ec49ea798",
-    "main.tsp": "23c506d1bb86cf19b7fc54c6a7e4212f6b92005ec2f456e7d7a2f319592b171a",
+    "contract.json": "336cda92cdffd1137cbf99a4ec0df256c370394ebae8bc72efa3dcce8442f0ed",
+    "main.tsp": "4363085fe64212a21ce7709e5cbaac9587469b5209c038ff6a1aef8c494674b7",
     "tspconfig.yaml": "d6b5b33902b26f94a6bc1ae9bcccd8cfffac8af020f74304b215a9b7e624fe91"
   },
   "generatedSdk": {
     "package": "sovite.repository_repair_contract.vuoro_contract_ffe4db85eaaf3efc0305e243d2cc35cdfcc39879611f606d1282723dc22a79cc_client",
-    "treeSha256": "3ea32bd30a6f38a5dd726ff19a6a7c2ccf1b2e3e4103bee3e88ce92bd275104c",
-    "dataIntegritySha256": "4b83e978ed83be672f4f93cb413aa1500a8ed91bbc8e5866ebf8391ef7fd3e3f"
+    "treeSha256": "9e6b5799b3edb60a446bf27cf8fb61a61a8cf0f4b5614f26cbe275941dfb7567",
+    "dataIntegritySha256": "4cae80913a14417b45856b7aa4513c80b049a01aad2f59e757a495ca4f5a5b82"
   }
 }

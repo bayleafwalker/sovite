@@ -138,12 +138,26 @@ class LeaseService:
     """
 
     def __init__(self, platform: Platform, worker_id: str, execution_fences: dict,
-                 *, repository_run_profile: bool = False):
+                 *, repository_run_profile: bool = False, repository_worker_only: bool = False):
         # execution_fences is the Worker's own dict, shared by reference so the
         # execution loop and lease transitions see the same fence state.
         self.platform, self.id, self.execution_fences = platform, worker_id, execution_fences
         self.repository_run_profile = repository_run_profile is True
+        self.repository_worker_only = repository_worker_only is True
         self._trusted_worker_binding: tuple[ExecutionPrincipal, str] | None = None
+
+    def _eligible_job(self, job):
+        if not self.repository_worker_only:
+            return True
+        from .repository_runs import RUN_SCHEMA
+        run=job.resolved.get("repository_run")
+        return type(run)is dict and run.get("schema_version")==RUN_SCHEMA
+
+    def _eligible_query(self, query):
+        if self.repository_worker_only:
+            from .repository_runs import RUN_SCHEMA
+            query=query.where(Job.resolved["repository_run"]["schema_version"].as_string()==RUN_SCHEMA)
+        return query
 
     def bind_trusted_worker(self, *, principal: ExecutionPrincipal, instance_id: str) -> None:
         """Internal adapter only: instance must hash this service's complete Worker.id."""
@@ -163,6 +177,8 @@ class LeaseService:
         return execution_owner_key(workload_id=principal.workload_id, instance_id=instance_id)
 
     def _authorize_current(self, session, job: Job, now: float) -> dict:
+        if not self._eligible_job(job):
+            _fail("execution_scope_denied", 403, "Execution owner scope is not permitted")
         if job.cancel_requested:
             _fail("cancelled", 409, "Execution was cancelled")
         repository_run = job.resolved.get("repository_run")
@@ -309,10 +325,10 @@ class LeaseService:
             if principal.compute_id != self.platform.settings.compute_id:
                 _fail("execution_scope_denied", 403, "Execution owner scope is not permitted")
 
-            candidates = session.scalars(select(Job).where(
+            candidates = session.scalars(self._eligible_query(select(Job).where(
                 Job.status.in_(("queued", "retry_wait")), Job.next_attempt_at <= now,
                 Job.cancel_requested.is_(False),
-            ).order_by(Job.created_at, Job.id).limit(100).with_for_update(skip_locked=True)).all()
+            )).order_by(Job.created_at, Job.id).limit(100).with_for_update(skip_locked=True)).all()
             # Candidate row locks can wait too; base each new reservation on
             # owner time observed after those locks have been acquired.
             now = time.time()
@@ -450,7 +466,7 @@ class LeaseService:
             if principal.compute_id != self.platform.settings.compute_id:
                 _fail("execution_scope_denied", 403, "Execution owner scope is not permitted")
             job = session.execute(select(Job).where(Job.id == context.job_id).with_for_update()).scalar_one_or_none()
-            if job is None:
+            if job is None or not self._eligible_job(job):
                 _fail("execution_scope_denied", 403, "Execution owner scope is not permitted")
             lease = session.get(WorkerExecutionLease, context.job_id, with_for_update=True)
             if lease is None:
@@ -561,8 +577,9 @@ class LeaseService:
             self.platform.db.authority_lock(session)
             if self.platform.db.engine.dialect.name == "postgresql":
                 session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CLAIM_LOCK})
-            sweep_terminal_authority(self.platform, session)
-            rows = session.scalars(select(Job).where(Job.status == "running", Job.lease_until < now).with_for_update(skip_locked=True)).all()
+            if not self.repository_worker_only:
+                sweep_terminal_authority(self.platform, session)
+            rows = session.scalars(self._eligible_query(select(Job).where(Job.status == "running", Job.lease_until < now)).with_for_update(skip_locked=True)).all()
             for row in rows:
                 lease = session.get(WorkerExecutionLease, row.id, with_for_update=True)
                 if lease is not None:
@@ -626,7 +643,7 @@ class LeaseService:
             self.platform.db.authority_lock(session)
             row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
             lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
-            if not row or lease is None:
+            if not row or lease is None or not self._eligible_job(row):
                 return False
             now = time.time()
             try:
@@ -668,6 +685,8 @@ class LeaseService:
             row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one()
             lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
             now = time.time()
+            if not self._eligible_job(row):
+                return
             if row.status != "running" or row.lease_owner != self.id:
                 return
             if lease is not None:
@@ -705,6 +724,8 @@ class LeaseService:
             row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one()
             lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
             now = time.time()
+            if not self._eligible_job(row):
+                return
             if row.status != "running" or row.lease_owner != self.id or row.lease_until is None or row.lease_until <= now:
                 # A late process cannot publish after its lease has been reclaimed.
                 return

@@ -689,6 +689,84 @@
                 "not": {}
             }
         },
+        "NativeActivation": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "NativeActivation.json",
+            "type": "object",
+            "properties": {
+                "schema_version": {
+                    "type": "string",
+                    "const": "sovite-native-activation/v1"
+                },
+                "job_id": {
+                    "$ref": "Identity.json"
+                },
+                "attempt_id": {
+                    "$ref": "Identity.json"
+                },
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "repository_id": {
+                    "$ref": "Identity.json"
+                },
+                "principal_id": {
+                    "$ref": "Identity.json"
+                },
+                "generation": {
+                    "$ref": "DigestRef.json"
+                },
+                "fence_sha256": {
+                    "$ref": "Sha256.json"
+                },
+                "packet_sha256": {
+                    "$ref": "Sha256.json"
+                },
+                "executor_id": {
+                    "$ref": "Identity.json"
+                },
+                "publication_revision": {
+                    "$ref": "Identity.json"
+                },
+                "qualification_ref": {
+                    "$ref": "Identity.json"
+                },
+                "vm_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 20,
+                    "pattern": "^[1-9][0-9]{0,19}$"
+                },
+                "deadline": {
+                    "type": "number",
+                    "minimum": 0
+                },
+                "lease_until": {
+                    "type": "number",
+                    "minimum": 0
+                }
+            },
+            "required": [
+                "schema_version",
+                "job_id",
+                "attempt_id",
+                "workspace_id",
+                "repository_id",
+                "principal_id",
+                "generation",
+                "fence_sha256",
+                "packet_sha256",
+                "executor_id",
+                "publication_revision",
+                "qualification_ref",
+                "vm_id",
+                "deadline",
+                "lease_until"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "NonnegativeInt64Decimal": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": "NonnegativeInt64Decimal.json",

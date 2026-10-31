@@ -284,6 +284,24 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             raise PlatformError("forbidden", "A configured repository caller is required", 403)
         return auth
 
+    @app.get("/api/repository-runs/v1/runs/{run_id}/attempts/{attempt_id}/activation")
+    async def native_activation(run_id: str,attempt_id: str,request: Request,auth=Depends(operator)):
+        from .repository_repair_contract.runtime import load_bundle,NATIVE_ACTIVATION_OPERATION
+        from .repository_native_activation import current
+        contract=load_bundle()
+        try:
+            if request.query_params:raise ValueError
+            contract.validate_parameter(NATIVE_ACTIVATION_OPERATION,'path','run_id',run_id)
+            contract.validate_parameter(NATIVE_ACTIVATION_OPERATION,'path','attempt_id',attempt_id)
+            async for block in request.stream():
+                if block:raise ValueError
+        except Exception:
+            raise RepositoryRunError('invalid_request','Activation selectors are invalid',422)from None
+        result=await asyncio.to_thread(current,repository_owner(),run_id,attempt_id)
+        contract.validate_response(NATIVE_ACTIVATION_OPERATION,200,result)
+        from fastapi.responses import JSONResponse
+        return JSONResponse(result,headers={'Cache-Control':'no-store'})
+
     @app.get("/api/repository-runs/v1/capabilities")
     async def repository_run_capabilities(workspace_id: str, auth=Depends(repository_caller)):
         owner = repository_owner()
