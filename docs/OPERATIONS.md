@@ -601,3 +601,26 @@ commissioning, per-user caller identity and enrollment/lifecycle qualification.
 Source packaging or a rendered chart does not establish those live properties.
 The repository seams remain subject to their documented source-only admission
 and do not enable automatic worker launch, publication or merge.
+
+### Candidate 0.1.23
+
+This candidate includes the remote-worker heartbeat configuration preflight
+and the resource-owner gateway source slice. The resource gateway remains
+uninstalled source: no live deployment, customer qualification, high
+availability, or resource-owner commissioning is claimed. It has no default
+policy and its poll/admin processes are not started by the platform.
+
+Execution-owner schema version 6 adds resource-gateway owner state. Upgrading
+from schema 5 requires a verified database and artifact backup, stopping the
+control API and every local or remote worker, then running `sovite db migrate`
+once with the migration-role database URL and existing schema. Require
+`sovite db check` to report schema version 6 before starting the candidate with
+the runtime role and `SOVITE_DATABASE_MIGRATE=never`. There is no downgrade;
+rollback requires restoring the matching pre-upgrade database and artifact
+backup before starting a schema-5 release. Runtime startup performs no DDL.
+
+The remote-worker CLI now validates its absolute heartbeat path before opening
+or creating the execution journal. This changes neither remote enrollment nor
+worker authority. The candidate also preserves the existing hosted migration
+procedure; release packaging, source tests, or a rendered chart do not
+establish live adoption or qualification.
