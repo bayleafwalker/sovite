@@ -107,10 +107,11 @@ not proof of provider limits or prices.
 Availability additionally requires an existing trusted, current signed Sovite
 deployment qualification. `native_vm` evidence binds source SHA256, config
 SHA256, native package/ELF, exact Git/prlimit paths and digests, image SHA256,
-exact VM ID, execution profile/deployment IDs, native closure/helper SHA256 and the
+exact VM ID, execution profile/deployment IDs, native closure/helper SHA256,
+installed supervisor manifest SHA256 and the
 `single-use-cloud-vm` scope. Required passing checks include existing isolation,
 credential, exact binding, durable candidate, reconciliation and bounded usage
-checks plus native RPC routing, config isolation, VM process lifecycle and
+checks plus native RPC routing, supervisor OS containment, config isolation, VM process lifecycle and
 quiescence/import. Existing qualification authoring/signature verification is
 used unchanged. The fixed observer must independently measure the exact VM and
 match image, native, closure, helper and derived deployment facts before the
@@ -124,3 +125,42 @@ root-cgroup, disconnect/reboot, actual model/provider cost and currentness proof
 remain required before this profile can serve a real run. The current callback
 checks Sovite grant/lease/resolver authority; the served Work-owner basis
 currentness wrapper must also be composed before claiming that stronger scope.
+
+
+The native supervisor always starts through the fixed Bubblewrap namespace;
+missing immutable installation facts or a kernel/container namespace refusal
+returns `native_supervisor_unavailable`. There is no raw process fallback. The
+root-owned Nix-store manifest installed at
+`/run/current-system/sw/share/sovite/native-supervisor.json` declares schema
+`sovite-native-supervisor/v1`, exact `bubblewrap`/`python` paths and SHA256,
+`tools`, sorted `store_paths`, and `child_sha256`. Only that required closure is
+mounted read-only. The private PID, mount, network, IPC, UTS and user namespaces
+contain only a fresh native home, private proc/dev/tmp and two fixed socket
+inodes. Further user namespaces are disabled and capabilities are dropped.
+
+The fixed stdlib helper forwards two private loopback ports to those socket
+inodes. The owner side forwards only to the actual current inference bridge and
+native executor relay, checking current authorization before every block and
+before disclosure. Connections are bounded, the original attempt deadline
+bounds the helper lifetime, and PID namespace teardown stops detached children.
+No direct DB, S3, mirror, provider credential or arbitrary network proxy is
+mounted or exposed. The existing attempt-scoped bridge token remains inside the
+private native home/process environment; broad owner capabilities stay outside.
+
+The portable `tests/probes/native_supervisor_containment.py` measures the real
+native host-RPC privilege seam using synthetic parent config, mirror and proc
+markers, a disposable nonbridge endpoint, and a finite detached child. This seam
+measures process privileges; it does not assert that the four admitted model
+tools expose host RPCs. Test-only immutable fixture paths never configure the
+production loader. Guard-removal tests must expose the synthetic file, host proc
+status and direct network endpoint when their corresponding mounts or network
+boundary are weakened. No real credentials or paid model are used.
+
+A workstation namespace pass does not qualify the installed owner container.
+Qualification additionally requires the same image, dedicated UID 11001,
+actual runtime seccomp profile and kernel namespace settings, actual native
+function-loop compatibility, and the `native-supervisor-containment` check
+bound to the installed manifest digest. A runtime that rejects user namespaces
+remains unavailable. This source does not authorize privileged operation,
+`CAP_SYS_ADMIN`, an unconfined seccomp fallback, or a deployment. Legacy native
+adapters outside this repository VM composition are not covered by this claim.
