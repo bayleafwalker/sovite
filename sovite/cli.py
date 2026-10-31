@@ -242,7 +242,10 @@ def main():
         elif args.command == "worker":
             logging.basicConfig(level=logging.INFO)
             async def run_worker():
-                worker = Worker(platform)
+                from .repository_runtime import compose_repository_runtime
+                runtime = compose_repository_runtime(settings, platform)
+                worker = Worker(platform, **({"repository_run_executor": runtime.execution}
+                                             if runtime.execution is not None else {}))
                 loop = asyncio.get_running_loop()
                 for sig in (signal.SIGTERM, signal.SIGINT):
                     loop.add_signal_handler(sig, worker.stop.set)

@@ -13,13 +13,13 @@ import json
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .adapters import RuntimeFailure
-from .db import Job, WorkerExecutionLease
+from .db import ExecutionAuthority, Job, WorkerExecutionLease
 from .repository_sessions import RepositorySessionManager, RepositoryWorkspace
 from .service import Platform, PlatformError
 
@@ -513,6 +513,25 @@ class RepositoryRunBudget:
         self.active_slots = active
 
 
+@dataclass(frozen=True)
+class RepositoryAttemptContext:
+    """Protected native-driver binding; never serialize into guest/tool inputs.
+
+    Model and execution structures are detached copies of current owner state.
+    Provider and control bearer material remains on the protected supervisor.
+    """
+    job_id: str
+    attempt_id: str
+    workspace_id: str
+    repository_id: str
+    principal_id: str
+    generation: str
+    fence: str = field(repr=False)
+    model: dict = field(repr=False)
+    execution: dict | None = field(repr=False)
+    deadline: float
+
+
 class RepositoryRunAttemptExecutor:
     """Fenced, bounded lifecycle around an injected executor implementation.
 
@@ -589,6 +608,54 @@ class RepositoryRunAttemptExecutor:
         except Exception:
             raise RuntimeFailure("repository_binding_revoked") from None
 
+    def _attempt_context(self, job: Job, *, fence: str, attempt_id: str,
+                         deadline: float) -> RepositoryAttemptContext:
+        """Bind only the actual started owner tuple, not guest files or settings."""
+        from .authority import (check_execution_binding, checksum, execution_authority_current,
+                                execution_context)
+        import secrets
+        try:
+            with self.platform.db.sessions() as session:
+                current = session.get(Job, job.id)
+                lease = session.get(WorkerExecutionLease, job.id)
+                now = time.time()
+                if (current is None or lease is None or current.status != "running"
+                        or current.cancel_requested or lease.phase != "started"
+                        or lease.fence != fence or lease.generation != current.generation
+                        or current.generation != job.generation
+                        or current.lease_until != lease.lease_until
+                        or current.lease_until is None or current.lease_until <= now
+                        or type(lease.execution_deadline) not in {int, float}
+                        or not math.isfinite(lease.execution_deadline)
+                        or lease.execution_deadline <= now
+                        or attempt_id != f"{current.id}-{current.attempts}"):
+                    raise ValueError
+                run = current.resolved["repository_run"]
+                if current.caller != run["principal_id"]:
+                    raise ValueError
+                self.platform.authorize_existing_job(session, current)
+                check_execution_binding(self.platform, session, current)
+                model = copy.deepcopy(current.resolved["model"])
+                execution = None
+                if model.get("connection", {}).get("kind") == "model-gateway":
+                    authority = session.get(ExecutionAuthority, current.id)
+                    capability = getattr(job, "execution_capability", None)
+                    if (not execution_authority_current(self.platform, session, current, lease,
+                                                        lease.workload_id, now)
+                            or not isinstance(capability, str) or not capability
+                            or not secrets.compare_digest(checksum(capability), authority.capability_digest)):
+                        raise ValueError
+                    execution = {"capability": capability,
+                                 "context": copy.deepcopy(execution_context(current, lease.workload_id))}
+                actual_deadline = min(deadline, lease.execution_deadline)
+                if actual_deadline <= now:
+                    raise ValueError
+                return RepositoryAttemptContext(current.id, attempt_id, run["workspace_id"],
+                    run["repository_id"], current.caller, current.generation, fence,
+                    model, execution, actual_deadline)
+        except Exception:
+            raise RuntimeFailure("repository_execution_context_unavailable") from None
+
     def _mark_attempt(self, job_id: str, fence: str, attempt_id: str,
                       state: str, error_code: str | None = None) -> None:
         def update_attempt(run):
@@ -664,8 +731,20 @@ class RepositoryRunAttemptExecutor:
                     authorization_check=authorization_check, persist=persist_budget)
                 authorization_check()
                 executor_started = True
+                attempt_executor = self.executor
+                for_attempt = getattr(attempt_executor, "for_attempt", None)
+                if for_attempt is not None:
+                    if not callable(for_attempt):
+                        raise RuntimeFailure("repository_execution_context_unavailable")
+                    context = self._attempt_context(job, fence=fence, attempt_id=attempt_id,
+                                                    deadline=deadline)
+                    attempt_executor = for_attempt(context)
+                    if not callable(attempt_executor):
+                        raise RuntimeFailure("repository_execution_context_unavailable")
+                    deadline = context.deadline
+                    remaining = deadline - time.time()
                 await asyncio.wait_for(
-                    self.executor(workspace.worktree, goal, deadline, budget, authorization_check),
+                    attempt_executor(workspace.worktree, goal, deadline, budget, authorization_check),
                     timeout=remaining)
             authorization_check()
             evidence = manager.capture_candidate(packet.as_dict())

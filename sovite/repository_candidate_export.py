@@ -80,6 +80,11 @@ class CandidateExportOwner:
             record = manager._read_record(manager._record_path(key))
             _need(isinstance(record, dict) and record.get("state") == "candidate" and record.get("attempt_key") == key)
             packet = validate_packet(record["packet"])
+            # Bind this read to its exact durable attempt. A binding can serve
+            # concurrent runs; a newest-packet lookup would select a sibling.
+            from .repository_runs import _AttemptBindingResolver
+            manager.binding_resolver = _AttemptBindingResolver(
+                {**packet.as_dict(), "mirror_root": run["mirror_root"]})
             _need(manager._attempt_key(packet) == key and manager._packet_key(packet) == attempt["packet_sha256"]
                   and record.get("packet_sha256") == attempt["packet_sha256"]
                   and hashlib.sha256(packet.fence.encode()).hexdigest() == attempt["fence_sha256"]

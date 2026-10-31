@@ -624,3 +624,11 @@ or creating the execution journal. This changes neither remote enrollment nor
 worker authority. The candidate also preserves the existing hosted migration
 procedure; release packaging, source tests, or a rendered chart do not
 establish live adoption or qualification.
+
+### Repository execution host composition
+
+The optional [installed repository runtime](repository-runtime.md) connects a
+protected resolver, owner, worker and retained-candidate transport. This source
+does not yet ship the fixed native VM driver or a qualified native model
+bridge; configuring the runtime currently keeps repository launch unavailable.
+Commission and qualify those actual boundaries before advertising execution.
