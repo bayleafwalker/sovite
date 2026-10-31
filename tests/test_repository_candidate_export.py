@@ -226,3 +226,25 @@ def test_git_boundary_never_invokes_repository_fsmonitor(tmp_path):
     git('config','core.fsmonitor',str(hook),cwd=repo)
     _git('-C',str(repo),'status','--porcelain')
     assert not marker.exists()
+
+
+def test_export_uses_exact_durable_attempt_not_resolvers_newest_packet(prepared):
+    platform, exporter, job, attempt, mirror, base = prepared
+    # One binding can serve concurrent attempts. A resolver's newest packet
+    # must never influence reconstruction of this completed candidate.
+    def foreign_packet(_binding_id):
+        raise AssertionError("ambiguous newest-attempt lookup must not run")
+    exporter.resolver.resolve_repository_binding = foreign_packet
+    content = exporter._prepare_for_owner_review(job.id, attempt,
+        principal_id="cloud-codex", workspace_id="workspace-1")
+    assert json.loads(content)["attempt_id"] == attempt
+    with pytest.raises(CandidateExportError):
+        exporter._prepare_for_owner_review(job.id, "foreign-attempt",
+            principal_id="cloud-codex", workspace_id="workspace-1")
+    with pytest.raises(CandidateExportError):
+        exporter._prepare_for_owner_review(job.id, attempt,
+            principal_id="other-user", workspace_id="workspace-1")
+    platform.inhibit("incident-forensics", "test current grant revocation")
+    with pytest.raises(CandidateExportError):
+        exporter._prepare_for_owner_review(job.id, attempt,
+            principal_id="cloud-codex", workspace_id="workspace-1")

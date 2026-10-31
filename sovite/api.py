@@ -112,6 +112,13 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                repository_run_owner=None, candidate_publication_service=None) -> FastAPI:
     settings = settings or Settings.from_env()
     platform = platform or Platform(settings)
+    from .repository_runtime import compose_repository_runtime
+    runtime = None
+    if repository_run_owner is None:
+        runtime = compose_repository_runtime(settings, platform)
+        repository_run_owner = runtime.owner
+        if candidate_publication_service is None:
+            candidate_publication_service = runtime.publication
     active_worker: Worker | None = None
     worker_task: asyncio.Task | None = None
 
@@ -120,7 +127,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         nonlocal active_worker, worker_task
         platform.initialize()
         if settings.embedded_worker:
-            active_worker = Worker(platform)
+            active_worker = Worker(platform, **({"repository_run_executor": repository_run_owner.executor}
+                                                if repository_run_owner is not None else {}))
             worker_task = asyncio.create_task(active_worker.run())
         yield
         if active_worker:
@@ -132,6 +140,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     app = FastAPI(title=f"{settings.display_name} Platform", version="0.1.23", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.platform = platform
     app.state.repository_run_owner = repository_run_owner
+    app.state.repository_runtime = runtime
     from .authority_api import install_routes
     install_routes(app, platform, settings)
     from .execution_api import install_routes as install_execution_routes

@@ -52,6 +52,7 @@ class Settings:
     setup_api_enabled: bool = False
     setup_installation_id: str = ""
     installation_id: str = ""
+    repository_runtime_config: str | None = None
 
     def __post_init__(self):
         if set(self.caller_tokens) & {"operator", "author", "activator"}:
@@ -150,6 +151,7 @@ class Settings:
             setup_api_enabled=truth("SETUP_API_ENABLED", False),
             setup_installation_id=env.get("SOVITE_SETUP_INSTALLATION_ID", ""),
             installation_id=env.get("SOVITE_INSTALLATION_ID", ""),
+            repository_runtime_config=env.get("SOVITE_REPOSITORY_RUNTIME_CONFIG") or None,
         )
         if result.artifact_backend not in {"filesystem", "s3"}:
             raise ValueError("artifact backend must be filesystem or s3")

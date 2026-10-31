@@ -43,6 +43,9 @@ def runtime_settings_fingerprint(settings: Settings) -> str:
         binding["setup"] = {"enabled": True, "installation_id": settings.setup_installation_id}
     if settings.installation_id:
         binding["installation_id"] = settings.installation_id
+    if settings.repository_runtime_config is not None:
+        binding["repository_runtime"] = {
+            "config_path": str(Path(settings.repository_runtime_config).resolve())}
     return "sha256:" + digest(binding)
 
 
