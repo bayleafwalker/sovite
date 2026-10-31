@@ -454,7 +454,10 @@ def test_repair_policy_is_opt_in_and_uses_same_owner_and_current_reader(installe
     assert runtime.repair.owner is runtime.owner
     assert runtime.repair.retention is runtime.publication
     assert runtime.repair.policy.max_repairs == 1
-    monkeypatch.setattr(module, '_builtin_driver', lambda _:driver)
+    def installed_driver(_, actual_platform):
+        assert actual_platform is platform
+        return driver
+    monkeypatch.setattr(module, '_builtin_driver', installed_driver)
     app = api.create_app(settings, platform)
     assert app.state.repository_repair_service is app.state.repository_runtime.repair
     assert app.state.repository_repair_service.owner is app.state.repository_run_owner

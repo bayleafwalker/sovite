@@ -28,12 +28,21 @@ def tool_facts():
             for name in ('git','prlimit') for path in [_tool(name)]}
 
 
+def tools_current(facts):
+    return all(str(_tool(name)) == facts[name]['path'] for name in ('git','prlimit'))
+
+
+def _git_exec_path(binary):
+    return binary.parent.parent/'libexec/git-core'
+
+
 class NativeGit:
-    def __init__(self, deadline, authorization_check):
+    def __init__(self, deadline, authorization_check, *, expected_tools=None):
         self.deadline,self.authorization_check=deadline,authorization_check
         self.binary=_tool('git')
         self.prlimit=_tool('prlimit')
-        self.exec_path=self.binary.parent.parent/'libexec/git-core'
+        need(expected_tools is None or tool_facts() == expected_tools,'native_git_qualification_changed')
+        self.exec_path=_git_exec_path(self.binary)
         need(self.exec_path.is_dir())
 
     def check(self):

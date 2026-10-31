@@ -2,7 +2,9 @@
 
 This is source for a protected Codex 0.166.0 loop with native tools in a separate
 VM. It is **not an installed or qualified execution profile**. The fixed factory
-has no production Cloud observation backend today. Neither a descriptor nor
+uses only Cloud’s fixed `ProtectedInventoryObserver` reader of fresh protected
+inventory. That collector/profile/inventory is not installed or qualified by
+this source. Neither a descriptor nor
 configuration booleans can make it available. Automatic per-attempt provider
 allocation/reclamation remains Cloud work; this slice can consume only one
 precommissioned, single-use descriptor for the exact started attempt.
@@ -52,7 +54,9 @@ Subscription fees remain unsupported rather than being settled as zero.
 Cloud owns the installed `vuoro_cloud.native_vm_descriptor` validator, actual
 independent resource observation, and guest verb implementation. Sovite supplies
 the exact job, attempt, workspace, repository, generation, fence hash and deadline
-from the started lease. A differing callback deadline is refused before effects:
+from the started lease. Every authority check reloads the exact descriptor and
+compares the complete newly observed resource, including boot and keys; an old
+observation is not retained as authority. A differing callback deadline is refused before effects:
 shortening only a local timeout cannot shorten an immutable root guest manifest
 under partition. Guest root must enforce that deadline in its own cgroup,
 persist a single-use start latch across reboot, and stop all candidate children

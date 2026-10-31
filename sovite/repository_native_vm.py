@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import importlib
-import json
 import os
 from pathlib import Path
 import re
@@ -23,7 +22,7 @@ from .db import Qualification
 from .qualification import canonical, verify_qualification
 from .repository_candidate_retention import MAX_BYTES
 from .repository_native_inference import NativeInferenceBridge, Accounting
-from .repository_native_git import NativeGit, EXPANDED_LIMIT, tool_facts
+from .repository_native_git import NativeGit, EXPANDED_LIMIT, tool_facts, tools_current
 from .repository_native_runtime import (ExecutorRelay, NativeAppServer, executable, need, stop_process)
 from .repository_runtime import protected_bytes
 from .repository_sessions import (_atomic_write, _canonical_json, _canonical_root,
@@ -41,6 +40,11 @@ def _owner_module():
     # Fixed installed distribution only; neither config nor a request can name
     # another package, SDK, observer URL or command implementation.
     return importlib.import_module('vuoro_cloud.native_vm_descriptor')
+
+
+def _inventory_observer():
+    owner=importlib.import_module('vuoro_cloud.native_vm_observer')
+    return owner.ProtectedInventoryObserver()
 
 
 def _source_digest():
@@ -167,6 +171,7 @@ class NativeVMDriver:
                 need(row is not None and row.generation == generation
                      and row.profile in {bundle.get('default_profile','local'),'all'}
                      and verify_qualification(row,self.platform.settings))
+                need(tools_current(self.git_facts))
                 Accounting(self.config['accounting'],self.config['accounting']['model_id'])
                 evidence = row.payload['evidence']
                 need(evidence.get('evidence_kind') == 'deployment')
@@ -207,6 +212,7 @@ class NativeVMDriver:
 
     def for_attempt(self, context):
         need(self.execution_profile() is not None,'native_vm_qualification_unavailable')
+        Accounting(self.config['accounting'],context.model['id'])
         owner = _owner_module()
         expected = owner.AttemptIdentity(job_id=context.job_id,attempt_id=context.attempt_id,
             workspace_id=context.workspace_id,repository_id=context.repository_id,generation=context.generation,
@@ -237,6 +243,14 @@ class BoundNativeVM:
         context = self.context
         need(deadline == context.deadline,'native_deadline_binding_mismatch')
         need(time.time() < deadline,'execution_timeout')
+        original_authorization=authorization_check
+        def current_authorization():
+            original_authorization()
+            current=self.owner.load_descriptor(self.driver.config['descriptor_path'],
+                expected=self.descriptor.identity,observe=self.driver.observer,
+                owner_uid=self.driver.config['descriptor_owner_uid'],now=time.time())
+            need(current == self.descriptor,'native_vm_observation_changed')
+        authorization_check=current_authorization
         authorization_check()
         key = hashlib.sha256(_canonical_json({'job':context.job_id,'attempt':context.attempt_id,
                                               'fence_sha256':hashlib.sha256(context.fence.encode()).hexdigest()})).hexdigest()
@@ -276,9 +290,10 @@ class BoundNativeVM:
 
     async def _execute_native(self,root,intent,worktree,goal,budget,authorization_check,repair_context,routines):
         context = self.context
-        git = NativeGit(context.deadline,authorization_check)
+        git = NativeGit(context.deadline,authorization_check,expected_tools=self.driver.git_facts)
         authorization_check()
         await routines.verify_key()
+        bridge = self.bridge_factory(context,budget,authorization_check,self.driver.config['accounting'])
         job = self.driver.platform.get_job(context.job_id)
         run = job.resolved['repository_run']
         base = run['base_sha']
@@ -300,7 +315,6 @@ class BoundNativeVM:
         _atomic_write(intent,_canonical_json({'job_id':context.job_id,'attempt_id':context.attempt_id,
             'phase':'executing','fence_sha256':hashlib.sha256(context.fence.encode()).hexdigest()}))
         relay = ExecutorRelay(lambda:routines.process('exec-v1'),context.deadline,authorization_check)
-        bridge = self.bridge_factory(context,budget,authorization_check,self.driver.config['accounting'])
         native_home = _canonical_root(root/'native-home',create=True)
         app = None
         operation = None
@@ -331,7 +345,7 @@ class BoundNativeVM:
         return base, seed_tip, run
 
     async def _import(self,root,worktree,base,seed_tip,header,bundle,areas,authorization_check):
-        git = NativeGit(self.context.deadline,authorization_check)
+        git = NativeGit(self.context.deadline,authorization_check,expected_tools=self.driver.git_facts)
         # Quarantine parsing precedes any modification of the protected manager
         # worktree. No candidate configuration, hooks or executable is imported.
         quarantine = root/'quarantine.git'
@@ -379,13 +393,10 @@ class BoundNativeVM:
 
 
 def create_driver(config, *, platform=None):
-    # Cloud intentionally has no production observation backend yet. A future
-    # fixed installed distribution function may supply it; request/config data
-    # cannot select an observer implementation or grant resource authority.
+    # One fixed installed Cloud reader. It reads only protected, fresh public
+    # inventory; collector/provider/admin credentials stay in the Cloud lane.
     try:
-        owner = _owner_module()
-        factory = getattr(owner,'installed_native_vm_observer',None)
-        observer = factory() if callable(factory) else None
+        observer=_inventory_observer()
     except ImportError:
-        observer = None
+        observer=None
     return NativeVMDriver(config,platform,observer=observer)

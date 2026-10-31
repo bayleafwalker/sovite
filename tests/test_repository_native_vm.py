@@ -1,6 +1,9 @@
 """Consumer refusal controls; these fixtures never qualify a real Cloud VM."""
 import asyncio
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import time
@@ -20,6 +23,12 @@ def shared_workstation_uid_fixture(monkeypatch):
     # UID. This explicit test-only bound allows local Git subprocesses; it is
     # not an installed configuration knob or qualification of process isolation.
     monkeypatch.setattr(native_git,'_PROCESS_LIMIT',4096)
+    # Git semantics/refusal tests also run on Ubuntu CI. Only this fixture
+    # substitutes the actual installed public system tools for fixed Nix paths;
+    # the production parser accepts no tool-path setting and remains Nix-only.
+    monkeypatch.setattr(native_git,'_tool',lambda name:Path(shutil.which(name)).resolve(strict=True))
+    monkeypatch.setattr(native_git,'_git_exec_path',lambda binary:Path(subprocess.run(
+        [str(binary),'--exec-path'],check=True,capture_output=True,text=True).stdout.strip()))
 
 
 def commit(repository, name, value, *, symlink=False):
@@ -47,10 +56,13 @@ def callback(tmp_path, base):
         deadline=time.time()+20,model={'model':'synthetic'})
     platform=SimpleNamespace(get_job=lambda _:SimpleNamespace(resolved={'repository_run':{
         'base_sha':base,'allowed_areas':['src']}}))
-    driver=SimpleNamespace(state_root=state,config={},platform=platform)
-    owner=SimpleNamespace(validate_quiescence=lambda raw,_:json.loads(raw))
+    descriptor=SimpleNamespace(identity=SimpleNamespace(),boot_id='fixture-boot')
+    driver=SimpleNamespace(state_root=state,platform=platform,observer=lambda _:None,git_facts=native_git.tool_facts(),
+        config={'descriptor_path':str(tmp_path/'descriptor'),'descriptor_owner_uid':os.getuid(),'accounting':{}})
+    owner=SimpleNamespace(validate_quiescence=lambda raw,_:json.loads(raw),
+        load_descriptor=lambda *args,**kwargs:descriptor)
     routines=SimpleNamespace()
-    return BoundNativeVM(driver,context,SimpleNamespace(),owner,routines=routines)
+    return BoundNativeVM(driver,context,descriptor,owner,routines=routines)
 
 
 def candidate_bundle(tmp_path, worktree, base, *, name='src/result.txt', symlink=False):
@@ -74,6 +86,7 @@ def test_unknown_guest_seed_outcome_still_requests_quiescence_and_cannot_replay(
         assert verb=='quiesce-v1'
         return json.dumps({'original_base_sha':base}).encode()
     bound.routines.verify_key=key;bound.routines.exchange=exchange
+    bound.bridge_factory=lambda *args:SimpleNamespace()
     async def scenario():
         with pytest.raises(RuntimeFailure,match='external_execution_uncertain'):
             await bound(worktree,'unchanged goal',bound.context.deadline,None,lambda:True)
@@ -199,7 +212,8 @@ def test_malformed_bundle_is_not_imported(repository,tmp_path):
 def test_candidate_attributes_cannot_invoke_host_filter_and_no_environment_inheritance(repository,tmp_path,monkeypatch):
     worktree,base=repository;bound=callback(tmp_path,base)
     marker=tmp_path/'host-filter-executed'
-    _git('-C',str(worktree),'config','filter.attack.smudge','/run/current-system/sw/bin/touch '+str(marker)+'; /run/current-system/sw/bin/cat')
+    _git('-C',str(worktree),'config','filter.attack.smudge',
+         shutil.which('touch')+' '+str(marker)+'; '+shutil.which('cat'))
     monkeypatch.setenv('SOVITE_NATIVE_TEST_HOST_SECRET','host-only-sentinel')
     monkeypatch.setenv('GIT_CONFIG_COUNT','1')
     monkeypatch.setenv('GIT_CONFIG_KEY_0','core.hooksPath')
@@ -288,3 +302,66 @@ def test_existing_qualification_authoring_signs_native_facts_and_tampering_revok
         modified=copy.deepcopy(row.payload);modified['evidence']['native_vm']['native_sha256']='c'*64
         row.payload=modified
     assert driver.execution_profile() is None
+
+
+@pytest.mark.parametrize('missing',[False,True])
+def test_fixed_factory_without_installed_observer_stays_unavailable(tmp_path,monkeypatch,missing):
+    import sovite.repository_native_vm as module
+    def absent():raise ImportError('fixed owner package absent')
+    monkeypatch.setattr(module,'_inventory_observer',absent if missing else lambda:None)
+    # Explicit unit substitute avoids requiring the optional native closure;
+    # it grants no observer, qualification, or execution capability.
+    monkeypatch.setattr(module,'executable',lambda path,digest:Path('/not-installed-native'))
+    config={'schema_version':module.SCHEMA,'executor_id':'fixture','publication_revision':'fixture',
+        'native_store_path':'/nix/store/'+'a'*32+'-codex-0.166.0','native_sha256':'a'*64,
+        'state_root':str(tmp_path/'state'),'descriptor_path':str(tmp_path/'descriptor.json'),
+        'descriptor_owner_uid':os.getuid(),'routine_credentials_root':str(tmp_path/'credentials'),
+        'qualification_id':'absent','accounting':{}}
+    platform=SimpleNamespace()
+    driver=module.create_driver(config,platform=platform)
+    assert driver.platform is platform and driver.execution_profile() is None
+    with pytest.raises(RuntimeFailure,match='native_vm_qualification_unavailable'):
+        driver.for_attempt(SimpleNamespace())
+    with pytest.raises(RuntimeFailure):module.create_driver({**config,'per_attempt_isolation':True},platform=platform)
+
+
+def test_exact_observation_changes_refuse_before_effects_even_with_same_qualification(repository,tmp_path):
+    worktree,base=repository;bound=callback(tmp_path,base);checks=[]
+    async def executed(root,intent,tree,goal,budget,current,*args):
+        current();checks.append('original-boot')
+        # Actual installed owner helper re-observes every time. This explicit
+        # fixture changes only the observation, leaving caller/grant allowed.
+        bound.owner.load_descriptor=lambda *args,**kwargs:SimpleNamespace(
+            identity=bound.descriptor.identity,boot_id='replacement-boot')
+        current()
+        raise AssertionError('A changed VM must not receive another operation')
+    async def exchange(verb,**kwargs):
+        checks.append(verb);assert verb=='quiesce-v1' and kwargs['cleanup']
+        return json.dumps({'original_base_sha':base}).encode()
+    bound._execute_native=executed;bound.routines.exchange=exchange
+    async def scenario():
+        with pytest.raises(RuntimeFailure,match='native_vm_observation_changed'):
+            await bound(worktree,'goal',bound.context.deadline,None,lambda:True)
+    asyncio.run(scenario())
+    assert checks==['original-boot','quiesce-v1']
+
+
+def test_parser_refuses_a_different_qualified_tool_digest():
+    from sovite.repository_native_git import NativeGit
+    facts=native_git.tool_facts();facts['git']['sha256']='0'*64
+    with pytest.raises(RuntimeFailure,match='native_git_qualification_changed'):
+        NativeGit(time.time()+5,lambda:True,expected_tools=facts)
+
+
+def test_model_preflight_failure_cleans_up_without_seeding_guest(repository,tmp_path):
+    worktree,base=repository;bound=callback(tmp_path,base);calls=[]
+    async def key():pass
+    def unavailable(*args):raise RuntimeFailure('native_model_accounting_unavailable')
+    async def exchange(verb,**kwargs):
+        calls.append(verb);assert verb=='quiesce-v1' and kwargs['cleanup']
+        return json.dumps({'original_base_sha':base}).encode()
+    bound.bridge_factory=unavailable;bound.routines.verify_key=key;bound.routines.exchange=exchange
+    async def scenario():
+        with pytest.raises(RuntimeFailure,match='native_model_accounting_unavailable'):
+            await bound(worktree,'goal',bound.context.deadline,None,lambda:True)
+    asyncio.run(scenario());assert calls==['quiesce-v1']
