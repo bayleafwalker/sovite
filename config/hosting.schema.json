@@ -164,7 +164,10 @@
                 ],
                 "properties": {
                   "scope": {
-                    "const": "job"
+                    "enum": [
+                      "job",
+                      "provider"
+                    ]
                   },
                   "max_seconds": {
                     "type": "integer",
@@ -178,6 +181,17 @@
                   }
                 },
                 "additionalProperties": false
+              },
+              "max_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2592000
+              },
+              "authorization_ref": {
+                "type": "string",
+                "maxLength": 16000,
+                "minLength": 1,
+                "pattern": "\\S"
               }
             },
             "additionalProperties": false
