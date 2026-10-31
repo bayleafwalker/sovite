@@ -226,10 +226,10 @@ class InstalledRepositoryResolver:
             return {**validate_packet(packet).as_dict(), "mirror_root": current.mirror_root}
 
 
-def _builtin_driver(config):
+def _builtin_driver(config, platform):
     # Fixed owner code only. An installation without the VM driver stays closed.
     from .repository_native_vm import create_driver
-    return create_driver(config)
+    return create_driver(config, platform=platform)
 
 
 def _retention(exporter, config):
@@ -285,7 +285,8 @@ def compose_repository_runtime(settings, platform, *, driver_factory=None):
             _need(type(config["retention"]) is dict)
             protected_directory(config["retention"]["root"], create=True)
         resolver = InstalledRepositoryResolver(platform, path, config)
-        driver = (driver_factory or _builtin_driver)(copy.deepcopy(config["driver"]))
+        driver = (driver_factory(copy.deepcopy(config["driver"])) if driver_factory is not None
+                  else _builtin_driver(copy.deepcopy(config["driver"]), platform))
         _need(callable(driver) and callable(driver.execution_profile))
         execution = RepositoryRunAttemptExecutor(
             platform, resolver, config["state_root"], driver,

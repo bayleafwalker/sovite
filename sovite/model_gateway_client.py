@@ -122,6 +122,7 @@ class ResponsesResult:
     sse: bytes = field(repr=False)
     response: dict = field(repr=False)
     usage: dict | None
+    events: tuple[dict, ...] = field(default=(), repr=False)
 
 
 def _responses_result(raw: bytes, model_id: str) -> ResponsesResult:
@@ -131,6 +132,7 @@ def _responses_result(raw: bytes, model_id: str) -> ResponsesResult:
         if not source.endswith('\n\n'):
             raise RuntimeFailure('external_execution_uncertain')
         completed = None
+        events = []
         for block in source.split('\n\n'):
             event, data = '', []
             for line in block.split('\n'):
@@ -152,6 +154,7 @@ def _responses_result(raw: bytes, model_id: str) -> ResponsesResult:
             value = _decode_json(payload.encode('utf-8'))
             if event == 'sovite_error':
                 raise _gateway_failure(value.get('code', ''))
+            events.append(value)
             kind = value.get('type')
             if not isinstance(kind, str) or (event and event != kind):
                 raise RuntimeFailure('model_protocol_error')
@@ -180,7 +183,7 @@ def _responses_result(raw: bytes, model_id: str) -> ResponsesResult:
                 if details is not None and (not isinstance(details, dict)
                         or any(type(count) is not int or not 0 <= count <= total for count in details.values())):
                     raise RuntimeFailure('model_protocol_error')
-        return ResponsesResult(raw, completed, usage)
+        return ResponsesResult(raw, completed, usage, tuple(events))
     except RuntimeFailure:
         raise
     except (ValueError, UnicodeError, RecursionError, OverflowError):
@@ -361,6 +364,15 @@ class ModelGatewayInference:
             raise RuntimeFailure("model_protocol_error") from None
 
 
+    def _responses_destination(self, request_deadline):
+        # Fixed owner-bound gateway destination; direct adapters override only
+        # this protected method, never a request-body-selected URL or token.
+        headers = {'Authorization': 'Bearer ' + self.token,
+                   'X-Sovite-Capability': self.capability, 'X-Sovite-Job': self.job_id,
+                   'X-Sovite-Fence': self.fence, 'X-Sovite-Deadline': str(math.floor(request_deadline)),
+                   'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
+        return self.origin + '/inference/' + quote(self.binding_id, safe='') + '/responses', headers
+
     async def responses(self, model: dict, payload: dict, authorization_check=None) -> ResponsesResult:
         """Forward one native stateless request through this exact owner binding.
 
@@ -394,11 +406,7 @@ class ModelGatewayInference:
         remaining = request_deadline - time.time()
         if remaining <= 0:
             raise RuntimeFailure('execution_timeout')
-        headers = {'Authorization': 'Bearer ' + self.token,
-                   'X-Sovite-Capability': self.capability, 'X-Sovite-Job': self.job_id,
-                   'X-Sovite-Fence': self.fence, 'X-Sovite-Deadline': str(math.floor(request_deadline)),
-                   'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
-        url = self.origin + '/inference/' + quote(self.binding_id, safe='') + '/responses'
+        url, headers = self._responses_destination(request_deadline)
         try:
             async with asyncio.timeout(remaining):
                 async with httpx.AsyncClient(timeout=httpx.Timeout(remaining), follow_redirects=False,
