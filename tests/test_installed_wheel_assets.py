@@ -86,3 +86,45 @@ assert data.joinpath('schema', 'contract.schema.json').is_file()
     script = script.replace("__DATA_INTEGRITY_SHA256__", repr("9cc4d082e2243729ab36f1f88b55722435128e770f5af19e4c007bdb080c5679"))
     subprocess.run([sys.executable, "-c", script], check=True, cwd=tmp_path, env=env,
                    capture_output=True, text=True, timeout=30)
+
+
+def test_installed_wheel_refuses_invalid_remote_worker_heartbeat_before_journal_io(tmp_path):
+    wheelhouse = tmp_path / "wheelhouse"
+    target = tmp_path / "installed"
+    wheelhouse.mkdir()
+    target.mkdir()
+    uv = shutil.which("uv")
+    assert uv is not None, "uv is required to build the cold installed-wheel check"
+    base_env = os.environ.copy()
+    base_env.setdefault("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
+    subprocess.run([
+        uv, "build", "--no-build-isolation", "--python", sys.executable,
+        "--wheel", "--out-dir", str(wheelhouse), str(ROOT),
+    ], check=True, cwd=tmp_path, env=base_env, capture_output=True, text=True, timeout=120)
+    wheels = list(wheelhouse.glob("sovite_platform-*.whl"))
+    assert len(wheels) == 1
+    subprocess.run([
+        uv, "pip", "install", "--no-deps", "--target", str(target), str(wheels[0]),
+    ], check=True, cwd=tmp_path, env=base_env, capture_output=True, text=True, timeout=60)
+
+    for heartbeat in (None, "relative-heartbeat"):
+        journal = tmp_path / ("execution-missing.json" if heartbeat is None else "execution-relative.json")
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("SOVITE_", "AWS_"))}
+        env.update(
+            PYTHONPATH=str(target),
+            SOVITE_EXECUTION_INSTANCE_ID="cold-wheel-startup-test",
+            SOVITE_EXECUTION_JOURNAL_PATH=str(journal),
+            SOVITE_CONTROL_URL="https://127.0.0.1:9",
+            SOVITE_EXECUTION_TOKEN="synthetic-cold-wheel-execution-token",
+        )
+        if heartbeat is not None:
+            env["SOVITE_REMOTE_WORKER_HEALTH_PATH"] = heartbeat
+        result = subprocess.run(
+            [sys.executable, "-m", "sovite.remote_worker_cli"],
+            env=env, cwd=tmp_path, capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 2
+        assert result.stderr.strip() == "SOVITE_REMOTE_WORKER_HEALTH_PATH must be an absolute path"
+        assert not result.stdout
+        assert not journal.exists(), "cold wheel configuration refusal must precede journal I/O"
