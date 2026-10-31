@@ -120,9 +120,10 @@ class SyntheticModel:
             arguments={'cmd':('test "$(cat native-shell-marker.txt)" = '+self.guest+' && '
                 'test "$(cat native-stdin-marker.txt)" = guest-input && '
                 'test ! -e native-patch-marker.txt && '
-                'git add native-shell-marker.txt native-stdin-marker.txt native-pixel.png && '
-                'git -c user.name=Fixture -c user.email=fixture@example.invalid commit -m native-fixture && '
-                'printf guest-verified')}
+                'if git add native-shell-marker.txt native-stdin-marker.txt native-pixel.png '
+                '> native-git-metadata-refusal.txt 2>&1; then printf forbidden-git-write; exit 7; fi; '
+                'case "$(cat native-git-metadata-refusal.txt)" in '
+                '*"Read-only file system"*) printf guest-verified;; *) exit 8;; esac')}
         else:
             assert turn==8 and any('guest-verified' in value for value in outputs),outputs
             item={'type':'message','id':'msg_fixture','role':'assistant','status':'completed',

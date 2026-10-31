@@ -22,8 +22,10 @@ configuration surface.
 
 Eight synthetic model requests exercise shell placement and credential/sentinel
 exclusion, interactive stdin, file image RPC, actual unsupported builtin
-`apply_patch`, bounded user-input refusal and a final guest Git commit. The
-fixture deliberately bypasses paid inference validation to measure native
+`apply_patch`, bounded user-input refusal and uncommitted guest edits with actual
+Git metadata write refusal. The Cloud exporter must retain those edits using its
+bounded nonroot scratch snapshot after quiescence; the agent cannot write `.git`.
+The fixture deliberately bypasses paid inference validation to measure native
 `apply_patch` refusal and image transport. The production inference bridge rejects
 these unsupported response/input paths before native disclosure or a further
 paid call, respectively; its actual HTTP/currentness/accounting controls have
