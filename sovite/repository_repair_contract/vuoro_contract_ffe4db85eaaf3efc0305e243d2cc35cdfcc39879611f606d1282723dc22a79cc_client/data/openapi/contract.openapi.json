@@ -201,6 +201,113 @@
           }
         }
       }
+    },
+    "/api/repository-runs/v1/runs/{run_id}/recovery": {
+      "post": {
+        "operationId": "repositoryRecoveryCapture",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Identity"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCaptured"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access is unauthorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryCaptureRequest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -306,6 +413,12 @@
           "not": {}
         }
       },
+      "GitSha": {
+        "type": "string",
+        "minLength": 40,
+        "maxLength": 40,
+        "pattern": "^[0-9a-f]{40}$"
+      },
       "Identity": {
         "type": "string",
         "minLength": 1,
@@ -317,6 +430,93 @@
         "minLength": 72,
         "maxLength": 72,
         "pattern": "^release_[0-9a-f]{64}$"
+      },
+      "RecoveryCaptureRequest": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "attempt_id"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "attempt_id": {
+            "$ref": "#/components/schemas/Identity"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "RecoveryCaptured": {
+        "type": "object",
+        "required": [
+          "kind",
+          "run_id",
+          "attempt_id",
+          "workspace_id",
+          "repository_id",
+          "base_sha",
+          "tip_sha",
+          "source_digest",
+          "outcome",
+          "publication_eligible",
+          "repair_eligible"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "repository-recovery-artifact"
+            ]
+          },
+          "run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "attempt_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "repository_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "base_sha": {
+            "$ref": "#/components/schemas/GitSha"
+          },
+          "tip_sha": {
+            "$ref": "#/components/schemas/GitSha"
+          },
+          "source_digest": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "uncertain",
+              "interrupted",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "publication_eligible": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "repair_eligible": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
       },
       "RepairAccepted": {
         "type": "object",

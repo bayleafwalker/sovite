@@ -51,6 +51,25 @@ model FeedbackContext {
   candidate_sha256: Sha256;
   @minLength(40) @maxLength(40) @pattern("^[0-9a-f]{40}$") candidate_tip_sha: string;
 }
+model RecoveryCaptureRequest {
+  workspace_id: Identity;
+  attempt_id: Identity;
+}
+@minLength(40) @maxLength(40) @pattern("^[0-9a-f]{40}$")
+scalar GitSha extends string;
+model RecoveryCaptured {
+  kind: "repository-recovery-artifact";
+  run_id: Identity;
+  attempt_id: Identity;
+  workspace_id: Identity;
+  repository_id: Identity;
+  base_sha: GitSha;
+  tip_sha: GitSha;
+  source_digest: DigestRef;
+  outcome: "uncertain" | "interrupted" | "failed" | "cancelled";
+  publication_eligible: false;
+  repair_eligible: false;
+}
 model ErrorDetail {
   @minLength(1) @maxLength(96) code: string;
   @minLength(1) @maxLength(512) message: string;
@@ -69,4 +88,8 @@ op repositoryRepairSubmit(@body body: RepairSubmission): JsonResponse<201, Repai
 
 @route("/api/repository-runs/v1/repair-feedback-context") @post
 op repositoryRepairFeedbackContext(@body body: FeedbackContextRequest): JsonResponse<200, FeedbackContext>
+  | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;
+
+@route("/api/repository-runs/v1/runs/{run_id}/recovery") @post
+op repositoryRecoveryCapture(@path run_id: Identity, @body body: RecoveryCaptureRequest): JsonResponse<200, RecoveryCaptured>
   | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;

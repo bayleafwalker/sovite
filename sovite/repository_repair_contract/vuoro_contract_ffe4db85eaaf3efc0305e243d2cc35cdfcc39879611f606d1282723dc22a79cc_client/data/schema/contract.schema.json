@@ -217,6 +217,110 @@
             "maxLength": 71,
             "pattern": "^sha256:[0-9a-f]{64}$"
         },
+        "RecoveryCaptureRequest": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RecoveryCaptureRequest.json",
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "attempt_id": {
+                    "$ref": "Identity.json"
+                }
+            },
+            "required": [
+                "workspace_id",
+                "attempt_id"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecoveryCaptured": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RecoveryCaptured.json",
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "repository-recovery-artifact"
+                },
+                "run_id": {
+                    "$ref": "Identity.json"
+                },
+                "attempt_id": {
+                    "$ref": "Identity.json"
+                },
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "repository_id": {
+                    "$ref": "Identity.json"
+                },
+                "base_sha": {
+                    "$ref": "GitSha.json"
+                },
+                "tip_sha": {
+                    "$ref": "GitSha.json"
+                },
+                "source_digest": {
+                    "$ref": "DigestRef.json"
+                },
+                "outcome": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "uncertain"
+                        },
+                        {
+                            "type": "string",
+                            "const": "interrupted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "failed"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancelled"
+                        }
+                    ]
+                },
+                "publication_eligible": {
+                    "type": "boolean",
+                    "const": false
+                },
+                "repair_eligible": {
+                    "type": "boolean",
+                    "const": false
+                }
+            },
+            "required": [
+                "kind",
+                "run_id",
+                "attempt_id",
+                "workspace_id",
+                "repository_id",
+                "base_sha",
+                "tip_sha",
+                "source_digest",
+                "outcome",
+                "publication_eligible",
+                "repair_eligible"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "GitSha": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "GitSha.json",
+            "type": "string",
+            "minLength": 40,
+            "maxLength": 40,
+            "pattern": "^[0-9a-f]{40}$"
+        },
         "ErrorDetail": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": "ErrorDetail.json",
