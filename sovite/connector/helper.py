@@ -124,7 +124,7 @@ def validate_body(operation: str, body: bytes, model_id: str):
     common = {"model", "stream", "temperature", "top_p", "tools", "tool_choice", "seed"}
     allowed = {
         "chat": common | {"messages", "max_tokens", "max_completion_tokens", "stop", "frequency_penalty", "presence_penalty", "response_format", "parallel_tool_calls", "stream_options"},
-        "responses": common | {"input", "instructions", "max_output_tokens", "text", "reasoning", "parallel_tool_calls", "store", "background"},
+        "responses": common | {"input", "instructions", "max_output_tokens", "text", "reasoning", "parallel_tool_calls", "store", "background", "include"},
         "ollama-chat": {"model", "messages", "stream", "options", "format", "tools", "keep_alive"},
     }
     if operation not in allowed or type(value) is not dict or set(value) - allowed[operation]:
@@ -135,6 +135,21 @@ def validate_body(operation: str, body: bytes, model_id: str):
         raise ProtocolError("background generation or storage denied")
     if operation == 'responses' and value.get('store') is not False:
         raise ProtocolError("explicit store false required")
+    if operation == 'responses' and 'include' in value and value['include'] != ['reasoning.encrypted_content']:
+        raise ProtocolError("encrypted reasoning include only")
+    if operation == 'responses':
+        if 'instructions' in value and type(value['instructions']) is not str:
+            raise ProtocolError('text instructions required')
+        if 'parallel_tool_calls' in value and type(value['parallel_tool_calls']) is not bool:
+            raise ProtocolError('boolean parallel tool calls required')
+        if 'reasoning' in value:
+            reasoning = value['reasoning']
+            if type(reasoning) is not dict or set(reasoning) - {'effort', 'summary'}:
+                raise ProtocolError('unsupported reasoning fields')
+            if 'effort' in reasoning and (type(reasoning['effort']) is not str or reasoning['effort'] not in {'none', 'minimal', 'low', 'medium', 'high', 'xhigh'}):
+                raise ProtocolError('unsupported reasoning effort')
+            if 'summary' in reasoning and (type(reasoning['summary']) is not str or reasoning['summary'] not in {'auto', 'concise', 'detailed'}):
+                raise ProtocolError('unsupported reasoning summary')
     pending = [(value, 0)]
     while pending:
         item, depth = pending.pop()
@@ -186,6 +201,29 @@ def validate_text_inputs(operation, value):
     for message in messages:
         if operation == 'responses':
             kind = message.get('type', 'message') if type(message) is dict else None
+            if kind == 'reasoning':
+                # Opaque stateless continuity only; never accept plaintext
+                # hidden reasoning, compaction or an arbitrary new item kind.
+                obj(message, {'type', 'id', 'summary', 'encrypted_content', 'status', 'content'},
+                    {'type', 'encrypted_content', 'summary'})
+                if 'content' in message and message['content'] is not None and message['content'] != []:
+                    raise ProtocolError('plaintext reasoning content denied')
+                string(message['encrypted_content'])
+                if not message['encrypted_content']:
+                    raise ProtocolError('encrypted reasoning required')
+                for field in ('id', 'status'):
+                    if field in message:
+                        string(message[field])
+                if 'status' in message and message['status'] not in {'in_progress', 'completed', 'incomplete'}:
+                    raise ProtocolError('invalid reasoning status')
+                if type(message['summary']) is not list:
+                    raise ProtocolError('reasoning summary list required')
+                for summary in message['summary']:
+                    obj(summary, {'type', 'text'}, {'type', 'text'})
+                    if summary['type'] != 'summary_text':
+                        raise ProtocolError('reasoning summary text only')
+                    string(summary['text'])
+                continue
             if kind == 'function_call':
                 obj(message, {'type', 'id', 'call_id', 'name', 'arguments', 'status'}, {'call_id', 'name', 'arguments'})
                 for field in ('call_id', 'name', 'arguments'):
