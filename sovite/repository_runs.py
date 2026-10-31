@@ -421,6 +421,11 @@ class RepositoryRunOwner:
         job = self.platform.cancel(run_id, actor=principal_id, require_owner=True)
         return self.project(job)
 
+    async def recover(self, run_id: str, attempt_id: str, *, principal_id: str, workspace_id: str):
+        from .repository_recovery import RepositoryRecoveryService
+        return await RepositoryRecoveryService(self).capture(run_id,attempt_id,
+            principal_id=principal_id,workspace_id=workspace_id)
+
     def list(self, *, principal_id: str, workspace_id: str, limit: int = 100) -> list[dict[str, Any]]:
         from sqlalchemy import select
         with self.platform.db.sessions() as session:
@@ -591,8 +596,10 @@ class RepositoryRunAttemptExecutor:
             attempts = record.get("attempts", []) if isinstance(record, dict) else []
             return bool(attempts and attempts[-1].get("state") in {"running", "interrupted", "uncertain"})
 
-    def check_authorization(self, job: Job) -> None:
+    def check_authorization(self, job: Job, *, purpose: str = 'active') -> None:
         """Recheck the live repository binding and qualification during a run."""
+        if purpose not in {'active','observe'}:
+            raise RuntimeFailure('repository_binding_revoked')
         record = job.resolved.get("repository_run")
         if not isinstance(record, dict) or record.get("schema_version") != RUN_SCHEMA:
             raise RuntimeFailure("repository_run_invalid")
@@ -620,7 +627,7 @@ class RepositoryRunAttemptExecutor:
                     or current.max_concurrency < record["concurrency"]
                     or deadline > _timestamp(current.latest_deadline, "latest_deadline")
                     or deadline > _timestamp(current.qualification_expires_at, "qualification_expires_at")
-                    or deadline <= datetime.now(timezone.utc)):
+                    or purpose == 'active' and deadline <= datetime.now(timezone.utc)):
                 raise ValueError
         except Exception:
             raise RuntimeFailure("repository_binding_revoked") from None

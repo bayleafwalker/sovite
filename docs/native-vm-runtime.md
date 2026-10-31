@@ -67,6 +67,10 @@ acknowledgment for the exact observed VM/boot/deployment/base. This cleanup also
 runs after uncertain seed/start outcomes and after authorization revocation.
 Export requires the identical previously validated acknowledgment, then a fresh
 current owner check. An unknown outcome remains unresolved; it is not retried.
+Interrupted partial bytes use the separate
+[exact-attempt evidence recovery](repository-interruption-recovery.md) path.
+It uses Cloud's bounded retention and sealed read-only export, without restarting
+native execution, settling unknown usage or marking the original Job successful.
 
 Untrusted exported Git is parsed in fresh quarantine by a separate fixed Nix Git
 and `prlimit` process with minimal environment, no hooks/pagers/network protocols,

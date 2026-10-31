@@ -453,7 +453,7 @@ class RepositorySessionManager:
                     "job_id": packet.job_id, "attempt_id": packet.attempt_id}
         return hashlib.sha256(_canonical_json(identity)).hexdigest()
 
-    def _lock(self, key: str):
+    def _lock(self, key: str, *, blocking: bool = True):
         lock_path = self.records_root / f"{key}.lock"
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -464,7 +464,11 @@ class RepositorySessionManager:
                 or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077):
             os.close(fd)
             raise RepositorySessionError("state_corrupt", "Repository-session lock is unsafe")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BaseException:
+            os.close(fd)
+            raise
         return fd
 
     def _record_path(self, key: str) -> Path:

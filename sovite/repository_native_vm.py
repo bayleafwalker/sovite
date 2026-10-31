@@ -8,6 +8,7 @@ advertises mutable execution. Explicit fixture construction is unqualified.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -50,7 +51,8 @@ def _inventory_observer():
 def _source_digest():
     digest = hashlib.sha256()
     for name in ('repository_native_vm.py','repository_native_runtime.py',
-                 'repository_native_inference.py','repository_native_git.py','model_gateway_client.py'):
+                 'repository_native_inference.py','repository_native_git.py',
+                 'repository_native_recovery.py','repository_recovery.py','model_gateway_client.py'):
         digest.update(name.encode()+b'\0'+Path(__file__).with_name(name).read_bytes())
     return digest.hexdigest()
 
@@ -210,6 +212,11 @@ class NativeVMDriver:
     async def __call__(self,*_args,**_kwargs):
         raise RuntimeFailure('native_attempt_context_required')
 
+    async def recover_attempt(self, *, job, packet, worktree, authorization_check):
+        from .repository_native_recovery import recover_attempt
+        return await recover_attempt(self,job=job,packet=packet,worktree=worktree,
+                                     authorization_check=authorization_check)
+
     def for_attempt(self, context):
         need(self.execution_profile() is not None,'native_vm_qualification_unavailable')
         Accounting(self.config['accounting'],context.model['id'])
@@ -311,6 +318,7 @@ class BoundNativeVM:
         seed = seed_path.read_bytes()
         header = {'schema_version':'cloud.native-vm-seed.v1','base_sha':base,'seed_tip_sha':seed_tip,
                   'bundle_bytes':len(seed),'bundle_sha256':hashlib.sha256(seed).hexdigest()}
+        self._persist_recovery(root,base,seed_tip,run)
         await routines.exchange('seed-v1',_canonical_json(header)+b'\n'+seed,limit=8192)
         _atomic_write(intent,_canonical_json({'job_id':context.job_id,'attempt_id':context.attempt_id,
             'phase':'executing','fence_sha256':hashlib.sha256(context.fence.encode()).hexdigest()}))
@@ -343,6 +351,18 @@ class BoundNativeVM:
             if app is not None:await app.close()
             await relay.close()
         return base, seed_tip, run
+
+    def _persist_recovery(self,root,base,seed_tip,run):
+        # This is written before the first guest effect. A successor never
+        # reconstructs original execution facts from a new lease or guest file.
+        attempts=[row for row in run['attempts'] if row['id']==self.context.attempt_id]
+        need(len(attempts)==1,'native_recovery_context_unavailable')
+        value={'schema_version':'sovite-native-recovery-context/v1',
+            'job_id':self.context.job_id,'attempt_id':self.context.attempt_id,
+            'principal_id':self.context.principal_id,'packet_sha256':attempts[0]['packet_sha256'],
+            'base_sha':base,'seed_tip_sha':seed_tip,'allowed_areas':run['allowed_areas'],
+            'driver_sha256':_source_digest(),'descriptor':asdict(self.descriptor)}
+        _atomic_write(root/'recovery-context.json',_canonical_json(value),exclusive=True)
 
     async def _import(self,root,worktree,base,seed_tip,header,bundle,areas,authorization_check):
         git = NativeGit(self.context.deadline,authorization_check,expected_tools=self.driver.git_facts)

@@ -3,8 +3,9 @@
 This source contract is disabled until explicitly composed. It adds no release,
 provider deployment, implicit feedback approval or acceptance authority. The
 installed mutable profile, current repository resolver, actual Workspace reader
-and trusted repair policy must all exist. `max_repairs` in the AgentOps delivery
-consumer remains zero until its consumer continuation slice is implemented.
+and trusted repair policy must all exist. The bounded AgentOps delivery consumer now supports explicit repair policies
+from zero to three attempts; installation still requires its compatible pinned
+owner contract and qualified feedback procedure.
 
 The new owner operation is `POST /api/repository-runs/v1/repairs`, authenticated
 as the existing caller and bound to a protected `RepositoryRepairService`. Its
@@ -123,3 +124,38 @@ silently running a workflow without its requested repair support. This
 composition does not install an output contract, qualify a native driver, or
 prove a live service. Upgrade/rollback must preserve in-flight journals and
 reconcile unknown outcomes before changing the protected installation.
+
+## Recovery capture metadata (contract 1.2)
+
+`POST /api/repository-runs/v1/runs/{run_id}/recovery` uses the existing
+authenticated caller and accepts only `workspace_id` and `attempt_id`. The run
+identity is an independently validated path parameter. Successful exact capture
+or replay returns 200 with immutable recovery metadata; the request cannot add
+a goal, deadline, publication permission, repair permission or source bytes.
+
+The closed response identifies `kind: "repository-recovery-artifact"`, the run,
+attempt, workspace, repository, original base, captured tip and exact
+`source_digest`. Outcomes are limited to `uncertain`, `interrupted`, `failed`
+and `cancelled`. Both `publication_eligible` and `repair_eligible` are always
+false. Returning metadata neither settles the original job nor refunds unknown
+reservations, resumes execution or admits a repair. The normal successful
+candidate contract remains separate.
+
+The digest is SHA256 of the exact canonical UTF8 JSON recovery artifact in the
+existing ArtifactStore; its bundle is encoded inside that JSON. Capture returns
+no artifact bytes. Existing OutputApproval can release that exact source/content
+only under its actual current configured procedure, class, destination and source
+checks; the existing retention owner transfers the approved content. A recovery
+artifact cannot become publication or repair eligible by changing a request or
+response flag. Historical access remains governed by its actual owner and reader,
+separate from fresh active execution permission.
+
+TypeSpec remains the wire source. Version 1.2 adds the capture operation without
+changing any of version 1.1's 20 existing named schema definitions. The packaged
+Python SDK and runtime validation bundle are generated with the same qualified
+Vuoro toolchain; the provenance records their exact source and inventory hashes.
+Two independent clean generations are byte-identical. Generated-client boundary
+tests reject authority fields, alternate path identities, raw byte fields,
+successful outcomes, promoted eligibility and unexpected success statuses.
+This contract source and its tests do not establish a live recovery capture,
+release, native-runtime qualification or deployment.
