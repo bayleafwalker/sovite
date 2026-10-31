@@ -62,7 +62,12 @@ def callback(tmp_path, base):
     owner=SimpleNamespace(validate_quiescence=lambda raw,_:json.loads(raw),
         load_descriptor=lambda *args,**kwargs:descriptor)
     routines=SimpleNamespace()
-    return BoundNativeVM(driver,context,descriptor,owner,routines=routines)
+    bound=BoundNativeVM(driver,context,descriptor,owner,routines=routines)
+    # Legacy transport/import fixtures do not construct a real owner attempt
+    # and descriptor. Recovery-context production persistence is covered by
+    # the interruption recovery fixture with an actual lifecycle packet.
+    bound._persist_recovery=lambda *_args:None
+    return bound
 
 
 def candidate_bundle(tmp_path, worktree, base, *, name='src/result.txt', symlink=False):

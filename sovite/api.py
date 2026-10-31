@@ -356,6 +356,22 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         owner = repository_owner()
         return {"run": owner.cancel(run_id, principal_id=auth[0], workspace_id=workspace_id)}
 
+    @app.post('/api/repository-runs/v1/runs/{run_id}/recovery')
+    async def recover_repository_candidate(run_id: str,request: Request,auth=Depends(repository_caller)):
+        owner=repository_owner()
+        from vuoro_contracts import ContractError,parse_json
+        from .repository_repair_contract.runtime import load_bundle,RECOVERY_CAPTURE_OPERATION
+        try:
+            body=parse_json(await request.body(),max_bytes=65536)
+            contract=load_bundle()
+            contract.validate_parameter(RECOVERY_CAPTURE_OPERATION,'path','run_id',run_id)
+            contract.validate_request(RECOVERY_CAPTURE_OPERATION,body)
+        except ContractError:
+            raise RepositoryRunError('invalid_request','The recovery request does not match the owner contract',422) from None
+        result=await owner.recover(run_id,body['attempt_id'],principal_id=auth[0],workspace_id=body['workspace_id'])
+        contract.validate_response(RECOVERY_CAPTURE_OPERATION,200,result)
+        return result
+
     @app.post("/api/repository-runs/v1/runs/{run_id}/candidate-retention")
     async def retain_repository_candidate(run_id: str, body: CandidateRetentionRequest,
                                           auth=Depends(repository_caller)):

@@ -215,15 +215,25 @@ class CandidateRetention:
             with exporter.platform.db.sessions.begin() as session:
                 exporter.platform.db.authority_lock(session)
                 job = session.get(Job, data["run_id"], with_for_update=True)
-                _need(job is not None and job.status == "completed")
+                _need(job is not None)
+                recovery=data.get('kind')=='repository-recovery-artifact'
+                if recovery:
+                    from .repository_recovery import record_for
+                    recovered=record_for(job,attempt_id=data['attempt_id'])
+                    _need(recovered['artifact_sha256']==record['release']['sha256'])
+                else:
+                    _need(job.status=='completed')
                 resolved = copy.deepcopy(job.resolved)
                 run = resolved["repository_run"]
                 _need(run["workspace_id"] == data["workspace_id"] and run["repository_id"] == data["repository_id"]
-                      and any(a["id"] == data["attempt_id"] and a["state"] == "completed" for a in run["attempts"]))
-                entry = {"label": "retained-candidate", "uri": "workspace://" + self.target.workspace_id
+                      and any(a["id"] == data["attempt_id"] and (recovery or a["state"] == "completed") for a in run["attempts"]))
+                label='retained-recovery-candidate' if recovery else 'retained-candidate'
+                entry = {"label": label, "uri": "workspace://" + self.target.workspace_id
                          + "/artifacts/" + receipt["artifact_id"] + "/versions/" + receipt["version_id"],
                          "sha256": receipt["sha256"], "receipt": receipt}
-                current = [e for e in run["evidence"] if e["label"] == "retained-candidate"]
+                if recovery:entry['attempt_id']=data['attempt_id']
+                current = [e for e in run["evidence"] if e['label']==label
+                           and (not recovery or e.get('attempt_id')==data['attempt_id'])]
                 _need(not current or current == [entry])
                 if not current:
                     run["evidence"].append(entry)

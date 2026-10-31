@@ -1,0 +1,45 @@
+{
+  "schema_version": "sovite-native-interruption-evidence/v1",
+  "qualified": false,
+  "paid_model_calls": 0,
+  "native_model_requests": 2,
+  "native_turn_completed": false,
+  "second_response_completed": false,
+  "second_response_usage": null,
+  "inputs": {
+    "repository_native_runtime.py": "4edb811318c56d1b4a8650914e4cb10fa161be8404211de553fe326565e0f28f",
+    "native_vm_protocol.py": "a4ac6fbc7c568ef5cf486133c61f1da5b0f951c31444e99581bef1a6758b4f6b",
+    "native_vm_interruption.py": "6a0cb7744f36ef4b9002ba88e91d1fe39a77a3610608d77c166c0e2bbf4f6750",
+    "codex_0.166.0_vendor_elf": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
+    "cloud_guest_payload": "14bc70484469d2dfa57f32381b2c6e405551e507fd4b5344d26d8835e899e6b4"
+  },
+  "fixture_owner": {
+    "repository": "bayleafwalker/gitops-nixos",
+    "commit": "31c80abeb225607aaedce88143de4f51c8aeafd3",
+    "constructor": "tests/nixos/native-guest-routine-integration-vm.nix",
+    "constructor_sha256": "8723a49aa675710198d27f62b92a2550ed53534acc2167f0b458942c82ddc7ad",
+    "seed_helper_sha256": "e2a47f0603277d20f66217eada8c99e0e7b957969d8316197bd61cdb340d9cde"
+  },
+  "result": {
+    "status": "passed",
+    "elapsed_seconds": 43.85,
+    "log_sha256": "2297ba92b18a8d682dc7d4b99e7602af0bcec83503a58b9ef2e4f118ebdb4fc0",
+    "checks": [
+      "actual native guest edit before protected turn interruption",
+      "root whole-group teardown and exact quiescence",
+      "expired execution deadline cannot restart execution",
+      "bounded retained capture after execution deadline",
+      "nonroot quarantine verifies partial shell marker and PNG bytes",
+      "two fresh SSH readers receive identical sealed bytes and unchanged sealed inode",
+      "missing completion seal remains unknown without recapture",
+      "boot identity guard refuses replay",
+      "constructor rejects a mismatched source hash before VM boot"
+    ]
+  },
+  "limits": [
+    "Synthetic model only; no real provider billing or model qualification.",
+    "Separate Sovite owner and Workspace PostgreSQL tests validate artifact release and successor authority; this KVM result alone does not qualify the complete service.",
+    "The recorded runtime hash is the native RPC module, not the complete driver source digest.",
+    "No provider credentials, fixture private keys or generated private-key locations are included."
+  ]
+}

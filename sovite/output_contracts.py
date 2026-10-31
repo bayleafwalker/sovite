@@ -84,7 +84,7 @@ def _require_approver(platform, contract: dict, actor: str, actor_role: str) -> 
         raise PlatformError("declassification_denied", "This identity cannot approve or access the output contract", 403)
 
 
-def _source(platform, session, source_job_id: str, expected_generation: str):
+def _source(platform, session, source_job_id: str, expected_generation: str, *, source_digest=None):
     source = platform.get_job(source_job_id, session)
     try:
         recipe = platform.authorize_existing_job(session, source, purpose="observe")
@@ -92,6 +92,20 @@ def _source(platform, session, source_job_id: str, expected_generation: str):
         # Persisted source resolution is an integrity boundary too. Malformed
         # metadata must not turn a release read into an unbounded exception.
         raise PlatformError("artifact_integrity_failed", "The completed source record failed integrity verification", 503) from None
+    if source.generation == expected_generation and source.status != 'completed' and source_digest is not None:
+        from .repository_recovery import source_for_digest
+        try:
+            artifact=source_for_digest(platform,source,source_digest)
+        except Exception:
+            raise PlatformError('source_unavailable','The exact repository recovery source is unavailable',409) from None
+        # A filesystem snapshot can contain original repository input as well
+        # as model output. Capturing it does not declassify either data class.
+        import copy
+        recipe=copy.deepcopy(recipe)
+        ranks=class_ranks(platform.active(session)[0])
+        classes=[recipe['grant']['output_class'],recipe.get('input_class',recipe['grant']['input_class'])]
+        recipe['grant']['output_class']=max(classes,key=ranks.__getitem__)
+        return artifact,recipe
     if (source.generation != expected_generation or source.status != "completed"
             or source.public_projection != {"receipt": source.receipt, "status": "available"}
             or source.released_at is None or not source.artifact_key
@@ -117,7 +131,8 @@ def _release_authority(platform, session, record):
         raise PlatformError("revision_superseded", "The output release belongs to a superseded installation", 409)
     contract = _contract(bundle, record["contract_id"], record["contract_revision"])
     _require_approver(platform, contract, record["actor"], record["actor_role"])
-    source, recipe = _source(platform, session, record["source_job_id"], generation)
+    source, recipe = _source(platform, session, record["source_job_id"], generation,
+                             source_digest=record['source_digest'])
     if record["source_digest"] != "sha256:" + source.artifact_sha256:
         raise PlatformError("source_digest_mismatch", "The reviewed source artifact differs from the completed job", 409)
     ranks = class_ranks(bundle)

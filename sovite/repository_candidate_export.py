@@ -53,21 +53,34 @@ class CandidateExportOwner:
             raise CandidateExportError("candidate-export-unavailable")
         self.platform, self.resolver, self.execution = platform, resolver, execution
 
+    @staticmethod
+    def _source_digest(job,attempt_id):
+        if job.status=='completed':return 'sha256:'+job.artifact_sha256
+        from .repository_recovery import record_for
+        return 'sha256:'+record_for(job,attempt_id=attempt_id)['artifact_sha256']
+
     def _job(self, session, run_id, attempt_id, principal_id, workspace_id):
         _need(all(isinstance(v, str) and _ID.fullmatch(v) for v in (run_id, attempt_id, principal_id, workspace_id)))
         job = session.get(Job, run_id, with_for_update=True)
-        _need(job is not None and job.caller == principal_id and job.status == "completed")
+        _need(job is not None and job.caller == principal_id)
         record = job.resolved.get("repository_run")
         _need(isinstance(record, dict) and record.get("workspace_id") == workspace_id
               and record.get("principal_id") == principal_id)
-        attempts = record.get("attempts")
-        _need(isinstance(attempts, list) and len(attempts) > 0 and attempts[-1].get("id") == attempt_id
-              and attempts[-1].get("state") == "completed")
+        if job.status != 'completed':
+            from .repository_recovery import record_for
+            record_for(job,attempt_id=attempt_id)
+        else:
+            attempts = record.get("attempts")
+            _need(isinstance(attempts, list) and len(attempts) > 0 and attempts[-1].get("id") == attempt_id
+                  and attempts[-1].get("state") == "completed")
         self.platform.authorize_existing_job(session, job, purpose="observe")
-        self.execution.check_authorization(job)
+        self.execution.check_authorization(job,purpose='observe')
         return job
 
     def _compose(self, job, attempt_id):
+        if job.status != 'completed':
+            from .repository_recovery import payload_for,record_for
+            return _canonical_json(payload_for(self.platform,job,record_for(job,attempt_id=attempt_id))).decode('utf-8')
         run = job.resolved["repository_run"]
         attempt = run["attempts"][-1]
         identity = {"schema_version":"sovite-repository-session/v1", "binding_id":run["binding_id"],
@@ -176,7 +189,8 @@ class CandidateExportOwner:
                 job = self._job(session, run_id, attempt_id, principal_id, workspace_id)
                 record, contract = outputs._record(self.platform, session, release_id)
                 outputs._require_approver(self.platform, contract, principal_id, "caller")
-                _need(record["source_job_id"] == run_id and destination in record["destinations"])
+                _need(record["source_job_id"] == run_id and destination in record["destinations"]
+                      and record['source_digest']==self._source_digest(job,attempt_id))
                 content = self._compose(job, attempt_id)
                 record, contract, released = outputs._read(self.platform, session, release_id)
                 _need(record["source_job_id"] == run_id and destination in record["destinations"] and released == content)
@@ -199,12 +213,13 @@ class CandidateExportOwner:
             data = json.loads(snapshot["content"])
             with self.platform.db.sessions.begin() as session:
                 self.platform.db.authority_lock(session)
-                self._job(session, data["run_id"], data["attempt_id"], principal_id, workspace_id)
+                job=self._job(session, data["run_id"], data["attempt_id"], principal_id, workspace_id)
                 record, contract, content = outputs._read(self.platform, session, snapshot["release_id"])
                 outputs._require_approver(self.platform, contract, principal_id, "caller")
                 destination = next(d for d in self.platform.active(session)[0]["destinations"] if d["id"] == snapshot["destination"])
                 _need(content == snapshot["content"] and record["output_class"] == snapshot["output_class"]
                       and snapshot["destination"] in record["destinations"]
+                      and record['source_digest']==self._source_digest(job,data['attempt_id'])
                       and destination.get("allowed_hosts", []) == snapshot["destination_hosts"])
         except Exception:
             raise CandidateExportError("candidate-export-unavailable") from None

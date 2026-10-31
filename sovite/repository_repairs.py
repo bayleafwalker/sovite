@@ -107,6 +107,7 @@ def admit(platform, session, run, caller, recipe, task):
     parent = session.get(Job, repair["parent_run_id"], with_for_update=True)
     _need(parent is not None and parent.caller == caller and parent.status == "completed")
     prior = parent.resolved.get("repository_run")
+    _need(not prior.get('recoveries') if isinstance(prior,dict) else False)
     _need(isinstance(prior, dict) and parent.task == task
           and all(prior.get(key) == run.get(key) for key in (
               "workspace_id", "repository_id", "executor_id", "base_sha", "allowed_areas", "binding_id",
