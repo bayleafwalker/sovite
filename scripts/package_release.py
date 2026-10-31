@@ -15,13 +15,14 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOT_FILES = {"README.md", "pyproject.toml", "requirements.lock", "uv.lock", "Dockerfile", "compose.yaml", ".gitignore", ".dockerignore"}
+EXPLICIT_SOURCE_FILES = {"sovite/repository_native_luna_catalog.LICENSE"}
 SOURCE_DIRS = {"sovite", "config", "contracts", "deploy", "scripts", "tests", "docs"}
 SOURCE_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".json", ".toml", ".sh", ".html", ".js", ".css", ".svg", ".txt", ".tpl", ".tsp"}
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".state", ".venv", "node_modules", "build", "dist", "backups"}
 
 
 def source_files():
-    paths = [ROOT / name for name in ROOT_FILES]
+    paths = [ROOT / name for name in ROOT_FILES | EXPLICIT_SOURCE_FILES]
     for directory in SOURCE_DIRS:
         paths.extend(path for path in (ROOT / directory).rglob("*")
                      if path.is_file() and path.suffix in SOURCE_SUFFIXES
