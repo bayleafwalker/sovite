@@ -40,7 +40,7 @@ sovite-remote-worker-health = "sovite.remote_worker_health:main"
 include = ["sovite*"]
 
 [tool.setuptools.package-data]
-sovite = ["static/*", "static/**/*", "execution_contract/**/*.json"]
+sovite = ["static/*", "static/**/*", "execution_contract/**/*.json", "repository_repair_contract/**/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

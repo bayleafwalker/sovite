@@ -301,7 +301,7 @@ class RepositoryRunOwner:
         return binding
 
     def submit(self, packet_value: Any, *, preview_id: str, principal_id: str,
-               idempotency_key: str) -> dict[str, Any]:
+               idempotency_key: str, repair: dict | None = None) -> dict[str, Any]:
         packet = validate_run_packet(packet_value)
         if not isinstance(principal_id, str) or not _ID.fullmatch(principal_id):
             raise RepositoryRunError("unauthorized", "Repository-run principal is invalid", 401)
@@ -341,6 +341,11 @@ class RepositoryRunOwner:
             "attempts": [],
             "evidence": [],
         }
+        if repair is not None:
+            internal["repair"] = copy.deepcopy(repair)
+            internal["evidence"] = [{"label":"repair-predecessor",
+                "uri":"sovite://repository-runs/" + repair["parent_run_id"],
+                "sha256":repair["candidate_sha256"]}]
         job = self.platform.submit(binding.grant_id, packet["goal"], principal_id,
                                    idempotency_key, binding.input_class,
                                    expected_generation=binding.generation,
@@ -730,6 +735,13 @@ class RepositoryRunAttemptExecutor:
                     peak_concurrency=run_record.get("peak_concurrency", 0),
                     authorization_check=authorization_check, persist=persist_budget)
                 authorization_check()
+                kwargs = {}
+                if "repair" in run_record:
+                    if getattr(self.executor, "supports_repository_repair_context", False) is not True:
+                        raise RuntimeFailure("repository_repair_executor_unavailable")
+                    from .repository_repairs import prepare_execution
+                    kwargs["repair_context"] = prepare_execution(self.platform, job, workspace, manager.records_root)
+                    authorization_check()
                 executor_started = True
                 attempt_executor = self.executor
                 for_attempt = getattr(attempt_executor, "for_attempt", None)
@@ -744,7 +756,7 @@ class RepositoryRunAttemptExecutor:
                     deadline = context.deadline
                     remaining = deadline - time.time()
                 await asyncio.wait_for(
-                    attempt_executor(workspace.worktree, goal, deadline, budget, authorization_check),
+                    attempt_executor(workspace.worktree, goal, deadline, budget, authorization_check, **kwargs),
                     timeout=remaining)
             authorization_check()
             evidence = manager.capture_candidate(packet.as_dict())
@@ -760,7 +772,8 @@ class RepositoryRunAttemptExecutor:
                 if not attempts or attempts[-1]["id"] != attempt_id or attempts[-1]["fence_sha256"] != attempt["fence_sha256"]:
                     raise RepositoryRunError("execution_fenced", "Repository attempt record changed", 409)
                 attempts[-1].update(attempt_result)
-                run["evidence"] = [evidence_projection]
+                run["evidence"] = [entry for entry in run["evidence"]
+                                   if entry.get("label") == "repair-predecessor"] + [evidence_projection]
             self._persist(job.id, fence, finish_attempt)
             if not evidence["publication_eligible"]:
                 raise RuntimeFailure("repository_candidate_ineligible")

@@ -1,0 +1,349 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "contract.schema.json",
+    "$defs": {
+        "RepairFeedback": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RepairFeedback.json",
+            "type": "object",
+            "properties": {
+                "schema_version": {
+                    "type": "string",
+                    "const": "sovite-repository-repair-feedback/v1"
+                },
+                "parent_run_id": {
+                    "$ref": "Identity.json"
+                },
+                "candidate_export_sha256": {
+                    "$ref": "Sha256.json"
+                },
+                "candidate_tip_sha": {
+                    "type": "string",
+                    "minLength": 40,
+                    "maxLength": 40,
+                    "pattern": "^[0-9a-f]{40}$"
+                },
+                "result": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "check_failed"
+                        },
+                        {
+                            "type": "string",
+                            "const": "review_failed"
+                        }
+                    ]
+                },
+                "feedback": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 48000
+                }
+            },
+            "required": [
+                "schema_version",
+                "parent_run_id",
+                "candidate_export_sha256",
+                "candidate_tip_sha",
+                "result",
+                "feedback"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Identity": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Identity.json",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "Sha256": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Sha256.json",
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+        },
+        "RepairSubmission": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RepairSubmission.json",
+            "type": "object",
+            "properties": {
+                "schema_version": {
+                    "type": "string",
+                    "const": "sovite-repository-repair/v1"
+                },
+                "parent_run_id": {
+                    "$ref": "Identity.json"
+                },
+                "candidate_sha256": {
+                    "$ref": "Sha256.json"
+                },
+                "feedback_release_id": {
+                    "$ref": "OutputRelease.json"
+                },
+                "preview_id": {
+                    "$ref": "Sha256.json"
+                },
+                "max_cost_usd": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100000
+                }
+            },
+            "required": [
+                "schema_version",
+                "parent_run_id",
+                "candidate_sha256",
+                "feedback_release_id",
+                "preview_id",
+                "max_cost_usd"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "OutputRelease": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "OutputRelease.json",
+            "type": "string",
+            "minLength": 72,
+            "maxLength": 72,
+            "pattern": "^release_[0-9a-f]{64}$"
+        },
+        "RepairAccepted": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RepairAccepted.json",
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "$ref": "Identity.json"
+                },
+                "parent_run_id": {
+                    "$ref": "Identity.json"
+                },
+                "root_run_id": {
+                    "$ref": "Identity.json"
+                },
+                "repair_number": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3
+                }
+            },
+            "required": [
+                "run_id",
+                "parent_run_id",
+                "root_run_id",
+                "repair_number"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ErrorDetail": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "ErrorDetail.json",
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 96
+                },
+                "message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                }
+            },
+            "required": [
+                "code",
+                "message"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ErrorEnvelope": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "ErrorEnvelope.json",
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "$ref": "ErrorDetail.json"
+                }
+            },
+            "required": [
+                "detail"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Error401": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Error401.json",
+            "type": "object",
+            "properties": {
+                "statusCode": {
+                    "type": "number",
+                    "const": 401
+                },
+                "body": {
+                    "$ref": "ErrorEnvelope.json"
+                }
+            },
+            "required": [
+                "statusCode",
+                "body"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Error403": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Error403.json",
+            "type": "object",
+            "properties": {
+                "statusCode": {
+                    "type": "number",
+                    "const": 403
+                },
+                "body": {
+                    "$ref": "ErrorEnvelope.json"
+                }
+            },
+            "required": [
+                "statusCode",
+                "body"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Error404": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Error404.json",
+            "type": "object",
+            "properties": {
+                "statusCode": {
+                    "type": "number",
+                    "const": 404
+                },
+                "body": {
+                    "$ref": "ErrorEnvelope.json"
+                }
+            },
+            "required": [
+                "statusCode",
+                "body"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Error409": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Error409.json",
+            "type": "object",
+            "properties": {
+                "statusCode": {
+                    "type": "number",
+                    "const": 409
+                },
+                "body": {
+                    "$ref": "ErrorEnvelope.json"
+                }
+            },
+            "required": [
+                "statusCode",
+                "body"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Error413": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Error413.json",
+            "type": "object",
+            "properties": {
+                "statusCode": {
+                    "type": "number",
+                    "const": 413
+                },
+                "body": {
+                    "$ref": "ErrorEnvelope.json"
+                }
+            },
+            "required": [
+                "statusCode",
+                "body"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Error422": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Error422.json",
+            "type": "object",
+            "properties": {
+                "statusCode": {
+                    "type": "number",
+                    "const": 422
+                },
+                "body": {
+                    "$ref": "ErrorEnvelope.json"
+                }
+            },
+            "required": [
+                "statusCode",
+                "body"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Error503": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "Error503.json",
+            "type": "object",
+            "properties": {
+                "statusCode": {
+                    "type": "number",
+                    "const": 503
+                },
+                "body": {
+                    "$ref": "ErrorEnvelope.json"
+                }
+            },
+            "required": [
+                "statusCode",
+                "body"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "NonnegativeInt64Decimal": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "NonnegativeInt64Decimal.json",
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)$(?![\\s\\S])"
+        },
+        "SignedInt64Decimal": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "SignedInt64Decimal.json",
+            "type": "string",
+            "pattern": "^(?:0|(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])|-(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7]|9223372036854775808))$(?![\\s\\S])"
+        }
+    }
+}

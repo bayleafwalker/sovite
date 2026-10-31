@@ -287,3 +287,9 @@ class CandidatePublicationService:
                 await retention.prepare(self.exporter, run_id, attempt_id, release_id=release_id,
                                         principal_id=principal_id, workspace_id=workspace_id)
             return await retention.retain(self.exporter, key)
+
+    async def recover(self, receipt):
+        """Use the configured current reader, never release provenance as access."""
+        from vuoro_client import AsyncVuoroClient
+        async with AsyncVuoroClient(self.profile, self.credential_resolver, transport=self.transport) as client:
+            return await CandidateRetention(self.root, self.target, client).recover(receipt)

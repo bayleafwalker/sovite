@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import secrets
 import json
 import time
@@ -188,6 +190,8 @@ class Platform:
                     raise PlatformError("transfer_mismatch", "The job content differs from its approved output transfer")
             elif selected is not None and selected["requires_output_release"]:
                 raise PlatformError("output_release_required", "The role has no approved output transfer", 403)
+            from .repository_repairs import recheck
+            recheck(self, session, row, recipe)
             return recipe
         finally:
             _REAUTHORIZING.reset(token)
@@ -304,7 +308,7 @@ class Platform:
                 "budget_reservations", "active_slots", "attempts", "evidence",
             }
             if (not isinstance(repository_run, dict)
-                    or set(repository_run) != required_repository_fields
+                    or set(repository_run) not in (required_repository_fields, required_repository_fields | {"repair"})
                     or repository_run.get("schema_version") != "sovite-repository-run/v1"
                     or repository_run.get("principal_id") != caller
                     or repository_run.get("grant_id") != grant_id
@@ -363,7 +367,10 @@ class Platform:
                 if repository_run is not None:
                     if repository_run["generation"] != recipe["generation"]:
                         raise PlatformError("revision_superseded", "Repository-run binding generation is no longer active", 409)
-                    recipe["repository_run"] = dict(repository_run)
+                    if "repair" in repository_run:
+                        from .repository_repairs import admit
+                        admit(self, session, repository_run, caller, recipe, task)
+                    recipe["repository_run"] = copy.deepcopy(repository_run)
                 if len(task.encode()) > self.settings.max_request_bytes:
                     raise PlatformError("invalid_task", "Task and workflow context exceed the configured limit", 422)
                 if workflow_binding is not None:

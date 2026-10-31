@@ -16,7 +16,7 @@ import httpx
 import pytest
 import psycopg
 
-from test_repository_candidate_export import prepared, release
+from test_repository_candidate_export import prepared, release, candidate_additional_contracts
 from sovite.repository_candidate_retention import CandidateRetention, CandidateRetentionError, WorkspaceTarget
 
 

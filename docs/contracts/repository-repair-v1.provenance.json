@@ -1,0 +1,20 @@
+{
+  "schema": "sovite-contract-source-provenance/v1",
+  "contractId": "sovite.repository-repair.v1",
+  "generator": {
+    "repository": "https://github.com/bayleafwalker/vuoro",
+    "sourceCommit": "4daf6d17797fb66d6f2e5dc3ab078636f91b67b4",
+    "runtimePackage": "vuoro-contracts==0.2.0",
+    "runtimeWheelSha256": "7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9"
+  },
+  "sourceSha256": {
+    "main.tsp": "b71f493d8f79dc5b6a4f55444c53c09a1c6b4a9fb17be2aca6d8a9df83e5fac4",
+    "tspconfig.yaml": "d6b5b33902b26f94a6bc1ae9bcccd8cfffac8af020f74304b215a9b7e624fe91",
+    "contract.json": "7feb1dcf9a3c4fcfe1e83bf80b0a89d2684129f0ef6108ed66791bd8bcbf3dd8"
+  },
+  "generatedSdk": {
+    "package": "sovite.repository_repair_contract.vuoro_contract_ffe4db85eaaf3efc0305e243d2cc35cdfcc39879611f606d1282723dc22a79cc_client",
+    "treeSha256": "2c575b8e872bc40a06276e98b0344b1ca2396bbf0166b69939ff990d1090b2bb",
+    "dataIntegritySha256": "a239a5c515a8ddf10ba138677957f9145ae6b4d814f1cc30f1144aa830c25d98"
+  }
+}
