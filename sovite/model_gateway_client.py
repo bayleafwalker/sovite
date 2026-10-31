@@ -7,6 +7,7 @@ import math
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -113,6 +114,77 @@ def _gateway_failure(code: str) -> RuntimeFailure:
     if code in _OWNER_ERRORS:
         return RuntimeFailure(code)
     return RuntimeFailure("upstream_rejected")
+
+
+@dataclass(frozen=True)
+class ResponsesResult:
+    """Completed bounded stream; usage absence is unknown, never zero cost."""
+    sse: bytes = field(repr=False)
+    response: dict = field(repr=False)
+    usage: dict | None
+
+
+def _responses_result(raw: bytes, model_id: str) -> ResponsesResult:
+    """Require one complete terminal event before disclosing buffered bytes."""
+    try:
+        source = raw.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
+        if not source.endswith('\n\n'):
+            raise RuntimeFailure('external_execution_uncertain')
+        completed = None
+        for block in source.split('\n\n'):
+            event, data = '', []
+            for line in block.split('\n'):
+                if not line or line.startswith(':'):
+                    continue
+                field, _, value = line.partition(':')
+                value = value[1:] if value.startswith(' ') else value
+                if field == 'event':
+                    event = value
+                elif field == 'data':
+                    data.append(value)
+            if not data:
+                continue
+            payload = '\n'.join(data)
+            if payload == '[DONE]':
+                if completed is None:
+                    raise RuntimeFailure('external_execution_uncertain')
+                continue
+            value = _decode_json(payload.encode('utf-8'))
+            if event == 'sovite_error':
+                raise _gateway_failure(value.get('code', ''))
+            kind = value.get('type')
+            if not isinstance(kind, str) or (event and event != kind):
+                raise RuntimeFailure('model_protocol_error')
+            if kind in {'error', 'response.failed', 'response.incomplete'}:
+                raise RuntimeFailure('upstream_rejected')
+            if completed is not None:
+                raise RuntimeFailure('model_protocol_error')
+            if kind == 'response.completed':
+                response = value.get('response')
+                if (not isinstance(response, dict) or response.get('status') != 'completed'
+                        or response.get('model') != model_id or not isinstance(response.get('id'), str)
+                        or not isinstance(response.get('output'), list)):
+                    raise RuntimeFailure('model_protocol_error')
+                completed = response
+        if completed is None:
+            raise RuntimeFailure('external_execution_uncertain')
+        usage = completed.get('usage')
+        if usage is not None:
+            if (not isinstance(usage, dict) or any(type(usage.get(key)) is not int or usage[key] < 0
+                    for key in ('input_tokens', 'output_tokens', 'total_tokens'))
+                    or usage['input_tokens'] + usage['output_tokens'] != usage['total_tokens']):
+                raise RuntimeFailure('model_protocol_error')
+            for name, total in (('input_tokens_details', usage['input_tokens']),
+                                ('output_tokens_details', usage['output_tokens'])):
+                details = usage.get(name)
+                if details is not None and (not isinstance(details, dict)
+                        or any(type(count) is not int or not 0 <= count <= total for count in details.values())):
+                    raise RuntimeFailure('model_protocol_error')
+        return ResponsesResult(raw, completed, usage)
+    except RuntimeFailure:
+        raise
+    except (ValueError, UnicodeError, RecursionError, OverflowError):
+        raise RuntimeFailure('model_protocol_error') from None
 
 
 class ModelGatewayInference:
@@ -287,3 +359,81 @@ class ModelGatewayInference:
             return _decode_json(response_body)
         except (ValueError, UnicodeDecodeError, RecursionError, OverflowError):
             raise RuntimeFailure("model_protocol_error") from None
+
+
+    async def responses(self, model: dict, payload: dict, authorization_check=None) -> ResponsesResult:
+        """Forward one native stateless request through this exact owner binding.
+
+        The caller reserves cost first and retains it on every unknown outcome.
+        This method never retries, launches tools, settles usage or qualifies a
+        model helper. Session metadata/cache keys stop at the local bridge.
+        """
+        if (model.get('adapter') != 'openai-compatible' or model.get('wire_api') != 'responses'
+                or model.get('id') != self.binding_id or model.get('model') != self.model_id
+                or type(payload) is not dict or payload.get('model') != self.model_id
+                or payload.get('stream') is not True):
+            raise RuntimeFailure('unsupported_model_adapter')
+        try:
+            original = json.dumps(payload, allow_nan=False, ensure_ascii=False,
+                                  separators=(',', ':')).encode('utf-8')
+            if len(original) > BODY_LIMIT:
+                raise ValueError
+            forwarded = {key: value for key, value in payload.items()
+                         if key not in {'client_metadata', 'prompt_cache_key'}}
+            body = json.dumps(forwarded, allow_nan=False, ensure_ascii=False,
+                              separators=(',', ':')).encode('utf-8')
+            from .connector.helper import validate_body
+            validate_body('responses', body, self.model_id)
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            raise RuntimeFailure('model_protocol_error') from None
+        if not _FENCE.fullmatch(self.fence):
+            raise RuntimeFailure('model_gateway_adapter_unavailable')
+        if authorization_check is not None:
+            authorization_check()
+        request_deadline = min(self.deadline, time.time() + self.binding_timeout)
+        remaining = request_deadline - time.time()
+        if remaining <= 0:
+            raise RuntimeFailure('execution_timeout')
+        headers = {'Authorization': 'Bearer ' + self.token,
+                   'X-Sovite-Capability': self.capability, 'X-Sovite-Job': self.job_id,
+                   'X-Sovite-Fence': self.fence, 'X-Sovite-Deadline': str(math.floor(request_deadline)),
+                   'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
+        url = self.origin + '/inference/' + quote(self.binding_id, safe='') + '/responses'
+        try:
+            async with asyncio.timeout(remaining):
+                async with httpx.AsyncClient(timeout=httpx.Timeout(remaining), follow_redirects=False,
+                                              trust_env=False, verify=self.verify) as client:
+                    async with client.stream('POST', url, content=body, headers=headers) as response:
+                        raw = bytearray()
+                        async for block in response.aiter_bytes():
+                            if authorization_check is not None:
+                                authorization_check()
+                            if time.time() >= request_deadline:
+                                raise RuntimeFailure('execution_timeout')
+                            raw.extend(block)
+                            if len(raw) > _RESPONSE_LIMIT:
+                                raise RuntimeFailure('upstream_response_too_large')
+                        if response.status_code >= 300:
+                            try:
+                                error = _decode_json(bytes(raw))
+                            except (ValueError, UnicodeError, RecursionError, OverflowError):
+                                raise RuntimeFailure('upstream_rejected') from None
+                            raise _gateway_failure(error.get('code', ''))
+                        if response.headers.get('content-type', '').split(';', 1)[0].strip() != 'text/event-stream':
+                            raise RuntimeFailure('model_protocol_error')
+                result = _responses_result(bytes(raw), self.model_id)
+                if authorization_check is not None:
+                    authorization_check()
+                if time.time() >= request_deadline:
+                    raise RuntimeFailure('execution_timeout')
+                return result
+        except RuntimeFailure:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            raise RuntimeFailure('execution_timeout') from None
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError):
+            # A disconnect may follow provider invocation. Preserve the budget
+            # reservation; never turn missing completion into a retry or $0.
+            raise RuntimeFailure('external_execution_uncertain') from None
