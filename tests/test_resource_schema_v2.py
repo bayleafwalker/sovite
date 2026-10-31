@@ -109,7 +109,7 @@ def test_existing_schema6_requires_offline_cutover_preserves_rows_and_v1_meaning
     ('resource_workload_scopes','resource_scope_target_shape'),
     ('resource_owner_requests','resource_request_target_shape'),
 ])
-@pytest.mark.parametrize('mutation',['drop','weaken'])
+@pytest.mark.parametrize('mutation',['drop','weaken','not_valid'])
 def test_schema7_startup_refuses_missing_or_weakened_shape_check_read_only(database,table_name,constraint_name,mutation):
     if database.engine.dialect.name!='postgresql':
         pytest.skip('PostgreSQL supports direct CHECK removal for this compatibility test')
@@ -121,6 +121,10 @@ def test_schema7_startup_refuses_missing_or_weakened_shape_check_read_only(datab
         connection.exec_driver_sql(f'ALTER TABLE {owner} DROP CONSTRAINT {constraint}')
         if mutation=='weaken':
             connection.exec_driver_sql(f'ALTER TABLE {owner} ADD CONSTRAINT {constraint} CHECK (true)')
+        elif mutation=='not_valid':
+            expression=(resource_schema.SCOPE_CHECK if constraint_name=='resource_scope_target_shape'
+                        else resource_schema.REQUEST_CHECK)
+            connection.exec_driver_sql(f'ALTER TABLE {owner} ADD CONSTRAINT {constraint} CHECK ({expression}) NOT VALID')
     statements=[]
     def capture(connection,cursor,statement,parameters,context,executemany):
         statements.append(statement)
@@ -133,16 +137,27 @@ def test_schema7_startup_refuses_missing_or_weakened_shape_check_read_only(datab
     assert statements and version(database)==7
 
 
-def test_schema6_sqlite_refuses_same_shape_partial_index_that_rebuild_would_drop(database):
+@pytest.mark.parametrize('replace_expected_index',[False,True])
+def test_schema6_sqlite_refuses_partial_index_that_rebuild_would_drop(database,replace_expected_index):
     if database.engine.dialect.name!='sqlite':
         pytest.skip('SQLite rebuilds resource tables; PostgreSQL alters them in place')
     schema6(database)
     with database.engine.begin() as connection:
-        connection.exec_driver_sql("CREATE INDEX extra_partial_job ON resource_owner_requests(job_id) WHERE state='pending'")
+        name='ix_resource_owner_requests_job_id'
+        if replace_expected_index:
+            connection.exec_driver_sql(f'DROP INDEX {name}')
+        else:
+            name='extra_partial_job'
+        connection.exec_driver_sql(f"CREATE INDEX {name} ON resource_owner_requests(job_id) WHERE state='pending'")
     with pytest.raises(resource_schema.ResourceSchemaError,match='resource_schema6_incompatible'):
         database.migrate()
-    names={row['name'] for row in inspect(database.engine).get_indexes('resource_owner_requests')}
-    assert {'ix_resource_owner_requests_job_id','extra_partial_job'}<=names
+    indexes=inspect(database.engine).get_indexes('resource_owner_requests')
+    names={row['name'] for row in indexes}
+    if replace_expected_index:
+        assert names=={'ix_resource_owner_requests_job_id'}
+        assert indexes[0]['dialect_options']['sqlite_where'] is not None
+    else:
+        assert {'ix_resource_owner_requests_job_id','extra_partial_job'}<=names
     assert version(database)==6
 
 

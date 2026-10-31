@@ -468,6 +468,8 @@ class Database:
                 actual = by_name.get(constraint.name)
                 if actual is None:
                     raise DatabaseSchemaError("database_schema_incomplete", f"Missing check constraint {constraint.name} on {table.name}")
+                if (actual.get("dialect_options") or {}).get("not_valid"):
+                    raise DatabaseSchemaError("database_schema_incomplete", f"Unvalidated check constraint {constraint.name} on {table.name}")
                 try:
                     matches = _check_expression_tree(str(actual.get("sqltext", ""))) == _check_expression_tree(str(constraint.sqltext))
                 except ValueError:
