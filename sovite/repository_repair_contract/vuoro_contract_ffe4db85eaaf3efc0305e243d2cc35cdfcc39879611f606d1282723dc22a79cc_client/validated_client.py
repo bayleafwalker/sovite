@@ -23,7 +23,7 @@ def create_validated_client(*, client, integrity_sha256):
     )
     manifest = bundle.manifest
     ops = manifest["operations"]
-    native_bindings = {'repositoryRepairSubmit': {'module': 'api.default.repository_repair_submit', 'parameters': {}, 'model': {'module': 'repair_submission', 'class': 'RepairSubmission'}, 'body_parameter': 'body'}}
+    native_bindings = {'repositoryRepairFeedbackContext': {'module': 'api.default.repository_repair_feedback_context', 'parameters': {}, 'model': {'module': 'feedback_context_request', 'class': 'FeedbackContextRequest'}, 'body_parameter': 'body'}, 'repositoryRepairSubmit': {'module': 'api.default.repository_repair_submit', 'parameters': {}, 'model': {'module': 'repair_submission', 'class': 'RepairSubmission'}, 'body_parameter': 'body'}}
     transport = client.get_httpx_client()
     configured_base = transport.base_url
     current = ContextVar("vuoro_contract_current", default=None)

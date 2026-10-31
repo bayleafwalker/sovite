@@ -423,3 +423,51 @@ def test_retention_state_rejects_world_writable_parent(installed, tmp_path):
     assert closed.owner is None and closed.publication is None
     assert closed.diagnostic == "repository_runtime_unavailable"
     assert not (unsafe / "publication-state").exists()
+
+
+def repair_installation(installed, tmp_path):
+    settings, platform, path, config, runtime, base, driver = installed
+    credential = tmp_path/'repair-reader'
+    credential.write_text('synthetic-fixture-reader\n'); credential.chmod(0o600)
+    profile_path = tmp_path/'repair-reader-profile.json'
+    save(profile_path, {'schema_version':'vuoro-client-profile/v1', 'id':'repair-test',
+        'revision':1, 'source_environment_id':'test',
+        'target':{'environment_id':'test', 'environment_class':'development', 'endpoint':'https://workspace.invalid'},
+        'credential_ref':'file:'+str(credential), 'required_authorities':['knowledge:read','knowledge:contribute'],
+        'production_endpoint_denied':True})
+    workspace = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    config['retention'] = {'root':str(tmp_path/'repair-publication'), 'profile_path':str(profile_path),
+        'credential_file':str(credential), 'target':{'endpoint':'https://workspace.invalid',
+        'workspace_id':workspace, 'destination':'workspace-'+workspace, 'allowed_classes':['C3']}}
+    config['repair'] = {'max_repairs':1, 'feedback_contract_ids':['trusted-feedback']}
+    driver.supports_repository_repair_context = True
+    return settings, platform, path, config, runtime, base, driver
+
+
+def test_repair_policy_is_opt_in_and_uses_same_owner_and_current_reader(installed, tmp_path, monkeypatch):
+    from sovite import repository_runtime as module
+    assert installed[4].repair is None
+    settings, platform, path, config, _, _, driver = repair_installation(installed, tmp_path)
+    save(path, config)
+    runtime = compose_repository_runtime(settings, platform, driver_factory=lambda _:driver)
+    assert runtime.repair is not None
+    assert runtime.repair.owner is runtime.owner
+    assert runtime.repair.retention is runtime.publication
+    assert runtime.repair.policy.max_repairs == 1
+    monkeypatch.setattr(module, '_builtin_driver', lambda _:driver)
+    app = api.create_app(settings, platform)
+    assert app.state.repository_repair_service is app.state.repository_runtime.repair
+    assert app.state.repository_repair_service.owner is app.state.repository_run_owner
+
+
+@pytest.mark.parametrize('fault', ['missing-retention','unsupported-driver','invalid-limit','unknown-field'])
+def test_invalid_requested_repair_never_silently_enables_initial_execution(installed, tmp_path, fault):
+    settings, platform, path, config, _, _, driver = repair_installation(installed, tmp_path)
+    if fault == 'missing-retention': config['retention'] = None
+    if fault == 'unsupported-driver': driver.supports_repository_repair_context = False
+    if fault == 'invalid-limit': config['repair']['max_repairs'] = 4
+    if fault == 'unknown-field': config['repair']['caller'] = 'made-up-authority'
+    save(path, config)
+    runtime = compose_repository_runtime(settings, platform, driver_factory=lambda _:driver)
+    assert runtime.owner is None and runtime.repair is None
+    assert runtime.diagnostic == 'repository_runtime_unavailable'

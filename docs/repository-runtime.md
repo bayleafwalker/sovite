@@ -22,7 +22,7 @@ retaining those ownership and permission constraints. Candidate code must run
 outside this host UID and must not receive these files, the protected state,
 credentials, or control-plane access.
 
-The closed top-level JSON object has these fields:
+The closed top-level JSON object has these five required fields and one optional repair policy:
 
 | Field | Meaning |
 | --- | --- |
@@ -31,6 +31,7 @@ The closed top-level JSON object has these fields:
 | `bindings` | Nonempty array of exact `RepositoryRunBinding` objects from `sovite/repository_runs.py` |
 | `driver` | Fixed builtin `sovite.repository_native_vm.create_driver` configuration |
 | `retention` | `null`, or the fixed Workspace transport configuration below |
+| `repair` (optional) | Absent/null keeps repair disabled; otherwise the exact bounded policy below |
 
 There is no configurable module import or executable plugin. If the builtin
 VM driver is not installed, the composition stays unavailable. The driver owns
@@ -60,7 +61,7 @@ its repository manager to the exact durable packet of the requested candidate,
 so a concurrent sibling attempt cannot replace it.
 
 Binding edits take effect at the next owner check. Changing the driver,
-protected state path, or retention configuration disables an existing resolver
+protected state path, retention configuration, or repair policy disables an existing resolver
 until the process is recomposed. Enabling or changing the runtime configuration
 path also changes the platform deployment fingerprint and requires matching
 platform qualification. Driver qualification separately covers the actual VM,
@@ -91,6 +92,29 @@ bytes on each use; a changed profile requires recomposition. Request bodies
 cannot select a Workspace endpoint, credential file, destination, clearance,
 or output approval procedure. The current output contract and Workspace
 membership still authorize each transfer.
+
+For repair, the same protected file may contain:
+
+```json
+"repair": {"max_repairs": 1, "feedback_contract_ids": ["qualified-feedback"]}
+```
+
+`max_repairs` is1–3; contract IDs select existing current output-owner procedures.
+They do not create approval authority. A non-null policy requires the same fixed
+retention reader and a driver declaring support for separate `repair_context`.
+Unsupported drivers, missing readers and malformed requested policies disable
+the optional composition. The ordinary five-field configuration keeps repair
+disabled. Configuration alone proves no native or feedback qualification.
+
+The [generated repair contract1.1](contracts/repository-repair-v1.md) adds the
+read-only `repair-feedback-context` operation. Only a caller that owns the parent
+and is an actual enabled approver for the installed feedback procedure can read
+its exact source/contract/generation/candidate selectors. The read creates no
+approval; the existing output-release API remains the authority for a qualified
+machine or other already-authorized procedure. Candidate model disclosure is
+checked separately from Workspace readership. Unknown approval/repair replies
+must reconcile the same saved bytes and keys, preserving current principal and
+source authority.
 
 The composition does not add a mutable profile to the remote execution API,
 whose admitted external recipe remains `agent-http-v1`. It does not turn the

@@ -146,6 +146,77 @@
                 "not": {}
             }
         },
+        "FeedbackContextRequest": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "FeedbackContextRequest.json",
+            "type": "object",
+            "properties": {
+                "parent_run_id": {
+                    "$ref": "Identity.json"
+                },
+                "feedback_contract_id": {
+                    "$ref": "Identity.json"
+                }
+            },
+            "required": [
+                "parent_run_id",
+                "feedback_contract_id"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "FeedbackContext": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "FeedbackContext.json",
+            "type": "object",
+            "properties": {
+                "parent_run_id": {
+                    "$ref": "Identity.json"
+                },
+                "source_digest": {
+                    "$ref": "DigestRef.json"
+                },
+                "contract_id": {
+                    "$ref": "Identity.json"
+                },
+                "contract_revision": {
+                    "$ref": "DigestRef.json"
+                },
+                "expected_generation": {
+                    "$ref": "DigestRef.json"
+                },
+                "candidate_sha256": {
+                    "$ref": "Sha256.json"
+                },
+                "candidate_tip_sha": {
+                    "type": "string",
+                    "minLength": 40,
+                    "maxLength": 40,
+                    "pattern": "^[0-9a-f]{40}$"
+                }
+            },
+            "required": [
+                "parent_run_id",
+                "source_digest",
+                "contract_id",
+                "contract_revision",
+                "expected_generation",
+                "candidate_sha256",
+                "candidate_tip_sha"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "DigestRef": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "DigestRef.json",
+            "type": "string",
+            "minLength": 71,
+            "maxLength": 71,
+            "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "ErrorDetail": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": "ErrorDetail.json",

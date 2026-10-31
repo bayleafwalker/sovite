@@ -87,3 +87,39 @@ test code and supplies no native execution or service qualification. PostgreSQL
 successor races use separate Platform transactions and a deterministic start
 barrier. Set both `SOVITE_WORKSPACE_TEST_DSN` and `SOVITE_TEST_POSTGRES_URL` to
 explicit disposable UTF-8 databases to run all repair cases without skips.
+
+## Feedback-context read and protected composition (contract1.1)
+
+`POST /api/repository-runs/v1/repair-feedback-context` accepts only
+`parent_run_id` and `feedback_contract_id`. The caller must own the completed
+parent and be an enabled approver under that exact current installed feedback
+contract, which must also belong to the protected repair policy. The source,
+class, model destination, qualification and candidate release remain current.
+The reply supplies the exact source digest, contract revision, generation and
+candidate selectors needed by the existing `POST /api/output-releases` API.
+This read creates no approval or job and exposes no original task, candidate
+bytes, feedback text, credential or effect capability.
+
+A qualified protected consumer can use its existing caller credential to approve
+its trusted check feedback only when that machine procedure is actually enabled
+by the output owner. The existing approval operation remains the authority and
+rechecks the supplied source, revision and generation. An ineligible consumer
+preserves an actionable stop; a real release may be supplied by another
+already-authorized procedure. This adds no mandatory human step or new approval
+writer. Before retrying an unknown approval, a consumer must reacquire the same
+owned eligible context so a changed credential cannot silently replay as a
+different approving principal. Exact repeated approval bytes converge through
+the existing content-addressed release operation; the repair request keeps its
+own persisted idempotency key. Tests drop each actual HTTP acknowledgement after
+its owner commits and assert one added release and one child.
+
+The private `sovite-repository-runtime/v1` installation may add
+`repair: {max_repairs: 1, feedback_contract_ids: ["qualified-feedback"]}`.
+Absence or null keeps repair disabled. Enabling requires the same configured
+retention/current-reader service and a driver explicitly supporting
+`repair_context`. A malformed requested policy, absent retained reader or
+unsupported driver disables the optional repository runtime, rather than
+silently running a workflow without its requested repair support. This
+composition does not install an output contract, qualify a native driver, or
+prove a live service. Upgrade/rollback must preserve in-flight journals and
+reconcile unknown outcomes before changing the protected installation.
