@@ -363,7 +363,7 @@ class RemoteExecution:
                  "disposition": state})
             return result
 
-    def _completed_prior(self, principal, context, digest):
+    def _completed_prior(self, principal, context, digest, *, outcome):
         owner = self._owner(principal, context)
         with self.platform.db.sessions.begin() as session:
             self.platform.db.authority_lock(session)
@@ -374,7 +374,8 @@ class RemoteExecution:
             job, lease = self._job_lease(session, principal, context, owner)
             now = time.time()
             self._require_started(job, lease, now, allow_cancelled=True)
-            self.platform.authorize_existing_job(session, job)
+            self.platform.authorize_existing_job(session, job,
+                purpose="active" if outcome == "completed" else "observe")
         return None
 
     def complete(
@@ -413,7 +414,7 @@ class RemoteExecution:
             "error_code": error_code,
         }
         digest = _request_digest("complete", principal, request)
-        prior = self._completed_prior(principal, context, digest)
+        prior = self._completed_prior(principal, context, digest, outcome=outcome)
         if prior is not None:
             return prior
         artifact = self.platform.store.put(context.job_id, result_value) if outcome == "completed" else None
@@ -429,7 +430,8 @@ class RemoteExecution:
             self._require_started(job, lease, now, allow_cancelled=True)
             denied = None
             try:
-                self.platform.authorize_existing_job(session, job)
+                self.platform.authorize_existing_job(session, job,
+                    purpose="active" if outcome == "completed" else "observe")
             except PlatformError as exc:
                 denied = exc.code
             gateway = job.resolved.get("model", {}).get("connection", {}).get("kind") == "model-gateway"

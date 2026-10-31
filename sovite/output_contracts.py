@@ -87,7 +87,7 @@ def _require_approver(platform, contract: dict, actor: str, actor_role: str) -> 
 def _source(platform, session, source_job_id: str, expected_generation: str):
     source = platform.get_job(source_job_id, session)
     try:
-        recipe = platform.authorize_existing_job(session, source)
+        recipe = platform.authorize_existing_job(session, source, purpose="observe")
     except (AttributeError, KeyError, TypeError, ValueError):
         # Persisted source resolution is an integrity boundary too. Malformed
         # metadata must not turn a release read into an unbounded exception.

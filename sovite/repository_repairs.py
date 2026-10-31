@@ -140,7 +140,7 @@ def admit(platform, session, run, caller, recipe, task):
         usage += Decimal(str(cost))
     _need(usage + Decimal(str(run["max_cost_usd"])) <= Decimal(str(root_run["max_cost_usd"])),
           "repository_repair_budget_exceeded")
-    platform.authorize_existing_job(session, parent)
+    platform.authorize_existing_job(session, parent, purpose="observe")
     feedback(platform, session, parent, repair, recipe)
     candidate_release(platform, session, parent, repair, recipe)
     # Exact input bytes were prepared before this transaction. Recheck their
@@ -215,7 +215,7 @@ class RepositoryRepairService:
                 "candidate_tip_sha":data["tip_sha"]}
             # Mutable settings can revoke an approving identity during I/O.
             outputs._require_approver(platform, contract, principal_id, "caller")
-            platform.authorize_existing_job(session, parent)
+            platform.authorize_existing_job(session, parent, purpose="observe")
             candidate_release(platform, session, parent, source, recipe)
             owner._binding(_parent_packet(parent, parent.resolved["repository_run"]["max_cost_usd"]), principal_id)
             contract_bundle.validate_response(FEEDBACK_CONTEXT_OPERATION, 200, result)
@@ -260,7 +260,7 @@ class RepositoryRepairService:
             # Read the exact approved feedback under its existing source chain.
             record, _, content = outputs._read(platform, session, body["feedback_release_id"])
             repair["feedback_sha256"] = _digest(_json(content))
-            recipe = platform.authorize_existing_job(session, parent)
+            recipe = platform.authorize_existing_job(session, parent, purpose="observe")
             approved = feedback(platform, session, parent, repair, recipe)
             _need(candidate_release(platform, session, parent, repair, recipe).encode("utf-8") == raw)
         key = "repairinput_" + _digest({"candidate":body["candidate_sha256"], "feedback":repair["feedback_sha256"]})

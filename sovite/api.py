@@ -109,9 +109,14 @@ def token_identity(token: str, settings: Settings) -> tuple[str, str] | None:
 
 
 def create_app(settings: Settings | None = None, platform: Platform | None = None,
-               repository_run_owner=None, candidate_publication_service=None) -> FastAPI:
+               repository_run_owner=None, candidate_publication_service=None,
+               *, repository_currentness_authorizer=None) -> FastAPI:
     settings = settings or Settings.from_env()
-    platform = platform or Platform(settings)
+    if platform is None:
+        platform = Platform(settings, repository_currentness_authorizer=repository_currentness_authorizer)
+    elif (repository_currentness_authorizer is not None and
+          platform.repository_currentness_authorizer is not repository_currentness_authorizer):
+        raise ValueError("Repository currentness authorizer must belong to the supplied platform")
     from .repository_runtime import compose_repository_runtime
     runtime = None
     if repository_run_owner is None:

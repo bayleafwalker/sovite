@@ -63,7 +63,7 @@ class CandidateExportOwner:
         attempts = record.get("attempts")
         _need(isinstance(attempts, list) and len(attempts) > 0 and attempts[-1].get("id") == attempt_id
               and attempts[-1].get("state") == "completed")
-        self.platform.authorize_existing_job(session, job)
+        self.platform.authorize_existing_job(session, job, purpose="observe")
         self.execution.check_authorization(job)
         return job
 
