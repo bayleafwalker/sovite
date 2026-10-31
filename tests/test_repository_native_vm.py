@@ -263,7 +263,7 @@ def test_git_whole_deadline_and_live_revocation_stop_a_running_parser():
     asyncio.run(scenario(False));asyncio.run(scenario(True))
 
 
-def test_existing_qualification_authoring_signs_native_facts_and_tampering_revokes(tmp_path):
+def test_existing_qualification_authoring_signs_native_facts_and_tampering_revokes(tmp_path,monkeypatch):
     import copy
     import hashlib
     from test_repository_runs import setup as fixture_setup
@@ -274,6 +274,9 @@ def test_existing_qualification_authoring_signs_native_facts_and_tampering_revok
     settings,platform=fixture_setup.__wrapped__(tmp_path)
     initialize_keys(settings)
     generation=platform.active()[1]
+    import sovite.repository_native_isolation as isolation
+    supervisor=SimpleNamespace(sha256='f'*64)
+    monkeypatch.setattr(isolation,'load_profile',lambda:supervisor)
     driver=object.__new__(NativeVMDriver)
     # A synthetic observer is sufficient only to exercise source validation;
     # no VM is constructed or claimed by this qualification-format fixture.
@@ -288,7 +291,7 @@ def test_existing_qualification_authoring_signs_native_facts_and_tampering_revok
            'native_store_path':driver.config['native_store_path'],'native_sha256':'a'*64,
            'scope':'single-use-cloud-vm','image_sha256':'b'*64,'tools':driver.git_facts,
            'execution_profile_id':'fixture-profile','deployment_id':'fixture-deployment',
-           'native_closure_sha256':'d'*64,'guest_helper_sha256':'e'*64,'vm_id':'123456789'}
+           'native_closure_sha256':'d'*64,'guest_helper_sha256':'e'*64,'vm_id':'123456789','supervisor_sha256':supervisor.sha256}
     driver.observer=lambda _:SimpleNamespace(**facts)
     evidence={'generation':generation,'profile':'local','evidence_kind':'deployment',
         'runtime_binding':runtime_settings_fingerprint(settings),
@@ -298,6 +301,9 @@ def test_existing_qualification_authoring_signs_native_facts_and_tampering_revok
     driver.config['qualification_id']=row.id
     assert verify_qualification(row,settings)
     assert driver.execution_profile()['qualification_ref']==row.id
+    supervisor.sha256='0'*64
+    assert driver.execution_profile()is None
+    supervisor.sha256=facts['supervisor_sha256']
     current_observer=driver.observer
     driver.observer=lambda _:SimpleNamespace(**{**facts,'native_closure_sha256':'f'*64})
     assert driver.execution_profile() is None

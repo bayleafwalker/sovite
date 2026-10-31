@@ -34,7 +34,7 @@ _VERBS = frozenset({'seed-v1','exec-v1','quiesce-v1','export-v1'})
 _SHA = re.compile(r'^[0-9a-f]{64}$')
 _CHECKS = frozenset({'per-attempt-isolation','credential-containment','exact-binding',
     'durable-checkpoint-and-candidate','predecessor-reconciliation','bounded-usage',
-    'native-rpc-routing','native-config-isolation','vm-process-lifecycle','candidate-quiescence-import'})
+    'native-rpc-routing','native-supervisor-containment','native-config-isolation','vm-process-lifecycle','candidate-quiescence-import'})
 
 
 def _owner_module():
@@ -53,7 +53,8 @@ def _source_digest():
     for name in ('repository_native_vm.py','repository_native_runtime.py',
                  'repository_native_inference.py','repository_native_git.py',
                  'repository_native_recovery.py','repository_recovery.py','model_gateway_client.py',
-                 'repository_native_luna_catalog.json'):
+                 'repository_native_luna_catalog.json','repository_native_isolation.py',
+                 'repository_native_isolation_child.py'):
         digest.update(name.encode()+b'\0'+Path(__file__).with_name(name).read_bytes())
     return digest.hexdigest()
 
@@ -187,12 +188,14 @@ class NativeVMDriver:
                 facts = evidence['native_vm']
                 need(type(facts) is dict and set(facts) == {'driver_sha256','configuration_sha256',
                      'native_store_path','native_sha256','scope','tools','image_sha256','execution_profile_id',
-                     'deployment_id','native_closure_sha256','guest_helper_sha256','vm_id'})
+                     'deployment_id','native_closure_sha256','guest_helper_sha256','vm_id','supervisor_sha256'})
                 need(all(type(facts[name]) is str and _SHA.fullmatch(facts[name]) for name in
-                     ('driver_sha256','configuration_sha256','image_sha256','native_closure_sha256','guest_helper_sha256')))
+                     ('driver_sha256','configuration_sha256','image_sha256','native_closure_sha256','guest_helper_sha256','supervisor_sha256')))
                 need(all(type(facts[name]) is str and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}',facts[name])
                          for name in ('execution_profile_id','deployment_id')))
                 need(type(facts['vm_id']) is str and re.fullmatch(r'[1-9][0-9]{0,19}',facts['vm_id']))
+                from .repository_native_isolation import load_profile
+                need(load_profile().sha256==facts['supervisor_sha256'])
                 observed = self.observer(facts['vm_id'])
                 need(observed.vm_id == facts['vm_id'] and all(getattr(observed,name) == facts[name]
                      for name in ('image_sha256','native_store_path','native_sha256','execution_profile_id',

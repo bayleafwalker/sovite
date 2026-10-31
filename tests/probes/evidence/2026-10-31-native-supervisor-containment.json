@@ -1,0 +1,74 @@
+{
+  "additional_source_oci_feasibility": {
+    "constructor_results_sha256": "0b8471ef10908a15d42a02935094127b70c79f8aad3e3b6eab37b3ff57998d08",
+    "masked_proc_refusal": true,
+    "native_function_model_requests": 8,
+    "outer_user_namespace": true,
+    "owner_profile_sha256": "d00cec8ed0560ad7620cf6fdd01a63fe8ee40b3f33bab1f872950e75c0989aa8",
+    "paid_model_calls": 0,
+    "qualified": false,
+    "scope": "Standalone rootless source OCI with local namespace exec-server; actual installed-node equivalence and final image remain required",
+    "three_guard_removal_counterexamples": true,
+    "uid": 11001
+  },
+  "after": {
+    "deadline_child_stopped": true,
+    "detached_child_stopped": true,
+    "direct_network_effects": 0,
+    "own_home_positive": true,
+    "paid_model_calls": 0,
+    "parent_config_visible": false,
+    "parent_mirror_visible": false,
+    "parent_proc_environment_visible": false,
+    "parent_proc_status_visible": false
+  },
+  "base_commit": "e1c19c4a23c5c440815802da9ff017f4aed01383",
+  "before": {
+    "direct_network_effects": 1,
+    "paid_model_calls": 0,
+    "parent_config_visible": true,
+    "parent_mirror_visible": true,
+    "parent_proc_environment_visible": true,
+    "scope": "Actual native host-RPC privilege seam, no admitted-model-tool escalation claim"
+  },
+  "fixture": {
+    "immutable_needed_store_roots": 118,
+    "no_entire_store_mount": true,
+    "profile_sha256": "6682d18dd3c4474a4335ad929d7e3577daa042aecdb02df94d82d851349482c4",
+    "python": "Bare Python stdlib closure; owner API dependencies excluded",
+    "synthetic_parent_credentials_only": true,
+    "uid": 1000
+  },
+  "focused_tests": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 52
+  },
+  "guard_removal_controls": {
+    "private_network_namespace": "Disposable nonbridge endpoint receives one request",
+    "private_parent_mount": "Synthetic parent file becomes readable",
+    "private_proc_mount": "World-readable host parent status becomes readable; user namespace still protects environ"
+  },
+  "limits": [
+    "Workstation source fixture does not qualify the installed container.",
+    "Legacy native adapters outside the repository VM composition are outside this source claim.",
+    "No real DB/S3/provider credential, customer data or paid model call was used."
+  ],
+  "native_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
+  "qualified": false,
+  "remaining_required": [
+    "same installed OCI image and UID 11001",
+    "actual container seccomp/kernel namespace profile",
+    "native guest KVM compatibility with new immutable helper/profile inputs",
+    "current owner provider and qualification facts"
+  ],
+  "schema_version": "native-supervisor-containment-source-evidence/v1",
+  "source_sha256": {
+    "sovite/repository_native_isolation.py": "3d285ab356317d702277ffd7af2ec57a1b1334cf1a456ef4d281587cf998dcce",
+    "sovite/repository_native_isolation_child.py": "84d9caef9a6caa810ca370df3fd7b0a73c28f9ccd718e848eb4d3dc2d24cb93a",
+    "sovite/repository_native_runtime.py": "598ea471ea5ddf4cd9f833c15afbba9d0782580a007419e199d0a1626b18b753",
+    "sovite/repository_native_vm.py": "ca160a016e82730b9007fab1d2ebd7ad97a629713cbb0bc1238740bcdeae3b20",
+    "tests/probes/native_supervisor_containment.py": "46fb742d3584e592a432da4e7225687a3c376cf2c1ab10810332a17a5c04d1f4"
+  }
+}

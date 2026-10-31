@@ -280,7 +280,10 @@ class NativeAppServer:
         need(parsed.scheme == 'http' and parsed.hostname == '127.0.0.1'
              and parsed.port and parsed.path in {'', '/'}
              and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment)
-        self.bridge_origin, self.bridge_token = bridge_origin.rstrip('/'), bridge_token
+        from .repository_native_isolation import MODEL_ORIGIN
+        self.parent_bridge_origin=bridge_origin.rstrip('/')
+        self.bridge_origin,self.bridge_token=MODEL_ORIGIN,bridge_token
+        self.namespace=None
         self.deadline, self.authorization_check = deadline, authorization_check
         self.process = None
         self.request_id = 0
@@ -289,6 +292,7 @@ class NativeAppServer:
     def check(self):
         self.authorization_check()
         need(time.time() < self.deadline, 'execution_timeout')
+        need(self.namespace is None or not self.namespace.failed,'native_supervisor_unavailable')
 
     def configuration(self):
         config = {'model_provider':'sovite', 'model_providers.sovite.name':'Owner-bound native inference',
@@ -319,9 +323,9 @@ class NativeAppServer:
         env = {'PATH':'/run/current-system/sw/bin', 'HOME':str(self.home),
                'CODEX_HOME':str(self.home),'LANG':'C.UTF-8','NO_PROXY':'127.0.0.1',
                'SOVITE_NATIVE_BRIDGE_TOKEN':self.bridge_token}
-        self.process = await asyncio.create_subprocess_exec(*command,cwd=self.home,env=env,
-            stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,limit=FRAME_LIMIT+1)
+        from .repository_native_isolation import Namespace
+        self.namespace=Namespace(self.home,self.parent_bridge_origin,self.deadline,self.authorization_check)
+        self.process=await self.namespace.start(command,env)
         await self.request('initialize',{'clientInfo':{'name':'sovite-native-vm','version':'1'},
             'capabilities':{'experimentalApi':True,'explicitGatewayOauth':True}})
         await self.send({'method':'initialized','params':{}})
@@ -339,13 +343,17 @@ class NativeAppServer:
         self.check()
         raw = json.dumps(value,separators=(',',':'),allow_nan=False).encode('utf-8')
         need(len(raw) <= FRAME_LIMIT, 'native_executor_protocol_error')
-        self.process.stdin.write(raw+b'\n')
-        await self.process.stdin.drain()
+        try:
+            self.process.stdin.write(raw+b'\n')
+            await self.process.stdin.drain()
+        except (OSError,ConnectionError):
+            raise RuntimeFailure('native_supervisor_unavailable')from None
 
     async def receive(self):
         self.check()
         raw = await asyncio.wait_for(self.process.stdout.readline(),max(0.001,self.deadline-time.time()))
-        need(raw and raw.endswith(b'\n') and len(raw) <= FRAME_LIMIT, 'native_executor_protocol_error')
+        need(raw,'native_supervisor_unavailable')
+        need(raw.endswith(b'\n') and len(raw) <= FRAME_LIMIT, 'native_executor_protocol_error')
         value = json.loads(raw)
         need(type(value) is dict, 'native_executor_protocol_error')
         self.check()
@@ -370,8 +378,11 @@ class NativeAppServer:
                 return value['result']
 
     async def run(self, relay, *, environment_id, guest_cwd, goal, repair_context=None):
+        from .repository_native_isolation import EXECUTOR_URL
+        need(self.namespace is not None,'native_supervisor_unavailable')
+        self.namespace.bind_executor(relay)
         await self.request('environment/add',{'environmentId':environment_id,
-            'execServerUrl':relay.url,'authBearerToken':relay.token,'connectTimeoutMs':3000})
+            'execServerUrl':EXECUTOR_URL,'authBearerToken':relay.token,'connectTimeoutMs':3000})
         status = await self.request('environment/status',{'environmentId':environment_id})
         # environment/info initializes a new lazy connection; status alone
         # deliberately does not start or recover it.
@@ -399,5 +410,7 @@ class NativeAppServer:
         return {'thread_id':thread_id,'turn_id':turn_id}
 
     async def close(self):
-        if self.process is not None:
-            return await stop_process(self.process)
+        try:
+            if self.process is not None:return await stop_process(self.process)
+        finally:
+            if self.namespace is not None:await self.namespace.close()
