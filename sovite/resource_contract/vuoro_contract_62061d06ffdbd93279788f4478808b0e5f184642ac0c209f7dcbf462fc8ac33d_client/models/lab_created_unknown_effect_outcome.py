@@ -1,10 +1,7 @@
 from enum import StrEnum
 
 
-class LabStoppedState(StrEnum):
-    ABSENT = "absent"
-    RUNNING = "running"
-    STOPPED = "stopped"
+class LabCreatedUnknownEffectOutcome(StrEnum):
     UNKNOWN = "unknown"
 
     def __str__(self) -> str:

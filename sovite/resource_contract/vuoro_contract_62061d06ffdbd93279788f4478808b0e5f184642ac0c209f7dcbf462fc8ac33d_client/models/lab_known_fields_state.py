@@ -1,11 +1,10 @@
 from enum import StrEnum
 
 
-class LabObservationFieldsState(StrEnum):
+class LabKnownFieldsState(StrEnum):
     ABSENT = "absent"
     RUNNING = "running"
     STOPPED = "stopped"
-    UNKNOWN = "unknown"
 
     def __str__(self) -> str:
         return str(self.value)

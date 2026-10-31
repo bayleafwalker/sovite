@@ -10,9 +10,12 @@ from typing_extensions import Self
 from ..models.resource_result_output_class import ResourceResultOutputClass
 
 if TYPE_CHECKING:
-    from ..models.lab_created import LabCreated
-    from ..models.lab_observed import LabObserved
-    from ..models.lab_stopped import LabStopped
+    from ..models.lab_created_known import LabCreatedKnown
+    from ..models.lab_created_unknown import LabCreatedUnknown
+    from ..models.lab_observed_known import LabObservedKnown
+    from ..models.lab_observed_unknown import LabObservedUnknown
+    from ..models.lab_stopped_known import LabStoppedKnown
+    from ..models.lab_stopped_unknown import LabStoppedUnknown
     from ..models.peer_health_observation import PeerHealthObservation
 
 
@@ -23,14 +26,23 @@ T = TypeVar("T", bound="ResourceResult")
 class ResourceResult:
     """
     Attributes:
-        observation (LabCreated | LabObserved | LabStopped | PeerHealthObservation):
+        observation (LabCreatedKnown | LabCreatedUnknown | LabObservedKnown | LabObservedUnknown | LabStoppedKnown |
+            LabStoppedUnknown | PeerHealthObservation):
         sha256 (str):
         output_class (ResourceResultOutputClass):
         destination (str):
         policy_revision (str):
     """
 
-    observation: LabCreated | LabObserved | LabStopped | PeerHealthObservation
+    observation: (
+        LabCreatedKnown
+        | LabCreatedUnknown
+        | LabObservedKnown
+        | LabObservedUnknown
+        | LabStoppedKnown
+        | LabStoppedUnknown
+        | PeerHealthObservation
+    )
     sha256: str
     output_class: ResourceResultOutputClass
     destination: str
@@ -38,8 +50,11 @@ class ResourceResult:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.lab_created import LabCreated
-        from ..models.lab_observed import LabObserved
+        from ..models.lab_created_known import LabCreatedKnown
+        from ..models.lab_created_unknown import LabCreatedUnknown
+        from ..models.lab_observed_known import LabObservedKnown
+        from ..models.lab_observed_unknown import LabObservedUnknown
+        from ..models.lab_stopped_known import LabStoppedKnown
         from ..models.peer_health_observation import (
             PeerHealthObservation,
         )
@@ -47,8 +62,11 @@ class ResourceResult:
         observation: dict[str, Any]
         if (
             isinstance(self.observation, PeerHealthObservation)
-            or isinstance(self.observation, LabCreated)
-            or isinstance(self.observation, LabObserved)
+            or isinstance(self.observation, LabCreatedKnown)
+            or isinstance(self.observation, LabCreatedUnknown)
+            or isinstance(self.observation, LabObservedKnown)
+            or isinstance(self.observation, LabObservedUnknown)
+            or isinstance(self.observation, LabStoppedKnown)
         ):
             observation = self.observation.to_dict()
         else:
@@ -78,9 +96,12 @@ class ResourceResult:
 
     @classmethod
     def from_dict(cls, src_dict: Mapping[str, Any]) -> Self:
-        from ..models.lab_created import LabCreated
-        from ..models.lab_observed import LabObserved
-        from ..models.lab_stopped import LabStopped
+        from ..models.lab_created_known import LabCreatedKnown
+        from ..models.lab_created_unknown import LabCreatedUnknown
+        from ..models.lab_observed_known import LabObservedKnown
+        from ..models.lab_observed_unknown import LabObservedUnknown
+        from ..models.lab_stopped_known import LabStoppedKnown
+        from ..models.lab_stopped_unknown import LabStoppedUnknown
         from ..models.peer_health_observation import (
             PeerHealthObservation,
         )
@@ -89,7 +110,15 @@ class ResourceResult:
 
         def _parse_observation(
             data: object,
-        ) -> LabCreated | LabObserved | LabStopped | PeerHealthObservation:
+        ) -> (
+            LabCreatedKnown
+            | LabCreatedUnknown
+            | LabObservedKnown
+            | LabObservedUnknown
+            | LabStoppedKnown
+            | LabStoppedUnknown
+            | PeerHealthObservation
+        ):
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
@@ -103,24 +132,50 @@ class ResourceResult:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                componentsschemas_observation_type_1 = LabCreated.from_dict(data)
+                componentsschemas_lab_created_type_0 = LabCreatedKnown.from_dict(data)
 
-                return componentsschemas_observation_type_1
+                return componentsschemas_lab_created_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                componentsschemas_observation_type_2 = LabObserved.from_dict(data)
+                componentsschemas_lab_created_type_1 = LabCreatedUnknown.from_dict(data)
 
-                return componentsschemas_observation_type_2
+                return componentsschemas_lab_created_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                componentsschemas_lab_observed_type_0 = LabObservedKnown.from_dict(data)
+
+                return componentsschemas_lab_observed_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                componentsschemas_lab_observed_type_1 = LabObservedUnknown.from_dict(
+                    data
+                )
+
+                return componentsschemas_lab_observed_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                componentsschemas_lab_stopped_type_0 = LabStoppedKnown.from_dict(data)
+
+                return componentsschemas_lab_stopped_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             if not isinstance(data, dict):
                 raise TypeError()
-            componentsschemas_observation_type_3 = LabStopped.from_dict(data)
+            componentsschemas_lab_stopped_type_1 = LabStoppedUnknown.from_dict(data)
 
-            return componentsschemas_observation_type_3
+            return componentsschemas_lab_stopped_type_1
 
         observation = _parse_observation(d.pop("observation"))
 

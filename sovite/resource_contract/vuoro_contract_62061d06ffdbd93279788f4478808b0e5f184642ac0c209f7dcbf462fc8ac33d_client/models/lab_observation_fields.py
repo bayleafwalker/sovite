@@ -7,11 +7,6 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from typing_extensions import Self
 
-from ..models.lab_observation_fields_effect_outcome import (
-    LabObservationFieldsEffectOutcome,
-)
-from ..models.lab_observation_fields_state import LabObservationFieldsState
-
 T = TypeVar("T", bound="LabObservationFields")
 
 
@@ -23,8 +18,6 @@ class LabObservationFields:
         resource_domain_id (str):
         target_id (str):
         lab_id (str):
-        state (LabObservationFieldsState):
-        effect_outcome (LabObservationFieldsEffectOutcome):
         deadline (float):
     """
 
@@ -32,8 +25,6 @@ class LabObservationFields:
     resource_domain_id: str
     target_id: str
     lab_id: str
-    state: LabObservationFieldsState
-    effect_outcome: LabObservationFieldsEffectOutcome
     deadline: float
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -46,10 +37,6 @@ class LabObservationFields:
 
         lab_id = self.lab_id
 
-        state = self.state.value
-
-        effect_outcome = self.effect_outcome.value
-
         deadline = self.deadline
 
         field_dict: dict[str, Any] = {}
@@ -60,8 +47,6 @@ class LabObservationFields:
                 "resource_domain_id": resource_domain_id,
                 "target_id": target_id,
                 "lab_id": lab_id,
-                "state": state,
-                "effect_outcome": effect_outcome,
                 "deadline": deadline,
             }
         )
@@ -79,10 +64,6 @@ class LabObservationFields:
 
         lab_id = d.pop("lab_id")
 
-        state = LabObservationFieldsState(d.pop("state"))
-
-        effect_outcome = LabObservationFieldsEffectOutcome(d.pop("effect_outcome"))
-
         deadline = d.pop("deadline")
 
         lab_observation_fields = cls(
@@ -90,8 +71,6 @@ class LabObservationFields:
             resource_domain_id=resource_domain_id,
             target_id=target_id,
             lab_id=lab_id,
-            state=state,
-            effect_outcome=effect_outcome,
             deadline=deadline,
         )
 

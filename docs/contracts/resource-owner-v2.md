@@ -80,7 +80,9 @@ missing future create is UNKNOWN; stop must tombstone a missing create so a late
 queued create cannot start. Root-owned systemd TTL independently bounds cleanup.
 That host implementation and actual KVM qualification are separate prerequisites.
 The public projection omits unit, boot IDs, InvocationID and raw guest output.
-`effect_outcome: unknown` is explicit and never settles execution cost, completes
+The generated closed union binds unknown state to `effect_outcome: unknown`; known
+states require `effect_outcome: known`. Helper ABSENT before the original deadline
+is refused and becomes UNKNOWN. Unknown never settles execution cost, completes
 the Job, accepts Work or authorizes candidate publication.
 
 ## Installation and unknown outcomes

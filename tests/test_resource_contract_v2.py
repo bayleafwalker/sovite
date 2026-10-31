@@ -5,6 +5,7 @@ from importlib import import_module
 import json
 from pathlib import Path
 import sys
+import time
 
 import pytest
 
@@ -59,6 +60,22 @@ def test_actual_generated_sdk_all_seven_operations_and_closed_headers(owner):
         'observation_b64':base64.b64encode(raw).decode(),'release':'allowed'}).body=={'accepted':True,'state':'stored'}
     assert sdk.resource_result_read(Authorization='Bearer '+TOKEN,body={
         'execution':f['execution'],'request_id':selected['request_id']}).body['observation']==health()
+    lab=sdk.resource_submit(Authorization='Bearer '+TOKEN,body={
+        'execution':{**f['execution'],'operation_id':'sdk-lab-unknown'},
+        'resource':{'operation':'kvm-lab.create','target_id':'synthetic-lab'}}).body
+    assert sdk.resource_output_grant(Authorization='Bearer '+OPERATOR,body={
+        'workload_id':'actual-workload','principal_id':'operations','tenant_id':f['scope']['tenant_id'],
+        'workspace_id':WORKSPACE,'domain_id':DOMAIN,'target_id':'synthetic-lab',
+        'operation':'kvm-lab.create','policy_revision':POLICY_REVISION}).status==200
+    value={'schema_version':'sovite-resource-lab-created/v1','workspace_id':WORKSPACE,
+        'resource_domain_id':DOMAIN,'target_id':'synthetic-lab','operation':'kvm-lab.create',
+        'lab_id':lab['request_id'],'state':'unknown','effect_outcome':'unknown','deadline':time.time()+10}
+    raw=canonical(value)
+    assert sdk.resource_result(Authorization=auth,body={**binding,'request_id':lab['request_id'],
+        'fence_fingerprint':lab['fence_fingerprint'],'observation_digest':'sha256:'+hashlib.sha256(raw).hexdigest(),
+        'observation_b64':base64.b64encode(raw).decode(),'release':'allowed'}).body['accepted']
+    assert sdk.resource_result_read(Authorization='Bearer '+TOKEN,body={
+        'execution':f['execution'],'request_id':lab['request_id']}).body['observation']==value
     from vuoro_contracts import ContractError
     with pytest.raises(ContractError):sdk.resource_submit(Authorization='Bearer '+TOKEN,body={
         'execution':f['execution'],'resource':{'operation':'model-peer.health-read','target_id':'synthetic-daemon','url':'http://other'}})

@@ -7,38 +7,32 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from typing_extensions import Self
 
-from ..models.lab_observed_effect_outcome import LabObservedEffectOutcome
-from ..models.lab_observed_operation import LabObservedOperation
-from ..models.lab_observed_schema_version import LabObservedSchemaVersion
-from ..models.lab_observed_state import LabObservedState
+from ..models.lab_unknown_fields_effect_outcome import LabUnknownFieldsEffectOutcome
+from ..models.lab_unknown_fields_state import LabUnknownFieldsState
 
-T = TypeVar("T", bound="LabObserved")
+T = TypeVar("T", bound="LabUnknownFields")
 
 
 @_attrs_define
-class LabObserved:
+class LabUnknownFields:
     """
     Attributes:
         workspace_id (str):
         resource_domain_id (str):
         target_id (str):
         lab_id (str):
-        state (LabObservedState):
-        effect_outcome (LabObservedEffectOutcome):
         deadline (float):
-        schema_version (LabObservedSchemaVersion):
-        operation (LabObservedOperation):
+        state (LabUnknownFieldsState):
+        effect_outcome (LabUnknownFieldsEffectOutcome):
     """
 
     workspace_id: str
     resource_domain_id: str
     target_id: str
     lab_id: str
-    state: LabObservedState
-    effect_outcome: LabObservedEffectOutcome
     deadline: float
-    schema_version: LabObservedSchemaVersion
-    operation: LabObservedOperation
+    state: LabUnknownFieldsState
+    effect_outcome: LabUnknownFieldsEffectOutcome
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,15 +44,11 @@ class LabObserved:
 
         lab_id = self.lab_id
 
+        deadline = self.deadline
+
         state = self.state.value
 
         effect_outcome = self.effect_outcome.value
-
-        deadline = self.deadline
-
-        schema_version = self.schema_version.value
-
-        operation = self.operation.value
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -68,11 +58,9 @@ class LabObserved:
                 "resource_domain_id": resource_domain_id,
                 "target_id": target_id,
                 "lab_id": lab_id,
+                "deadline": deadline,
                 "state": state,
                 "effect_outcome": effect_outcome,
-                "deadline": deadline,
-                "schema_version": schema_version,
-                "operation": operation,
             }
         )
 
@@ -89,30 +77,24 @@ class LabObserved:
 
         lab_id = d.pop("lab_id")
 
-        state = LabObservedState(d.pop("state"))
-
-        effect_outcome = LabObservedEffectOutcome(d.pop("effect_outcome"))
-
         deadline = d.pop("deadline")
 
-        schema_version = LabObservedSchemaVersion(d.pop("schema_version"))
+        state = LabUnknownFieldsState(d.pop("state"))
 
-        operation = LabObservedOperation(d.pop("operation"))
+        effect_outcome = LabUnknownFieldsEffectOutcome(d.pop("effect_outcome"))
 
-        lab_observed = cls(
+        lab_unknown_fields = cls(
             workspace_id=workspace_id,
             resource_domain_id=resource_domain_id,
             target_id=target_id,
             lab_id=lab_id,
+            deadline=deadline,
             state=state,
             effect_outcome=effect_outcome,
-            deadline=deadline,
-            schema_version=schema_version,
-            operation=operation,
         )
 
-        lab_observed.additional_properties = d
-        return lab_observed
+        lab_unknown_fields.additional_properties = d
+        return lab_unknown_fields
 
     @property
     def additional_keys(self) -> list[str]:

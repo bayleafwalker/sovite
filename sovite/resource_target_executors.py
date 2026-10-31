@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ssl
+import time
 
 import httpx
 
@@ -44,6 +45,7 @@ class FixedTargetExecutors:
             value=decode(raw);validate_schema('LabHostObservation',value)
             for key in ('operation_id','create_operation_id','template_id','template_sha256','deadline'):
                 need(value[key]==request[key],'resource_helper_invalid')
+            need(value['state']!='absent' or time.time()>=request['deadline'],'resource_helper_invalid')
             expected='cloud-kvm-lab-'+hashlib.sha256(request['create_operation_id'].encode()).hexdigest()+'.service'
             need(value['unit']==expected,'resource_helper_invalid')
             need(value['created_boot_id'] in {None,value['host_boot_id']} or value['state']=='unknown',

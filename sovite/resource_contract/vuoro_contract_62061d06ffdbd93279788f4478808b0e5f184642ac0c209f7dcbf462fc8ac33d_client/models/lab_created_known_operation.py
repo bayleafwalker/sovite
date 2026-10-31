@@ -1,8 +1,8 @@
 from enum import StrEnum
 
 
-class LabObservedOperation(StrEnum):
-    KVM_LAB_OBSERVE = "kvm-lab.observe"
+class LabCreatedKnownOperation(StrEnum):
+    KVM_LAB_CREATE = "kvm-lab.create"
 
     def __str__(self) -> str:
         return str(self.value)

@@ -3,7 +3,7 @@ from functools import lru_cache
 from importlib import import_module, resources
 
 PACKAGE = 'sovite.resource_contract.vuoro_contract_62061d06ffdbd93279788f4478808b0e5f184642ac0c209f7dcbf462fc8ac33d_client'
-INTEGRITY = 'e1cea47d4a7939ca21397ea922428f2f4c5c27ec8e899235353b92da366067a7'
+INTEGRITY = 'e49351db7ccd082e01a275df0be7a8200896d1faed57827f03081988ea33099c'
 OPERATIONS = {"scope":"resourceScopeInstall","output_grant":"resourceOutputGrant",
     "submit":"resourceSubmit","poll":"resourcePoll","current":"resourceCurrent",
     "result":"resourceResult","result/read":"resourceResultRead"}

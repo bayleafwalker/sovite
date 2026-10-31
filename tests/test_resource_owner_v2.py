@@ -204,3 +204,17 @@ def test_poll_advances_bounded_invalid_storage_page_without_starving_valid_reque
     second=f['client'].post(PREFIX+'poll',headers=f['gateway'],json={'after':cursor})
     assert [row['request_id'] for row in second.json()['requests']]==[selected['request_id']]
     assert second.json()['next_cursor'] is None
+
+
+@pytest.mark.parametrize('state,outcome',[('unknown','known'),('running','unknown'),('stopped','unknown'),('absent','unknown')])
+def test_lab_observation_cannot_mislabel_unknown_or_known_effect(owner,state,outcome):
+    f=setup(owner)
+    selected=submit(f,{'operation':'kvm-lab.create','target_id':'synthetic-lab'}).json()
+    grant(f,'kvm-lab.create','synthetic-lab')
+    value={'schema_version':'sovite-resource-lab-created/v1','workspace_id':WORKSPACE,
+        'resource_domain_id':DOMAIN,'target_id':'synthetic-lab','operation':'kvm-lab.create',
+        'lab_id':selected['request_id'],'state':state,'effect_outcome':outcome,'deadline':time.time()+10}
+    response=deliver(f,selected,value)
+    assert response.status_code==422,response.json()
+    with owner.platform.db.sessions() as session:
+        assert session.get(ResourceOwnerRequest,selected['request_id']).observation is None

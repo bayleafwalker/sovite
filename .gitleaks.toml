@@ -40,6 +40,6 @@ condition = "AND"
 [[allowlists]]
 description = "Generated closed resource inventory contains only these exact public file SHA-256 values"
 paths = ['''^sovite/resource_contract/vuoro_contract_62061d06ffdbd93279788f4478808b0e5f184642ac0c209f7dcbf462fc8ac33d_client/data/integrity\.json$''']
-regexes = ['''^\{"files":\{"openapi/contract\.openapi\.json":"a609e7653cb77b4207770df249b97611f91754f501a7461a9ffa11555ea3fdac","operation\-manifest\.json":"8250d6651e29261815a3b578ddc679ec2121aee1558fbf413182103f0190ae31","schema/contract\.schema\.json":"c579cd66ec6e15f7facc94469caee507f6253fe12593a8c68ca9033064e246d6"\},"schemaVersion":"vuoro\-contract\-integrity/v1"\}$''']
+regexes = ['''^\{"files":\{"openapi/contract\.openapi\.json":"f9350038c30fa41317a6d094448d87e0377515387353d52321e8e8a9f8bf7955","operation\-manifest\.json":"f37c99f37df3e6fcc7eae5f6d6b4bf549f2f7c4123c8cbd4913af724dcd7f17f","schema/contract\.schema\.json":"cc6c37f098936baf999c81deb9e55f7b88bcf1995fa8fe2b563bb97aa839dd6f"\},"schemaVersion":"vuoro\-contract\-integrity/v1"\}$''']
 regexTarget = "line"
 condition = "AND"

@@ -135,3 +135,19 @@ def test_oversized_helper_response_kills_client_without_retry(monkeypatch):
     monkeypatch.setattr(asyncio,'create_subprocess_exec',spawn)
     with pytest.raises(ResourceTargetError):asyncio.run(FixedTargetExecutors().lab(request()))
     assert len(calls)==1 and processes[0].killed
+
+
+def test_helper_cannot_report_absence_before_original_create_deadline(monkeypatch):
+    import time
+    value=request();value['deadline']=time.time()+60
+    reply={**{key:item for key,item in value.items() if key!='verb'},'schema_version':'cloud.kvm-lab-observation.v1',
+        'state':'absent','host_boot_id':'12345678-1234-1234-1234-123456789abc','created_boot_id':None,
+        'unit':'cloud-kvm-lab-'+hashlib.sha256(value['create_operation_id'].encode()).hexdigest()+'.service',
+        'invocation_id':None}
+    calls=[]
+    async def spawn(*args,**kwargs):calls.append(args);return Process(canonical(reply))
+    monkeypatch.setattr(asyncio,'create_subprocess_exec',spawn)
+    with pytest.raises(ResourceTargetError):asyncio.run(FixedTargetExecutors().lab(value))
+    assert len(calls)==1
+    value['deadline']=reply['deadline']=time.time()-1
+    assert asyncio.run(FixedTargetExecutors().lab(value))['state']=='absent'

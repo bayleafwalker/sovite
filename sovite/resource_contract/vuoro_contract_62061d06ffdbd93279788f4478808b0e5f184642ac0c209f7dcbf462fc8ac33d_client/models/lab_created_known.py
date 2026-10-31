@@ -7,38 +7,38 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from typing_extensions import Self
 
-from ..models.lab_created_effect_outcome import LabCreatedEffectOutcome
-from ..models.lab_created_operation import LabCreatedOperation
-from ..models.lab_created_schema_version import LabCreatedSchemaVersion
-from ..models.lab_created_state import LabCreatedState
+from ..models.lab_created_known_effect_outcome import LabCreatedKnownEffectOutcome
+from ..models.lab_created_known_operation import LabCreatedKnownOperation
+from ..models.lab_created_known_schema_version import LabCreatedKnownSchemaVersion
+from ..models.lab_created_known_state import LabCreatedKnownState
 
-T = TypeVar("T", bound="LabCreated")
+T = TypeVar("T", bound="LabCreatedKnown")
 
 
 @_attrs_define
-class LabCreated:
+class LabCreatedKnown:
     """
     Attributes:
         workspace_id (str):
         resource_domain_id (str):
         target_id (str):
         lab_id (str):
-        state (LabCreatedState):
-        effect_outcome (LabCreatedEffectOutcome):
         deadline (float):
-        schema_version (LabCreatedSchemaVersion):
-        operation (LabCreatedOperation):
+        state (LabCreatedKnownState):
+        effect_outcome (LabCreatedKnownEffectOutcome):
+        schema_version (LabCreatedKnownSchemaVersion):
+        operation (LabCreatedKnownOperation):
     """
 
     workspace_id: str
     resource_domain_id: str
     target_id: str
     lab_id: str
-    state: LabCreatedState
-    effect_outcome: LabCreatedEffectOutcome
     deadline: float
-    schema_version: LabCreatedSchemaVersion
-    operation: LabCreatedOperation
+    state: LabCreatedKnownState
+    effect_outcome: LabCreatedKnownEffectOutcome
+    schema_version: LabCreatedKnownSchemaVersion
+    operation: LabCreatedKnownOperation
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,11 +50,11 @@ class LabCreated:
 
         lab_id = self.lab_id
 
+        deadline = self.deadline
+
         state = self.state.value
 
         effect_outcome = self.effect_outcome.value
-
-        deadline = self.deadline
 
         schema_version = self.schema_version.value
 
@@ -68,9 +68,9 @@ class LabCreated:
                 "resource_domain_id": resource_domain_id,
                 "target_id": target_id,
                 "lab_id": lab_id,
+                "deadline": deadline,
                 "state": state,
                 "effect_outcome": effect_outcome,
-                "deadline": deadline,
                 "schema_version": schema_version,
                 "operation": operation,
             }
@@ -89,30 +89,30 @@ class LabCreated:
 
         lab_id = d.pop("lab_id")
 
-        state = LabCreatedState(d.pop("state"))
-
-        effect_outcome = LabCreatedEffectOutcome(d.pop("effect_outcome"))
-
         deadline = d.pop("deadline")
 
-        schema_version = LabCreatedSchemaVersion(d.pop("schema_version"))
+        state = LabCreatedKnownState(d.pop("state"))
 
-        operation = LabCreatedOperation(d.pop("operation"))
+        effect_outcome = LabCreatedKnownEffectOutcome(d.pop("effect_outcome"))
 
-        lab_created = cls(
+        schema_version = LabCreatedKnownSchemaVersion(d.pop("schema_version"))
+
+        operation = LabCreatedKnownOperation(d.pop("operation"))
+
+        lab_created_known = cls(
             workspace_id=workspace_id,
             resource_domain_id=resource_domain_id,
             target_id=target_id,
             lab_id=lab_id,
+            deadline=deadline,
             state=state,
             effect_outcome=effect_outcome,
-            deadline=deadline,
             schema_version=schema_version,
             operation=operation,
         )
 
-        lab_created.additional_properties = d
-        return lab_created
+        lab_created_known.additional_properties = d
+        return lab_created_known
 
     @property
     def additional_keys(self) -> list[str]:

@@ -1,9 +1,8 @@
 from enum import StrEnum
 
 
-class LabObservationFieldsEffectOutcome(StrEnum):
+class LabObservedKnownEffectOutcome(StrEnum):
     KNOWN = "known"
-    UNKNOWN = "unknown"
 
     def __str__(self) -> str:
         return str(self.value)

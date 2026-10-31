@@ -33,11 +33,16 @@ from .lab_configuration_kind import LabConfigurationKind
 from .lab_configuration_template_id import LabConfigurationTemplateId
 from .lab_create_selector import LabCreateSelector
 from .lab_create_selector_operation import LabCreateSelectorOperation
-from .lab_created import LabCreated
-from .lab_created_effect_outcome import LabCreatedEffectOutcome
-from .lab_created_operation import LabCreatedOperation
-from .lab_created_schema_version import LabCreatedSchemaVersion
-from .lab_created_state import LabCreatedState
+from .lab_created_known import LabCreatedKnown
+from .lab_created_known_effect_outcome import LabCreatedKnownEffectOutcome
+from .lab_created_known_operation import LabCreatedKnownOperation
+from .lab_created_known_schema_version import LabCreatedKnownSchemaVersion
+from .lab_created_known_state import LabCreatedKnownState
+from .lab_created_unknown import LabCreatedUnknown
+from .lab_created_unknown_effect_outcome import LabCreatedUnknownEffectOutcome
+from .lab_created_unknown_operation import LabCreatedUnknownOperation
+from .lab_created_unknown_schema_version import LabCreatedUnknownSchemaVersion
+from .lab_created_unknown_state import LabCreatedUnknownState
 from .lab_entry import LabEntry
 from .lab_entry_kind import LabEntryKind
 from .lab_host_observation import LabHostObservation
@@ -48,23 +53,37 @@ from .lab_host_request import LabHostRequest
 from .lab_host_request_schema_version import LabHostRequestSchemaVersion
 from .lab_host_request_template_id import LabHostRequestTemplateId
 from .lab_host_request_verb import LabHostRequestVerb
+from .lab_known_fields import LabKnownFields
+from .lab_known_fields_effect_outcome import LabKnownFieldsEffectOutcome
+from .lab_known_fields_state import LabKnownFieldsState
 from .lab_observation_fields import LabObservationFields
-from .lab_observation_fields_effect_outcome import LabObservationFieldsEffectOutcome
-from .lab_observation_fields_state import LabObservationFieldsState
 from .lab_observe_selector import LabObserveSelector
 from .lab_observe_selector_operation import LabObserveSelectorOperation
-from .lab_observed import LabObserved
-from .lab_observed_effect_outcome import LabObservedEffectOutcome
-from .lab_observed_operation import LabObservedOperation
-from .lab_observed_schema_version import LabObservedSchemaVersion
-from .lab_observed_state import LabObservedState
+from .lab_observed_known import LabObservedKnown
+from .lab_observed_known_effect_outcome import LabObservedKnownEffectOutcome
+from .lab_observed_known_operation import LabObservedKnownOperation
+from .lab_observed_known_schema_version import LabObservedKnownSchemaVersion
+from .lab_observed_known_state import LabObservedKnownState
+from .lab_observed_unknown import LabObservedUnknown
+from .lab_observed_unknown_effect_outcome import LabObservedUnknownEffectOutcome
+from .lab_observed_unknown_operation import LabObservedUnknownOperation
+from .lab_observed_unknown_schema_version import LabObservedUnknownSchemaVersion
+from .lab_observed_unknown_state import LabObservedUnknownState
 from .lab_stop_selector import LabStopSelector
 from .lab_stop_selector_operation import LabStopSelectorOperation
-from .lab_stopped import LabStopped
-from .lab_stopped_effect_outcome import LabStoppedEffectOutcome
-from .lab_stopped_operation import LabStoppedOperation
-from .lab_stopped_schema_version import LabStoppedSchemaVersion
-from .lab_stopped_state import LabStoppedState
+from .lab_stopped_known import LabStoppedKnown
+from .lab_stopped_known_effect_outcome import LabStoppedKnownEffectOutcome
+from .lab_stopped_known_operation import LabStoppedKnownOperation
+from .lab_stopped_known_schema_version import LabStoppedKnownSchemaVersion
+from .lab_stopped_known_state import LabStoppedKnownState
+from .lab_stopped_unknown import LabStoppedUnknown
+from .lab_stopped_unknown_effect_outcome import LabStoppedUnknownEffectOutcome
+from .lab_stopped_unknown_operation import LabStoppedUnknownOperation
+from .lab_stopped_unknown_schema_version import LabStoppedUnknownSchemaVersion
+from .lab_stopped_unknown_state import LabStoppedUnknownState
+from .lab_unknown_fields import LabUnknownFields
+from .lab_unknown_fields_effect_outcome import LabUnknownFieldsEffectOutcome
+from .lab_unknown_fields_state import LabUnknownFieldsState
 from .output_grant_installed import OutputGrantInstalled
 from .output_grant_installed_schema_version import OutputGrantInstalledSchemaVersion
 from .output_grant_request import OutputGrantRequest
@@ -131,11 +150,16 @@ __all__ = (
     "LabConfigurationTemplateId",
     "LabCreateSelector",
     "LabCreateSelectorOperation",
-    "LabCreated",
-    "LabCreatedEffectOutcome",
-    "LabCreatedOperation",
-    "LabCreatedSchemaVersion",
-    "LabCreatedState",
+    "LabCreatedKnown",
+    "LabCreatedKnownEffectOutcome",
+    "LabCreatedKnownOperation",
+    "LabCreatedKnownSchemaVersion",
+    "LabCreatedKnownState",
+    "LabCreatedUnknown",
+    "LabCreatedUnknownEffectOutcome",
+    "LabCreatedUnknownOperation",
+    "LabCreatedUnknownSchemaVersion",
+    "LabCreatedUnknownState",
     "LabEntry",
     "LabEntryKind",
     "LabHostObservation",
@@ -146,23 +170,37 @@ __all__ = (
     "LabHostRequestSchemaVersion",
     "LabHostRequestTemplateId",
     "LabHostRequestVerb",
+    "LabKnownFields",
+    "LabKnownFieldsEffectOutcome",
+    "LabKnownFieldsState",
     "LabObservationFields",
-    "LabObservationFieldsEffectOutcome",
-    "LabObservationFieldsState",
     "LabObserveSelector",
     "LabObserveSelectorOperation",
-    "LabObserved",
-    "LabObservedEffectOutcome",
-    "LabObservedOperation",
-    "LabObservedSchemaVersion",
-    "LabObservedState",
+    "LabObservedKnown",
+    "LabObservedKnownEffectOutcome",
+    "LabObservedKnownOperation",
+    "LabObservedKnownSchemaVersion",
+    "LabObservedKnownState",
+    "LabObservedUnknown",
+    "LabObservedUnknownEffectOutcome",
+    "LabObservedUnknownOperation",
+    "LabObservedUnknownSchemaVersion",
+    "LabObservedUnknownState",
     "LabStopSelector",
     "LabStopSelectorOperation",
-    "LabStopped",
-    "LabStoppedEffectOutcome",
-    "LabStoppedOperation",
-    "LabStoppedSchemaVersion",
-    "LabStoppedState",
+    "LabStoppedKnown",
+    "LabStoppedKnownEffectOutcome",
+    "LabStoppedKnownOperation",
+    "LabStoppedKnownSchemaVersion",
+    "LabStoppedKnownState",
+    "LabStoppedUnknown",
+    "LabStoppedUnknownEffectOutcome",
+    "LabStoppedUnknownOperation",
+    "LabStoppedUnknownSchemaVersion",
+    "LabStoppedUnknownState",
+    "LabUnknownFields",
+    "LabUnknownFieldsEffectOutcome",
+    "LabUnknownFieldsState",
     "OutputGrantInstalled",
     "OutputGrantInstalledSchemaVersion",
     "OutputGrantRequest",

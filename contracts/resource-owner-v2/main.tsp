@@ -166,25 +166,51 @@ model LabObservationFields {
   resource_domain_id: Identity;
   target_id: Identity;
   lab_id: Sha256;
-  state: "running" | "stopped" | "absent" | "unknown";
-  effect_outcome: "known" | "unknown";
   deadline: Epoch;
 }
-model LabCreated {
+model LabKnownFields {
   ...LabObservationFields;
+  state: "running" | "stopped" | "absent";
+  effect_outcome: "known";
+}
+model LabUnknownFields {
+  ...LabObservationFields;
+  state: "unknown";
+  effect_outcome: "unknown";
+}
+model LabCreatedKnown {
+  ...LabKnownFields;
   schema_version: "sovite-resource-lab-created/v1";
   operation: "kvm-lab.create";
 }
-model LabObserved {
-  ...LabObservationFields;
+model LabCreatedUnknown {
+  ...LabUnknownFields;
+  schema_version: "sovite-resource-lab-created/v1";
+  operation: "kvm-lab.create";
+}
+union LabCreated { known: LabCreatedKnown, uncertain: LabCreatedUnknown }
+model LabObservedKnown {
+  ...LabKnownFields;
   schema_version: "sovite-resource-lab-observed/v1";
   operation: "kvm-lab.observe";
 }
-model LabStopped {
-  ...LabObservationFields;
+model LabObservedUnknown {
+  ...LabUnknownFields;
+  schema_version: "sovite-resource-lab-observed/v1";
+  operation: "kvm-lab.observe";
+}
+union LabObserved { known: LabObservedKnown, uncertain: LabObservedUnknown }
+model LabStoppedKnown {
+  ...LabKnownFields;
   schema_version: "sovite-resource-lab-stopped/v1";
   operation: "kvm-lab.stop";
 }
+model LabStoppedUnknown {
+  ...LabUnknownFields;
+  schema_version: "sovite-resource-lab-stopped/v1";
+  operation: "kvm-lab.stop";
+}
+union LabStopped { known: LabStoppedKnown, uncertain: LabStoppedUnknown }
 union Observation { health: PeerHealthObservation, create: LabCreated, observe: LabObserved, stop: LabStopped }
 model ResourceResult {
   observation: Observation;

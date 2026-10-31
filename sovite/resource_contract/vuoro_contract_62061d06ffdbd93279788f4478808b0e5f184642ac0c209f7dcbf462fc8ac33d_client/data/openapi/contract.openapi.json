@@ -1315,15 +1315,25 @@
         }
       },
       "LabCreated": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/LabCreatedKnown"
+          },
+          {
+            "$ref": "#/components/schemas/LabCreatedUnknown"
+          }
+        ]
+      },
+      "LabCreatedKnown": {
         "type": "object",
         "required": [
           "workspace_id",
           "resource_domain_id",
           "target_id",
           "lab_id",
+          "deadline",
           "state",
           "effect_outcome",
-          "deadline",
           "schema_version",
           "operation"
         ],
@@ -1340,24 +1350,80 @@
           "lab_id": {
             "$ref": "#/components/schemas/Sha256"
           },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
           "state": {
             "type": "string",
             "enum": [
               "running",
               "stopped",
-              "absent",
+              "absent"
+            ]
+          },
+          "effect_outcome": {
+            "type": "string",
+            "enum": [
+              "known"
+            ]
+          },
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-lab-created/v1"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.create"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabCreatedUnknown": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "deadline",
+          "state",
+          "effect_outcome",
+          "schema_version",
+          "operation"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
               "unknown"
             ]
           },
           "effect_outcome": {
             "type": "string",
             "enum": [
-              "known",
               "unknown"
             ]
-          },
-          "deadline": {
-            "$ref": "#/components/schemas/Epoch"
           },
           "schema_version": {
             "type": "string",
@@ -1542,16 +1608,16 @@
           "not": {}
         }
       },
-      "LabObservationFields": {
+      "LabKnownFields": {
         "type": "object",
         "required": [
           "workspace_id",
           "resource_domain_id",
           "target_id",
           "lab_id",
+          "deadline",
           "state",
-          "effect_outcome",
-          "deadline"
+          "effect_outcome"
         ],
         "properties": {
           "workspace_id": {
@@ -1566,21 +1632,49 @@
           "lab_id": {
             "$ref": "#/components/schemas/Sha256"
           },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
           "state": {
             "type": "string",
             "enum": [
               "running",
               "stopped",
-              "absent",
-              "unknown"
+              "absent"
             ]
           },
           "effect_outcome": {
             "type": "string",
             "enum": [
-              "known",
-              "unknown"
+              "known"
             ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabObservationFields": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "deadline"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
           },
           "deadline": {
             "$ref": "#/components/schemas/Epoch"
@@ -1616,15 +1710,25 @@
         }
       },
       "LabObserved": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/LabObservedKnown"
+          },
+          {
+            "$ref": "#/components/schemas/LabObservedUnknown"
+          }
+        ]
+      },
+      "LabObservedKnown": {
         "type": "object",
         "required": [
           "workspace_id",
           "resource_domain_id",
           "target_id",
           "lab_id",
+          "deadline",
           "state",
           "effect_outcome",
-          "deadline",
           "schema_version",
           "operation"
         ],
@@ -1641,24 +1745,80 @@
           "lab_id": {
             "$ref": "#/components/schemas/Sha256"
           },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
           "state": {
             "type": "string",
             "enum": [
               "running",
               "stopped",
-              "absent",
+              "absent"
+            ]
+          },
+          "effect_outcome": {
+            "type": "string",
+            "enum": [
+              "known"
+            ]
+          },
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-lab-observed/v1"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.observe"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabObservedUnknown": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "deadline",
+          "state",
+          "effect_outcome",
+          "schema_version",
+          "operation"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
               "unknown"
             ]
           },
           "effect_outcome": {
             "type": "string",
             "enum": [
-              "known",
               "unknown"
             ]
-          },
-          "deadline": {
-            "$ref": "#/components/schemas/Epoch"
           },
           "schema_version": {
             "type": "string",
@@ -1703,15 +1863,25 @@
         }
       },
       "LabStopped": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/LabStoppedKnown"
+          },
+          {
+            "$ref": "#/components/schemas/LabStoppedUnknown"
+          }
+        ]
+      },
+      "LabStoppedKnown": {
         "type": "object",
         "required": [
           "workspace_id",
           "resource_domain_id",
           "target_id",
           "lab_id",
+          "deadline",
           "state",
           "effect_outcome",
-          "deadline",
           "schema_version",
           "operation"
         ],
@@ -1728,24 +1898,22 @@
           "lab_id": {
             "$ref": "#/components/schemas/Sha256"
           },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
           "state": {
             "type": "string",
             "enum": [
               "running",
               "stopped",
-              "absent",
-              "unknown"
+              "absent"
             ]
           },
           "effect_outcome": {
             "type": "string",
             "enum": [
-              "known",
-              "unknown"
+              "known"
             ]
-          },
-          "deadline": {
-            "$ref": "#/components/schemas/Epoch"
           },
           "schema_version": {
             "type": "string",
@@ -1757,6 +1925,108 @@
             "type": "string",
             "enum": [
               "kvm-lab.stop"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabStoppedUnknown": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "deadline",
+          "state",
+          "effect_outcome",
+          "schema_version",
+          "operation"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          },
+          "effect_outcome": {
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          },
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-resource-lab-stopped/v1"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "kvm-lab.stop"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "LabUnknownFields": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "resource_domain_id",
+          "target_id",
+          "lab_id",
+          "deadline",
+          "state",
+          "effect_outcome"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "resource_domain_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "lab_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/Epoch"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          },
+          "effect_outcome": {
+            "type": "string",
+            "enum": [
+              "unknown"
             ]
           }
         },

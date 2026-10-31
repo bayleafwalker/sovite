@@ -1056,38 +1056,6 @@
                 "lab_id": {
                     "$ref": "Sha256.json"
                 },
-                "state": {
-                    "anyOf": [
-                        {
-                            "type": "string",
-                            "const": "running"
-                        },
-                        {
-                            "type": "string",
-                            "const": "stopped"
-                        },
-                        {
-                            "type": "string",
-                            "const": "absent"
-                        },
-                        {
-                            "type": "string",
-                            "const": "unknown"
-                        }
-                    ]
-                },
-                "effect_outcome": {
-                    "anyOf": [
-                        {
-                            "type": "string",
-                            "const": "known"
-                        },
-                        {
-                            "type": "string",
-                            "const": "unknown"
-                        }
-                    ]
-                },
                 "deadline": {
                     "$ref": "Epoch.json"
                 }
@@ -1097,17 +1065,15 @@
                 "resource_domain_id",
                 "target_id",
                 "lab_id",
-                "state",
-                "effect_outcome",
                 "deadline"
             ],
             "unevaluatedProperties": {
                 "not": {}
             }
         },
-        "LabCreated": {
+        "LabKnownFields": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$id": "LabCreated.json",
+            "$id": "LabKnownFields.json",
             "type": "object",
             "properties": {
                 "workspace_id": {
@@ -1122,6 +1088,9 @@
                 "lab_id": {
                     "$ref": "Sha256.json"
                 },
+                "deadline": {
+                    "$ref": "Epoch.json"
+                },
                 "state": {
                     "anyOf": [
                         {
@@ -1135,27 +1104,108 @@
                         {
                             "type": "string",
                             "const": "absent"
-                        },
-                        {
-                            "type": "string",
-                            "const": "unknown"
                         }
                     ]
                 },
                 "effect_outcome": {
-                    "anyOf": [
-                        {
-                            "type": "string",
-                            "const": "known"
-                        },
-                        {
-                            "type": "string",
-                            "const": "unknown"
-                        }
-                    ]
+                    "type": "string",
+                    "const": "known"
+                }
+            },
+            "required": [
+                "workspace_id",
+                "resource_domain_id",
+                "target_id",
+                "lab_id",
+                "deadline",
+                "state",
+                "effect_outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LabUnknownFields": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "LabUnknownFields.json",
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "resource_domain_id": {
+                    "$ref": "Identity.json"
+                },
+                "target_id": {
+                    "$ref": "Identity.json"
+                },
+                "lab_id": {
+                    "$ref": "Sha256.json"
                 },
                 "deadline": {
                     "$ref": "Epoch.json"
+                },
+                "state": {
+                    "type": "string",
+                    "const": "unknown"
+                },
+                "effect_outcome": {
+                    "type": "string",
+                    "const": "unknown"
+                }
+            },
+            "required": [
+                "workspace_id",
+                "resource_domain_id",
+                "target_id",
+                "lab_id",
+                "deadline",
+                "state",
+                "effect_outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LabCreatedKnown": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "LabCreatedKnown.json",
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "resource_domain_id": {
+                    "$ref": "Identity.json"
+                },
+                "target_id": {
+                    "$ref": "Identity.json"
+                },
+                "lab_id": {
+                    "$ref": "Sha256.json"
+                },
+                "deadline": {
+                    "$ref": "Epoch.json"
+                },
+                "state": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "running"
+                        },
+                        {
+                            "type": "string",
+                            "const": "stopped"
+                        },
+                        {
+                            "type": "string",
+                            "const": "absent"
+                        }
+                    ]
+                },
+                "effect_outcome": {
+                    "type": "string",
+                    "const": "known"
                 },
                 "schema_version": {
                     "type": "string",
@@ -1171,9 +1221,9 @@
                 "resource_domain_id",
                 "target_id",
                 "lab_id",
+                "deadline",
                 "state",
                 "effect_outcome",
-                "deadline",
                 "schema_version",
                 "operation"
             ],
@@ -1181,9 +1231,9 @@
                 "not": {}
             }
         },
-        "LabObserved": {
+        "LabCreatedUnknown": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$id": "LabObserved.json",
+            "$id": "LabCreatedUnknown.json",
             "type": "object",
             "properties": {
                 "workspace_id": {
@@ -1198,6 +1248,61 @@
                 "lab_id": {
                     "$ref": "Sha256.json"
                 },
+                "deadline": {
+                    "$ref": "Epoch.json"
+                },
+                "state": {
+                    "type": "string",
+                    "const": "unknown"
+                },
+                "effect_outcome": {
+                    "type": "string",
+                    "const": "unknown"
+                },
+                "schema_version": {
+                    "type": "string",
+                    "const": "sovite-resource-lab-created/v1"
+                },
+                "operation": {
+                    "type": "string",
+                    "const": "kvm-lab.create"
+                }
+            },
+            "required": [
+                "workspace_id",
+                "resource_domain_id",
+                "target_id",
+                "lab_id",
+                "deadline",
+                "state",
+                "effect_outcome",
+                "schema_version",
+                "operation"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LabObservedKnown": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "LabObservedKnown.json",
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "resource_domain_id": {
+                    "$ref": "Identity.json"
+                },
+                "target_id": {
+                    "$ref": "Identity.json"
+                },
+                "lab_id": {
+                    "$ref": "Sha256.json"
+                },
+                "deadline": {
+                    "$ref": "Epoch.json"
+                },
                 "state": {
                     "anyOf": [
                         {
@@ -1211,27 +1316,12 @@
                         {
                             "type": "string",
                             "const": "absent"
-                        },
-                        {
-                            "type": "string",
-                            "const": "unknown"
                         }
                     ]
                 },
                 "effect_outcome": {
-                    "anyOf": [
-                        {
-                            "type": "string",
-                            "const": "known"
-                        },
-                        {
-                            "type": "string",
-                            "const": "unknown"
-                        }
-                    ]
-                },
-                "deadline": {
-                    "$ref": "Epoch.json"
+                    "type": "string",
+                    "const": "known"
                 },
                 "schema_version": {
                     "type": "string",
@@ -1247,9 +1337,9 @@
                 "resource_domain_id",
                 "target_id",
                 "lab_id",
+                "deadline",
                 "state",
                 "effect_outcome",
-                "deadline",
                 "schema_version",
                 "operation"
             ],
@@ -1257,9 +1347,9 @@
                 "not": {}
             }
         },
-        "LabStopped": {
+        "LabObservedUnknown": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$id": "LabStopped.json",
+            "$id": "LabObservedUnknown.json",
             "type": "object",
             "properties": {
                 "workspace_id": {
@@ -1274,6 +1364,61 @@
                 "lab_id": {
                     "$ref": "Sha256.json"
                 },
+                "deadline": {
+                    "$ref": "Epoch.json"
+                },
+                "state": {
+                    "type": "string",
+                    "const": "unknown"
+                },
+                "effect_outcome": {
+                    "type": "string",
+                    "const": "unknown"
+                },
+                "schema_version": {
+                    "type": "string",
+                    "const": "sovite-resource-lab-observed/v1"
+                },
+                "operation": {
+                    "type": "string",
+                    "const": "kvm-lab.observe"
+                }
+            },
+            "required": [
+                "workspace_id",
+                "resource_domain_id",
+                "target_id",
+                "lab_id",
+                "deadline",
+                "state",
+                "effect_outcome",
+                "schema_version",
+                "operation"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LabStoppedKnown": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "LabStoppedKnown.json",
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "resource_domain_id": {
+                    "$ref": "Identity.json"
+                },
+                "target_id": {
+                    "$ref": "Identity.json"
+                },
+                "lab_id": {
+                    "$ref": "Sha256.json"
+                },
+                "deadline": {
+                    "$ref": "Epoch.json"
+                },
                 "state": {
                     "anyOf": [
                         {
@@ -1287,27 +1432,12 @@
                         {
                             "type": "string",
                             "const": "absent"
-                        },
-                        {
-                            "type": "string",
-                            "const": "unknown"
                         }
                     ]
                 },
                 "effect_outcome": {
-                    "anyOf": [
-                        {
-                            "type": "string",
-                            "const": "known"
-                        },
-                        {
-                            "type": "string",
-                            "const": "unknown"
-                        }
-                    ]
-                },
-                "deadline": {
-                    "$ref": "Epoch.json"
+                    "type": "string",
+                    "const": "known"
                 },
                 "schema_version": {
                     "type": "string",
@@ -1323,9 +1453,61 @@
                 "resource_domain_id",
                 "target_id",
                 "lab_id",
+                "deadline",
                 "state",
                 "effect_outcome",
+                "schema_version",
+                "operation"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LabStoppedUnknown": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "LabStoppedUnknown.json",
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "resource_domain_id": {
+                    "$ref": "Identity.json"
+                },
+                "target_id": {
+                    "$ref": "Identity.json"
+                },
+                "lab_id": {
+                    "$ref": "Sha256.json"
+                },
+                "deadline": {
+                    "$ref": "Epoch.json"
+                },
+                "state": {
+                    "type": "string",
+                    "const": "unknown"
+                },
+                "effect_outcome": {
+                    "type": "string",
+                    "const": "unknown"
+                },
+                "schema_version": {
+                    "type": "string",
+                    "const": "sovite-resource-lab-stopped/v1"
+                },
+                "operation": {
+                    "type": "string",
+                    "const": "kvm-lab.stop"
+                }
+            },
+            "required": [
+                "workspace_id",
+                "resource_domain_id",
+                "target_id",
+                "lab_id",
                 "deadline",
+                "state",
+                "effect_outcome",
                 "schema_version",
                 "operation"
             ],
@@ -1393,6 +1575,42 @@
                 },
                 {
                     "$ref": "LabStopped.json"
+                }
+            ]
+        },
+        "LabCreated": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "LabCreated.json",
+            "anyOf": [
+                {
+                    "$ref": "LabCreatedKnown.json"
+                },
+                {
+                    "$ref": "LabCreatedUnknown.json"
+                }
+            ]
+        },
+        "LabObserved": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "LabObserved.json",
+            "anyOf": [
+                {
+                    "$ref": "LabObservedKnown.json"
+                },
+                {
+                    "$ref": "LabObservedUnknown.json"
+                }
+            ]
+        },
+        "LabStopped": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "LabStopped.json",
+            "anyOf": [
+                {
+                    "$ref": "LabStoppedKnown.json"
+                },
+                {
+                    "$ref": "LabStoppedUnknown.json"
                 }
             ]
         },

@@ -7,38 +7,38 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from typing_extensions import Self
 
-from ..models.lab_stopped_effect_outcome import LabStoppedEffectOutcome
-from ..models.lab_stopped_operation import LabStoppedOperation
-from ..models.lab_stopped_schema_version import LabStoppedSchemaVersion
-from ..models.lab_stopped_state import LabStoppedState
+from ..models.lab_observed_known_effect_outcome import LabObservedKnownEffectOutcome
+from ..models.lab_observed_known_operation import LabObservedKnownOperation
+from ..models.lab_observed_known_schema_version import LabObservedKnownSchemaVersion
+from ..models.lab_observed_known_state import LabObservedKnownState
 
-T = TypeVar("T", bound="LabStopped")
+T = TypeVar("T", bound="LabObservedKnown")
 
 
 @_attrs_define
-class LabStopped:
+class LabObservedKnown:
     """
     Attributes:
         workspace_id (str):
         resource_domain_id (str):
         target_id (str):
         lab_id (str):
-        state (LabStoppedState):
-        effect_outcome (LabStoppedEffectOutcome):
         deadline (float):
-        schema_version (LabStoppedSchemaVersion):
-        operation (LabStoppedOperation):
+        state (LabObservedKnownState):
+        effect_outcome (LabObservedKnownEffectOutcome):
+        schema_version (LabObservedKnownSchemaVersion):
+        operation (LabObservedKnownOperation):
     """
 
     workspace_id: str
     resource_domain_id: str
     target_id: str
     lab_id: str
-    state: LabStoppedState
-    effect_outcome: LabStoppedEffectOutcome
     deadline: float
-    schema_version: LabStoppedSchemaVersion
-    operation: LabStoppedOperation
+    state: LabObservedKnownState
+    effect_outcome: LabObservedKnownEffectOutcome
+    schema_version: LabObservedKnownSchemaVersion
+    operation: LabObservedKnownOperation
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,11 +50,11 @@ class LabStopped:
 
         lab_id = self.lab_id
 
+        deadline = self.deadline
+
         state = self.state.value
 
         effect_outcome = self.effect_outcome.value
-
-        deadline = self.deadline
 
         schema_version = self.schema_version.value
 
@@ -68,9 +68,9 @@ class LabStopped:
                 "resource_domain_id": resource_domain_id,
                 "target_id": target_id,
                 "lab_id": lab_id,
+                "deadline": deadline,
                 "state": state,
                 "effect_outcome": effect_outcome,
-                "deadline": deadline,
                 "schema_version": schema_version,
                 "operation": operation,
             }
@@ -89,30 +89,30 @@ class LabStopped:
 
         lab_id = d.pop("lab_id")
 
-        state = LabStoppedState(d.pop("state"))
-
-        effect_outcome = LabStoppedEffectOutcome(d.pop("effect_outcome"))
-
         deadline = d.pop("deadline")
 
-        schema_version = LabStoppedSchemaVersion(d.pop("schema_version"))
+        state = LabObservedKnownState(d.pop("state"))
 
-        operation = LabStoppedOperation(d.pop("operation"))
+        effect_outcome = LabObservedKnownEffectOutcome(d.pop("effect_outcome"))
 
-        lab_stopped = cls(
+        schema_version = LabObservedKnownSchemaVersion(d.pop("schema_version"))
+
+        operation = LabObservedKnownOperation(d.pop("operation"))
+
+        lab_observed_known = cls(
             workspace_id=workspace_id,
             resource_domain_id=resource_domain_id,
             target_id=target_id,
             lab_id=lab_id,
+            deadline=deadline,
             state=state,
             effect_outcome=effect_outcome,
-            deadline=deadline,
             schema_version=schema_version,
             operation=operation,
         )
 
-        lab_stopped.additional_properties = d
-        return lab_stopped
+        lab_observed_known.additional_properties = d
+        return lab_observed_known
 
     @property
     def additional_keys(self) -> list[str]:
