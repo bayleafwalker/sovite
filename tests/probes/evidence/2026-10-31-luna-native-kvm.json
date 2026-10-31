@@ -1,0 +1,51 @@
+{
+  "schema_version": "native-vm-transport-evidence/v1",
+  "date": "2026-10-31",
+  "qualified": false,
+  "source": {
+    "sovite_pr": 40,
+    "tested_source_head": "ad02f58a089349ddd7442b6b4d831f7753cf4adf",
+    "runtime_sha256": "4666aeab2af092fc890af924e4091bd7386a25a8cb12adab7e51e54e142bb1ff",
+    "catalog_sha256": "5d7ca9ab43074f4cc7dce5f350bff68912cedfb6c4426e2bd40373206375f3f5",
+    "probe_sha256": "c11b1f37bc42256949c10611cfbd7cbf3f3aa4e1b769a5482572cfded8124548",
+    "protocol_sha256": "a4ac6fbc7c568ef5cf486133c61f1da5b0f951c31444e99581bef1a6758b4f6b"
+  },
+  "owner_source": {
+    "repository": "gitops-nixos",
+    "base_commit": "75de54b7cb441b05a10bce2369fd3485dbddcb68",
+    "fixture": "tests/nixos/native-guest-routine-integration-vm.nix",
+    "controlled_fixture_sha256_at_run": "a0987f3dc81fcab7be8b5d1535978d29bf17da4b93b2f175842de09c53aa1711",
+    "note": "Exact test-only constructor bytes over this canonical base; owner publishes its source commit separately after required flake check."
+  },
+  "native": {
+    "version": "codex-cli 0.166.0",
+    "model": "gpt-6-luna",
+    "elf_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
+  },
+  "results": {
+    "model_requests": 8,
+    "paid_model_calls": 0,
+    "distinct_kvm_filesystems": true,
+    "checks": [
+      "Same actual model identity with fixed standard-function catalog",
+      "Actual guest shell/TTY/stdin/image RPC",
+      "Candidate configuration cannot create supervisor MCP/hook authority",
+      "Unsupported apply_patch and user-input refusals",
+      "Nonroot Git quarantine verifies exact candidate content",
+      "Root quiescence and post-deadline sealed replay",
+      "Cgroup/race/reboot lifecycle controls",
+      "Old full/interruption derivations remain byte-identical when optional Luna inputs are absent"
+    ]
+  },
+  "run": {
+    "seconds": 48.01,
+    "derivation": "/nix/store/mi9hpp9ky1rx34swqvn60qw59dw4x351-vm-test-run-native-guest-routine-single-use.drv",
+    "log_sha256": "8e54d821458d80b0c2f9dbc9bbac476ac38184eb08ef78ea62bb4d2cce20cb22",
+    "input_manifest_sha256": "a47cb4f22cbb47a6000d022c9e323e9cc4ae2aa471fd7117a7e956fc612d1055"
+  },
+  "limits": [
+    "Synthetic model only; no provider, account, budget or Work qualification.",
+    "No installed production profile or provider hard-context/account-capacity claim.",
+    "Actual observer/protected placement and owner-reviewed provider billing/retention facts still required."
+  ]
+}
