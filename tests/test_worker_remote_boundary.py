@@ -4,6 +4,7 @@ The shared ``owner`` fixture uses SQLite and the disposable PostgreSQL fixture;
 PostgreSQL cases skip only when its disposable URL is absent.
 """
 import json
+import time
 
 from dataclasses import replace
 from pathlib import Path
@@ -41,6 +42,11 @@ def execution_client(owner):
 
 
 def pull_and_start(client, owner):
+    # The lease fixture holds time.time() at fixture creation. Preparation of
+    # the HTTP owner/app may outlive that instant; advance without rewinding a
+    # deliberately future logical time so creation and reservation use the
+    # same clock domain.
+    owner.clock[0] = max(owner.clock[0], time.time() + 1)
     pull_body = {"instance_id": owner.instance, "operation_id": "pull-http-1"}
     response = client.post(
         "/internal/execution/v1/pull",
@@ -85,6 +91,24 @@ def pull_and_start(client, owner):
     assert started["state"] == "started"
     assert "execution" not in started
     return job, body, started
+
+
+def test_http_pull_after_slow_preparation_advances_clock_without_shortening_lease(owner):
+    admit_agent_http_owner(owner)
+    owner.platform.submit("native-code-review", "synthetic controlled slow preparation",
+                          "operations", "slow-http-submit", input_class="C2")
+    client = execution_client(owner)
+    try:
+        # Deterministically model preparation taking longer than the fixture's
+        # one-second future clock without sleeping or changing lease settings.
+        owner.clock[0] = min(owner.clock[0], time.time() - 2)
+        job, identity, started = pull_and_start(client, owner)
+        assert owner.clock[0] >= time.time()
+        assert job["lease_until"] - owner.clock[0] == owner.platform.settings.lease_seconds == 30
+        assert started["state"] == "started"
+        assert identity["job_id"] == job["job_id"]
+    finally:
+        client.close()
 
 
 def test_remote_mutations_reconcile_by_same_operation_key_and_exact_fence(owner):
