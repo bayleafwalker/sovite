@@ -15,7 +15,8 @@
     "base_commit": "75de54b7cb441b05a10bce2369fd3485dbddcb68",
     "fixture": "tests/nixos/native-guest-routine-integration-vm.nix",
     "controlled_fixture_sha256_at_run": "a0987f3dc81fcab7be8b5d1535978d29bf17da4b93b2f175842de09c53aa1711",
-    "note": "Exact test-only constructor bytes over this canonical base; owner publishes its source commit separately after required flake check."
+    "note": "Exact committed test-only constructor; required whole-flake check passed. Runtime, catalog and native inputs remain separately pinned.",
+    "commit": "f4b005ea473e107b45d373843ae6505b3200395a"
   },
   "native": {
     "version": "codex-cli 0.166.0",
