@@ -139,14 +139,30 @@ def _release_authority(platform, session, record):
     if ranks[recipe["grant"]["output_class"]] > ranks[contract["source_class"]]:
         raise PlatformError("declassification_denied", "The source exceeds the contract's class ceiling", 403)
     _require_approver(platform, contract, record["actor"], record["actor_role"])
+    from .repository_recovery_release import is_copy_contract,verify_copy
+    if is_copy_contract(contract):verify_copy(platform,session,record,contract)
     return source, contract
 
 
 def approve_output(platform, *, source_job_id: str, source_digest: str, contract_id: str,
                    expected_contract_revision: str, expected_generation: str, content: str,
                    evidence_refs: list[dict], actor: str, is_operator: bool = False) -> dict:
+    return _approve_output(platform,source_job_id=source_job_id,source_digest=source_digest,
+        contract_id=contract_id,expected_contract_revision=expected_contract_revision,
+        expected_generation=expected_generation,content=content,evidence_refs=evidence_refs,
+        actor=actor,is_operator=is_operator)
+
+
+def _approve_output(platform, *, source_job_id: str, source_digest: str, contract_id: str,
+                    expected_contract_revision: str, expected_generation: str, content: str,
+                    evidence_refs: list[dict], actor: str, is_operator: bool = False,
+                    source_copy: bool = False) -> dict:
+    # Only the stored-source procedure calls this internal larger-input path;
+    # public content approval keeps its existing configured request limit.
+    from .repository_recovery_release import MAX_BYTES,is_copy_contract,verify_copy
+    content_limit=MAX_BYTES if source_copy else platform.settings.max_request_bytes
     try:
-        valid_content = isinstance(content, str) and bool(content.strip()) and len(content.encode("utf-8")) <= platform.settings.max_request_bytes
+        valid_content = isinstance(content, str) and bool(content.strip()) and len(content.encode("utf-8")) <= content_limit
     except UnicodeError:
         valid_content = False
     if not valid_content:
@@ -171,6 +187,9 @@ def approve_output(platform, *, source_job_id: str, source_digest: str, contract
         platform.db.authority_lock(session)
         with _verification_scope(platform, session) as (verification, _):
             source, contract = _release_authority(platform, session, approved)
+            if source_copy and not is_copy_contract(contract):
+                raise PlatformError('recovery_copy_denied','The stored-source copy requires its exact machine procedure',409)
+            if is_copy_contract(contract):verify_copy(platform,session,approved,contract,content)
             try:
                 platform.store.get(source.artifact_key, source.artifact_sha256)
             except Exception:
@@ -186,6 +205,7 @@ def approve_output(platform, *, source_job_id: str, source_digest: str, contract
             key, sha = platform.store.put(release_id, {"content": content})
             with _rechecking(verification):
                 source, contract = _release_authority(platform, session, approved)
+                if is_copy_contract(contract):verify_copy(platform,session,approved,contract,content)
             record = {"release_id": release_id, "generation": expected_generation,
                       "contract_id": contract_id, "contract_revision": expected_contract_revision,
                       "source_job_id": source.id, "source_digest": source_digest,
@@ -293,6 +313,8 @@ def _read_once(platform, session, release_id: str, verification: _Verification) 
         raise PlatformError("artifact_integrity_failed", "The approved output failed integrity verification", 503) from None
     if release_id != "release_" + digest(_request(record, content)):
         raise _integrity_error()
+    from .repository_recovery_release import is_copy_contract,verify_copy
+    if is_copy_contract(contract):verify_copy(platform,session,record,contract,content)
     verification.verified[release_id] = (metadata, content)
     return record, contract, content
 

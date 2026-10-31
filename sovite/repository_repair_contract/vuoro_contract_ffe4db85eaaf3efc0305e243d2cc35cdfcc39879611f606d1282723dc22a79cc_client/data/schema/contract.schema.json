@@ -508,6 +508,187 @@
                 "not": {}
             }
         },
+        "RecoveryContextRequest": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RecoveryContextRequest.json",
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "attempt_id": {
+                    "$ref": "Identity.json"
+                },
+                "source_digest": {
+                    "$ref": "DigestRef.json"
+                },
+                "contract_id": {
+                    "$ref": "Identity.json"
+                },
+                "destination_id": {
+                    "$ref": "Identity.json"
+                }
+            },
+            "required": [
+                "workspace_id",
+                "attempt_id",
+                "source_digest",
+                "contract_id",
+                "destination_id"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecoveryReleaseContext": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RecoveryReleaseContext.json",
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "repository-recovery-artifact"
+                },
+                "run_id": {
+                    "$ref": "Identity.json"
+                },
+                "attempt_id": {
+                    "$ref": "Identity.json"
+                },
+                "source_digest": {
+                    "$ref": "DigestRef.json"
+                },
+                "contract_id": {
+                    "$ref": "Identity.json"
+                },
+                "contract_revision": {
+                    "$ref": "DigestRef.json"
+                },
+                "expected_generation": {
+                    "$ref": "DigestRef.json"
+                },
+                "procedure_digest": {
+                    "$ref": "DigestRef.json"
+                },
+                "output_class": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                },
+                "destinations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "Identity.json"
+                    },
+                    "minItems": 1,
+                    "maxItems": 1000
+                },
+                "publication_eligible": {
+                    "type": "boolean",
+                    "const": false
+                },
+                "repair_eligible": {
+                    "type": "boolean",
+                    "const": false
+                }
+            },
+            "required": [
+                "kind",
+                "run_id",
+                "attempt_id",
+                "source_digest",
+                "contract_id",
+                "contract_revision",
+                "expected_generation",
+                "procedure_digest",
+                "output_class",
+                "destinations",
+                "publication_eligible",
+                "repair_eligible"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecoveryReleaseRequest": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RecoveryReleaseRequest.json",
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "$ref": "Identity.json"
+                },
+                "attempt_id": {
+                    "$ref": "Identity.json"
+                },
+                "source_digest": {
+                    "$ref": "DigestRef.json"
+                },
+                "contract_id": {
+                    "$ref": "Identity.json"
+                },
+                "destination_id": {
+                    "$ref": "Identity.json"
+                },
+                "expected_generation": {
+                    "$ref": "DigestRef.json"
+                },
+                "expected_contract_revision": {
+                    "$ref": "DigestRef.json"
+                }
+            },
+            "required": [
+                "workspace_id",
+                "attempt_id",
+                "source_digest",
+                "contract_id",
+                "destination_id",
+                "expected_generation",
+                "expected_contract_revision"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecoveryReleased": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "RecoveryReleased.json",
+            "type": "object",
+            "properties": {
+                "release_id": {
+                    "$ref": "OutputRelease.json"
+                },
+                "output_class": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                },
+                "output_digest": {
+                    "$ref": "DigestRef.json"
+                },
+                "contract_revision": {
+                    "$ref": "DigestRef.json"
+                },
+                "destinations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "Identity.json"
+                    },
+                    "minItems": 1,
+                    "maxItems": 1000
+                }
+            },
+            "required": [
+                "release_id",
+                "output_class",
+                "output_digest",
+                "contract_revision",
+                "destinations"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "NonnegativeInt64Decimal": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": "NonnegativeInt64Decimal.json",

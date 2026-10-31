@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.lock && pip install -e '.[test,retention]'
-      - run: python -m pytest tests/test_repository_candidate_retention.py tests/test_repository_repairs.py tests/test_repository_repair_feedback_context.py tests/test_repository_currentness_retention.py tests/test_repository_recovery_retention.py tests/test_repository_go_quota.py -q
+      - run: python -m pytest tests/test_repository_candidate_retention.py tests/test_repository_repairs.py tests/test_repository_repair_feedback_context.py tests/test_repository_currentness_retention.py tests/test_repository_recovery_retention.py tests/test_repository_go_quota.py tests/test_repository_recovery_release.py tests/test_repository_recovery_release_retention.py -q
 
   resource-targets:
     runs-on: ubuntu-latest

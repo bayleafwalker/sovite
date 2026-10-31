@@ -308,6 +308,220 @@
           }
         }
       }
+    },
+    "/api/repository-runs/v1/runs/{run_id}/recovery-context": {
+      "post": {
+        "operationId": "repositoryRecoveryContext",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Identity"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryReleaseContext"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access is unauthorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryContextRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/repository-runs/v1/runs/{run_id}/recovery-release": {
+      "post": {
+        "operationId": "repositoryRecoveryRelease",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Identity"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryReleased"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access is unauthorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryReleaseRequest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -512,6 +726,185 @@
             "enum": [
               false
             ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "RecoveryContextRequest": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "attempt_id",
+          "source_digest",
+          "contract_id",
+          "destination_id"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "attempt_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "source_digest": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "contract_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "destination_id": {
+            "$ref": "#/components/schemas/Identity"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "RecoveryReleaseContext": {
+        "type": "object",
+        "required": [
+          "kind",
+          "run_id",
+          "attempt_id",
+          "source_digest",
+          "contract_id",
+          "contract_revision",
+          "expected_generation",
+          "procedure_digest",
+          "output_class",
+          "destinations",
+          "publication_eligible",
+          "repair_eligible"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "repository-recovery-artifact"
+            ]
+          },
+          "run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "attempt_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "source_digest": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "contract_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "contract_revision": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "expected_generation": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "procedure_digest": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "output_class": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          },
+          "publication_eligible": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "repair_eligible": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "RecoveryReleaseRequest": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "attempt_id",
+          "source_digest",
+          "contract_id",
+          "destination_id",
+          "expected_generation",
+          "expected_contract_revision"
+        ],
+        "properties": {
+          "workspace_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "attempt_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "source_digest": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "contract_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "destination_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "expected_generation": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "expected_contract_revision": {
+            "$ref": "#/components/schemas/DigestRef"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "RecoveryReleased": {
+        "type": "object",
+        "required": [
+          "release_id",
+          "output_class",
+          "output_digest",
+          "contract_revision",
+          "destinations"
+        ],
+        "properties": {
+          "release_id": {
+            "$ref": "#/components/schemas/OutputRelease"
+          },
+          "output_class": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "output_digest": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "contract_revision": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Identity"
+            },
+            "minItems": 1,
+            "maxItems": 1000
           }
         },
         "additionalProperties": {
