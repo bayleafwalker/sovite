@@ -28,13 +28,42 @@ FRAME_LIMIT = 4 * 1024 * 1024
 # These are measured 0.166.0 flags, rather than legacy aliases such as apps.
 DISABLED_FEATURES = frozenset({'hooks', 'plugins', 'remote_plugin', 'plugin_discovery_prefetch',
     'skill_mcp_dependency_install', 'goals', 'multi_agent', 'enable_mcp_apps',
-    'codex_apps_mcp_2026_07_28', 'mcp_2026_07_28', 'mcp_connection_sharing'})
+    'codex_apps_mcp_2026_07_28', 'mcp_2026_07_28', 'mcp_connection_sharing',
+    'multi_agent_v2','incremental_tools','code_mode','code_mode_host','code_mode_host_grpc',
+    'code_mode_interrupt','code_mode_only','code_mode_only_strict_3p_tools','code_mode_prewarm','code_mode_tool_search'})
 NATIVE_TOOLS = frozenset({'exec_command', 'write_stdin', 'request_user_input', 'view_image'})
+LUNA_CATALOG_SHA256='5d7ca9ab43074f4cc7dce5f350bff68912cedfb6c4426e2bd40373206375f3f5'
 
 
 def need(value, code='native_runtime_unavailable'):
     if not value:
         raise RuntimeFailure(code)
+
+
+def install_model_catalog(home,model):
+    """One supported native presentation for the same actual model identity.
+
+    This cannot select an upstream, add a tool, or provide a billing limit.
+    No request or installed config can choose another catalog file.
+    """
+    if model!='gpt-6-luna':return
+    asset=Path(__file__).with_name('repository_native_luna_catalog.json')
+    with asset.open('rb') as stream:raw=stream.read(128*1024+1)
+    need(len(raw)<=128*1024 and hashlib.sha256(raw).hexdigest()==LUNA_CATALOG_SHA256,
+         'native_catalog_unavailable')
+    path=Path(home)/'owner-native-model-catalog.json'
+    try:fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    except FileExistsError:
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            info=os.fstat(fd)
+            need(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and info.st_nlink==1
+                 and not info.st_mode&0o077 and info.st_size==len(raw),'native_catalog_unavailable')
+            need(os.read(fd,len(raw)+1)==raw,'native_catalog_unavailable')
+        finally:os.close(fd)
+    else:
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(raw);stream.flush();os.fsync(stream.fileno())
 
 
 def check_tools(payload):
@@ -55,6 +84,7 @@ def check_response_tools(response, events=()):
         need(type(item) is dict and item.get('type') in {'message','reasoning','function_call'},
              'native_tool_inventory_mismatch')
         if item['type']=='function_call':
+            need(item.get('namespace') in {None,'functions'},'native_tool_inventory_mismatch')
             need(item.get('name') in NATIVE_TOOLS,'native_tool_inventory_mismatch')
     need(type(response) is dict and type(response.get('output')) is list,'native_tool_inventory_mismatch')
     for item in response['output']:check_item(item)
@@ -270,7 +300,9 @@ class NativeAppServer:
             'model_providers.sovite.request_max_retries':0,
             'model_providers.sovite.stream_max_retries':0,
             'cli_auth_credentials_store':'file','web_search':'disabled',
-            'project_doc_max_bytes':0,'history.persistence':'none'}
+            'project_doc_max_bytes':0,'history.persistence':'none','agents.enabled':False}
+        if self.model=='gpt-6-luna':
+            config['model_catalog_json']=str(self.home/'owner-native-model-catalog.json')
         config.update({'features.'+name:False for name in DISABLED_FEATURES})
         return config
 
@@ -279,6 +311,7 @@ class NativeAppServer:
         info = self.home.stat()
         need(self.home.resolve() == self.home and info.st_uid == os.getuid()
              and not info.st_mode & 0o077)
+        install_model_catalog(self.home,self.model)
         command = [self.executable, 'app-server', '--listen', 'stdio://', '--strict-config']
         for key, value in self.configuration().items():
             command += ['-c',key+'='+json.dumps(value)]

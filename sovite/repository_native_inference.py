@@ -26,6 +26,7 @@ from .adapters import RuntimeFailure, model_verify, token_headers
 from .connector.helper import validate_body
 from .connector.protocol import BODY_LIMIT
 from .model_gateway_client import ModelGatewayInference
+from .policy import GO_ENDPOINT,go_endpoint_matches
 from .repository_native_runtime import check_tools, check_response_tools, need
 from .repository_sessions import _unique_pairs
 
@@ -36,11 +37,17 @@ class DirectResponses(ModelGatewayInference):
         model = context.model
         endpoint = model.get('endpoint','')
         parsed = urlsplit(endpoint)
-        need(model.get('adapter') == 'openai-compatible' and model.get('wire_api') == 'responses'
+        go=model.get('adapter')=='opencode-go'
+        need(model.get('adapter') in {'openai-compatible','opencode-go'} and model.get('wire_api') == 'responses'
              and model.get('connection',{}).get('kind') != 'model-gateway'
              and parsed.scheme == 'https' and parsed.hostname and not parsed.username
              and not parsed.password and not parsed.query and not parsed.fragment,
              'native_model_adapter_unavailable')
+        if go:
+            need(model.get('identity_protocol')=='provider-service' and not model.get('digest')
+                 and not model.get('identity_endpoint') and go_endpoint_matches(model),
+                 'native_model_adapter_unavailable')
+            endpoint=GO_ENDPOINT
         timeout = model.get('timeout_seconds',120)
         need(type(timeout) is int and 1 <= timeout <= 600,'native_model_adapter_unavailable')
         self.direct_model = model
@@ -52,7 +59,15 @@ class DirectResponses(ModelGatewayInference):
 
     def _responses_destination(self, request_deadline):
         headers = {**token_headers(self.direct_model),'Content-Type':'application/json','Accept':'text/event-stream'}
+        if self.direct_model['adapter']=='opencode-go':
+            headers.update({'x-opencode-session':self.job_id,'User-Agent':'sovite-platform/opencode-go'})
         return self.origin+'/responses',headers
+
+    def _responses_adapter(self,model):
+        return model==self.direct_model and model.get('adapter') in {'openai-compatible','opencode-go'}
+
+    def _responses_exact_numbers(self):
+        return self.direct_model['adapter']=='opencode-go'
 
 
 def transport_for(context):
@@ -71,10 +86,13 @@ class Accounting:
     (not a token estimate from JSON bytes) and current quota/price evidence before a real
     deployment can be qualified; supplying these numbers is not that evidence.
     """
-    def __init__(self, value, model_id):
-        need(type(value) is dict and set(value) == {'model_id','valid_until','maximum_request_bytes',
-            'maximum_input_tokens','maximum_output_tokens','reservation_usd','input_usd_per_million','output_usd_per_million'},
+    def __init__(self, value, model_id, *, adapter=None):
+        fields={'model_id','valid_until','maximum_request_bytes','maximum_input_tokens',
+            'maximum_output_tokens','reservation_usd','input_usd_per_million','output_usd_per_million'}
+        need(type(value) is dict and set(value) in (fields,fields|{'opencode_go'}),
             'native_model_accounting_unavailable')
+        self.go=value.get('opencode_go')
+        need((self.go is not None)==(adapter=='opencode-go'),'native_model_accounting_unavailable')
         need(value['model_id'] == model_id and type(value['valid_until']) in {int,float}
              and math.isfinite(value['valid_until']) and value['valid_until'] > time.time(),
              'native_model_accounting_unavailable')
@@ -92,8 +110,33 @@ class Accounting:
             ceiling = (self.input_rate*value['maximum_input_tokens'] +
                        self.output_rate*value['maximum_output_tokens'])/Decimal(1000000)
             need(self.reservation >= ceiling,'native_model_accounting_unavailable')
+            if self.go is not None:
+                need(type(self.go)is dict and set(self.go)=={'billing_source','reservation_allowance',
+                    'maximum_root_allowance','maximum_allowance_per_list_usd'}
+                    and self.go['billing_source'] in {'go','go-plus'},'native_model_accounting_unavailable')
+                self.allowance_reservation=self.number(self.go['reservation_allowance'],positive=True)
+                self.allowance_limit=self.number(self.go['maximum_root_allowance'],positive=True)
+                self.allowance_multiplier=self.number(self.go['maximum_allowance_per_list_usd'],positive=True)
+                need(self.allowance_reservation>=ceiling*self.allowance_multiplier
+                     and self.allowance_limit>=self.allowance_reservation,'native_model_accounting_unavailable')
         except (InvalidOperation,ValueError):
             raise RuntimeFailure('native_model_accounting_unavailable') from None
+
+    @staticmethod
+    def number(value,*,positive=False):
+        need(type(value)in {int,float,Decimal},'native_model_accounting_unavailable')
+        exact=Decimal(str(value))
+        need(exact.is_finite() and (exact>0 if positive else exact>=0) and exact<=100000
+             and (exact==0 or exact.as_tuple().exponent>=-18 and len(exact.as_tuple().digits)<=24),
+             'native_model_accounting_unavailable')
+        return exact
+
+    def reserve(self,budget,call_id):
+        if self.go is None:
+            budget.reserve_cost(call_id,float(self.reservation))
+        else:
+            budget.reserve_cost(call_id,float(self.reservation),quota={'unit':'opencode-go-allowance',
+                'reserved':float(self.allowance_reservation),'limit':float(self.allowance_limit),'actual':None})
 
     def payload(self, source):
         need(time.time() < self.value['valid_until'],'native_model_accounting_unavailable')
@@ -108,18 +151,57 @@ class Accounting:
     def cost(self, usage):
         need(usage is not None and usage['input_tokens'] <= self.value['maximum_input_tokens']
              and usage['output_tokens'] <= self.value['maximum_output_tokens'],'external_execution_uncertain')
+        if self.go is not None:return float(self.go_observation(usage)['charge_usd'])
         amount = (Decimal(usage['input_tokens'])*self.input_rate +
                   Decimal(usage['output_tokens'])*self.output_rate)/Decimal(1000000)
         result = float(amount)
         need(math.isfinite(result) and result >= 0,'external_execution_uncertain')
         return result
 
+    def go_observation(self,usage):
+        need(self.go is not None and type(usage)is dict
+             and type(usage.get('input_tokens'))is int and 0<=usage['input_tokens']<=self.value['maximum_input_tokens']
+             and type(usage.get('output_tokens'))is int and 0<=usage['output_tokens']<=self.value['maximum_output_tokens'],
+             'external_execution_uncertain')
+        meta=usage.get('opencode')
+        need(type(meta)is dict and meta.get('billing_source')==self.go['billing_source']
+             and (meta.get('estimated') is None or meta.get('estimated') is False),'external_execution_uncertain')
+        charge=self.number(usage.get('cost'))
+        listed=self.number(meta.get('list_cost'))
+        allowance=self.number(meta.get('allowance'))
+        tokens=meta.get('tokens')
+        token_fields={'input','output','reasoning','cache_read','cache_write_5m','cache_write_1h'}
+        need(type(tokens)is dict and set(tokens)==token_fields
+             and all(type(value)is int and value>=0 for value in tokens.values())
+             and sum(tokens[name] for name in ('input','cache_read','cache_write_5m','cache_write_1h'))
+                 <=self.value['maximum_input_tokens']
+             and tokens['output']<=self.value['maximum_output_tokens']
+             and tokens['reasoning']<=tokens['output'],'external_execution_uncertain')
+        # The qualified free Go path cannot silently become balance/BYOK or
+        # assume a missing fee is zero. Its positive reservation also covers
+        # potential unqualified balance fallback, which remains unresolved.
+        need(charge==0 and listed<=self.reservation and allowance<=self.allowance_reservation
+             and allowance<=listed*self.allowance_multiplier,'external_execution_uncertain')
+        return {'billing_source':meta['billing_source'],'charge_usd':str(charge),
+            'list_cost_usd':str(listed),'allowance':str(allowance),
+            'allowance_unit':'opencode-go-allowance','estimated':False,
+            'input_tokens':usage['input_tokens'],'output_tokens':usage['output_tokens'],
+            'billable_tokens':dict(tokens)}
+
+    def settle(self,budget,call_id,usage):
+        if self.go is None:
+            budget.settle_cost(call_id,self.cost(usage))
+        else:
+            observed=self.go_observation(usage)
+            budget.settle_cost(call_id,float(observed['charge_usd']),quota_actual=observed['allowance'],
+                               provider_observation=observed)
+
 
 class NativeInferenceBridge:
     def __init__(self, context, budget, authorization_check, accounting, *, transport=None):
         self.context, self.budget = context, budget
         self.authorization_check = authorization_check
-        self.accounting = Accounting(accounting,context.model['id'])
+        self.accounting = Accounting(accounting,context.model['id'],adapter=context.model.get('adapter'))
         self.transport = transport or transport_for(context)
         self.token = secrets.token_urlsafe(32)
         self.failure = asyncio.Event()
@@ -172,14 +254,14 @@ class NativeInferenceBridge:
             need(not self.failed,'native_inference_unavailable')
             self.authorization_check()
             self.budget.acquire_slot(call_id)
-            self.budget.reserve_cost(call_id,float(self.accounting.reservation))
+            self.accounting.reserve(self.budget,call_id)
             # From this point every failure retains the reservation/slot;
             # never replay an ambiguous provider operation or settle $0.
             result = await self.transport.responses(self.context.model,payload,self.authorization_check)
             self.authorization_check()
             check_response_tools(result.response,result.events)
             need(time.time() < self.context.deadline,'execution_timeout')
-            self.budget.settle_cost(call_id,self.accounting.cost(result.usage))
+            self.accounting.settle(self.budget,call_id,result.usage)
             self.budget.release_slot(call_id)
             self.authorization_check()
             return Response(result.sse,media_type='text/event-stream',headers={'Cache-Control':'no-store'})

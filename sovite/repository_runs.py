@@ -15,6 +15,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal,InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -458,7 +459,7 @@ class RepositoryRunBudget:
 
     def __init__(self, maximum_usd: float, maximum_concurrency: int, *, used_usd: float,
                  reservations: list[dict], active_slots: list[str], peak_concurrency: int,
-                 authorization_check, persist):
+                 authorization_check, persist, quota_persist=None):
         self.maximum_usd = maximum_usd
         self.maximum_concurrency = maximum_concurrency
         self.used_usd = used_usd
@@ -466,6 +467,7 @@ class RepositoryRunBudget:
         self.active_slots = list(active_slots)
         self.peak_concurrency = peak_concurrency
         self.authorization_check, self.persist = authorization_check, persist
+        self.quota_persist=quota_persist
 
     @staticmethod
     def _call_id(value: Any) -> str:
@@ -473,14 +475,44 @@ class RepositoryRunBudget:
             raise RuntimeFailure("repository_budget_operation_invalid")
         return value
 
-    def reserve_cost(self, call_id: str, amount_usd: float) -> None:
+    @staticmethod
+    def quota(value):
+        if (type(value)is not dict or set(value)!={'unit','reserved','limit','actual'}
+            or value['unit']!='opencode-go-allowance'
+            or any(type(value[name])not in {int,float} or not math.isfinite(value[name])
+                   or not 0<value[name]<=100000 for name in ('reserved','limit'))
+            or value['reserved']>value['limit']):
+            raise RuntimeFailure('repository_quota_unavailable')
+        result=copy.deepcopy(value)
+        for name in ('reserved','limit'):
+            exact=Decimal(str(result[name]))
+            if exact.as_tuple().exponent < -18 or len(exact.as_tuple().digits)>24:
+                raise RuntimeFailure('repository_quota_unavailable')
+        if result['actual'] is not None:
+            try:
+                if type(result['actual'])not in {int,float,str}:raise ValueError
+                actual=Decimal(str(result['actual']))
+                if (not actual.is_finite() or not 0<=actual<=100000
+                    or actual!=0 and (actual.as_tuple().exponent < -18 or len(actual.as_tuple().digits)>24)):
+                    raise ValueError
+            except (ValueError,InvalidOperation):
+                raise RuntimeFailure('repository_quota_unavailable') from None
+            result['actual']=str(actual)
+        return result
+
+    def reserve_cost(self, call_id: str, amount_usd: float, *, quota=None) -> None:
         call_id = self._call_id(call_id)
         if type(amount_usd) not in {int, float} or not math.isfinite(amount_usd) or amount_usd <= 0:
             raise RuntimeFailure("repository_cost_reservation_invalid")
         self.authorization_check()
+        if quota is not None:
+            quota=self.quota(quota)
+            if quota['actual'] is not None or not callable(self.quota_persist):
+                raise RuntimeFailure('repository_quota_unavailable')
         existing = next((row for row in self.reservations if row["call_id"] == call_id), None)
         if existing:
-            if existing["reserved_usd"] == float(amount_usd) and existing["state"] == "reserved":
+            if (existing["reserved_usd"] == float(amount_usd) and existing["state"] == "reserved"
+                and existing.get('quota')==quota):
                 return
             raise RuntimeFailure("repository_budget_operation_conflict")
         reserved = sum(row["reserved_usd"] for row in self.reservations if row["state"] == "reserved")
@@ -488,10 +520,15 @@ class RepositoryRunBudget:
             raise RuntimeFailure("repository_cost_limit_exceeded")
         record = {"call_id": call_id, "reserved_usd": float(amount_usd),
                   "state": "reserved", "actual_usd": None}
-        self.persist(lambda run: run["budget_reservations"].append(record))
+        mutate=lambda run:run['budget_reservations'].append(record)
+        if quota is not None:
+            record['quota']=quota
+            self.quota_persist(mutate,quota)
+        else:
+            self.persist(mutate)
         self.reservations.append(record)
 
-    def settle_cost(self, call_id: str, actual_usd: float) -> None:
+    def settle_cost(self, call_id: str, actual_usd: float, *, quota_actual=None, provider_observation=None) -> None:
         call_id = self._call_id(call_id)
         if type(actual_usd) not in {int, float} or not math.isfinite(actual_usd) or actual_usd < 0:
             raise RuntimeFailure("repository_cost_observation_invalid")
@@ -500,6 +537,17 @@ class RepositoryRunBudget:
             raise RuntimeFailure("repository_budget_operation_conflict")
         actual = float(actual_usd)
         record = {**record, "state": "settled", "actual_usd": actual}
+        if 'quota' in record:
+            record['quota']=self.quota({**record['quota'],'actual':quota_actual})
+            if quota_actual is None:
+                raise RuntimeFailure('repository_quota_unavailable')
+        elif quota_actual is not None:
+            raise RuntimeFailure('repository_quota_unavailable')
+        if provider_observation is not None:
+            raw=json.dumps(provider_observation,allow_nan=False,separators=(',',':')).encode()
+            if len(raw)>16384:
+                raise RuntimeFailure('repository_cost_observation_invalid')
+            record['provider_observation']=json.loads(raw)
         def settle(run):
             for index, row in enumerate(run["budget_reservations"]):
                 if row["call_id"] == call_id and row["state"] == "reserved":
@@ -511,7 +559,8 @@ class RepositoryRunBudget:
         self.persist(settle)
         self.reservations = [record if row["call_id"] == call_id else row for row in self.reservations]
         self.used_usd += actual
-        if actual > record["reserved_usd"] or self.used_usd > self.maximum_usd:
+        if (actual > record["reserved_usd"] or self.used_usd > self.maximum_usd
+            or 'quota' in record and Decimal(record['quota']['actual'])>Decimal(str(record['quota']['reserved']))):
             raise RuntimeFailure("external_execution_uncertain")
 
     def acquire_slot(self, slot_id: str) -> None:
@@ -571,20 +620,49 @@ class RepositoryRunAttemptExecutor:
         self.state_root, self.executor, self.timeout_seconds = Path(state_root), executor, timeout_seconds
         self.execution_profile = execution_profile
 
-    def _persist(self, job_id: str, fence: str, mutate) -> None:
+    def _persist(self, job_id: str, fence: str, mutate, *, quota=None) -> None:
         with self.platform.db.sessions.begin() as session:
+            if quota is not None:self.platform.db.authority_lock(session)
             job = session.get(Job, job_id, with_for_update=True)
             lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
             if (job is None or lease is None or job.status != "running"
                     or lease.phase != "started" or lease.fence != fence
                     or job.lease_until != lease.lease_until):
                 raise RepositoryRunError("execution_fenced", "Repository attempt is no longer current", 409)
+            if quota is not None:self._root_quota(session,job,quota)
             resolved = copy.deepcopy(job.resolved)
             run = resolved.get("repository_run", {})
             mutate(run)
             resolved["repository_run"] = run
             job.resolved = resolved
             job.updated_at = time.time()
+
+    @staticmethod
+    def _root_quota(session,job,incoming):
+        from sqlalchemy import select,or_
+        incoming=RepositoryRunBudget.quota(incoming)
+        run=job.resolved['repository_run']
+        root_id=run.get('repair',{}).get('root_run_id',job.id)
+        chain=list(session.scalars(select(Job).where(Job.caller==job.caller,or_(Job.id==root_id,
+            Job.resolved['repository_run']['repair']['root_run_id'].as_string()==root_id)).limit(5)))
+        if not 1<=len(chain)<=4 or not any(row.id==job.id for row in chain) or not any(row.id==root_id for row in chain):
+            raise RuntimeFailure('repository_quota_unavailable')
+        used=Decimal(0)
+        for row in chain:
+            prior=row.resolved.get('repository_run',{})
+            if any(prior.get(key)!=run.get(key) for key in ('workspace_id','repository_id','principal_id',
+                'base_sha','grant_id','generation','executor_id','binding_id')):
+                raise RuntimeFailure('repository_quota_unavailable')
+            for record in prior.get('budget_reservations',[]):
+                item=RepositoryRunBudget.quota(record.get('quota'))
+                if incoming['limit']>item['limit']:
+                    raise RuntimeFailure('repository_quota_limit_changed')
+                if record['state']=='reserved':amount=item['reserved']
+                elif record['state']=='settled' and item['actual'] is not None:amount=item['actual']
+                else:raise RuntimeFailure('repository_quota_unavailable')
+                used+=Decimal(str(amount))
+        if used+Decimal(str(incoming['reserved']))>Decimal(str(incoming['limit'])):
+            raise RuntimeFailure('repository_quota_limit_exceeded')
 
     def effect_started(self, job_id: str) -> bool:
         """Conservatively treat a running mutable attempt as potentially effectful."""
@@ -746,13 +824,15 @@ class RepositoryRunAttemptExecutor:
             if workspace.state != "candidate":
                 def persist_budget(mutate):
                     self._persist(job.id, fence, mutate)
+                def persist_quota(mutate,quota):
+                    self._persist(job.id,fence,mutate,quota=quota)
                 budget = RepositoryRunBudget(
                     run_record["max_cost_usd"], run_record["concurrency"],
                     used_usd=run_record.get("usage_usd", 0.0),
                     reservations=run_record.get("budget_reservations", []),
                     active_slots=run_record.get("active_slots", []),
                     peak_concurrency=run_record.get("peak_concurrency", 0),
-                    authorization_check=authorization_check, persist=persist_budget)
+                    authorization_check=authorization_check, persist=persist_budget,quota_persist=persist_quota)
                 authorization_check()
                 kwargs = {}
                 if "repair" in run_record:

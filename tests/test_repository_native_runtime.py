@@ -87,7 +87,8 @@ def test_pre_thread_guard_refuses_host_mcp_before_its_command_runs(installed_cod
 
 
 @pytest.mark.parametrize('tool_mode',['shell','stdin','image','apply_patch'])
-def test_native_shell_routes_to_executor_with_fixed_tool_inventory_and_repair_context(installed_codex,tmp_path,tool_mode):
+@pytest.mark.parametrize('model_name',['gpt-6','gpt-6-luna'])
+def test_native_shell_routes_to_executor_with_fixed_tool_inventory_and_repair_context(installed_codex,tmp_path,tool_mode,model_name):
     home=tmp_path/'protected';guest_home=tmp_path/'guest-home';guest=tmp_path/'guest'
     for directory in (home,guest_home,guest):directory.mkdir(mode=0o700)
     subprocess.run(['git','init','-q',str(guest)],check=True)
@@ -125,9 +126,9 @@ def test_native_shell_routes_to_executor_with_fixed_tool_inventory_and_repair_co
             if tool_mode in {'image','apply_patch'} and turn==2:
                 # Transport compatibility only: the production inference bridge
                 # refuses image input before a paid request can be sent.
-                with pytest.raises(Exception):validate_body('responses',forwarded,'gpt-6')
-            else:validate_body('responses',forwarded,'gpt-6')
-            response={'id':f'resp_synthetic_{turn}','model':'gpt-6','status':'in_progress','output':[]}
+                with pytest.raises(Exception):validate_body('responses',forwarded,model_name)
+            else:validate_body('responses',forwarded,model_name)
+            response={'id':f'resp_synthetic_{turn}','model':model_name,'status':'in_progress','output':[]}
             yield event('response.created',response=response)
             if turn==1 or (tool_mode=='stdin' and turn==2):
                 name='exec_command';args=json.dumps({'cmd':'pwd > candidate-marker.txt'})
@@ -188,7 +189,7 @@ def test_native_shell_routes_to_executor_with_fixed_tool_inventory_and_repair_co
         deadline=time.time()+15
         relay=ExecutorRelay(process,deadline,lambda:True)
         async with peer.serve(),relay.listen():
-            app=NativeAppServer(installed_codex,home,'gpt-6',peer.origin,'synthetic-bridge-token',deadline,lambda:True)
+            app=NativeAppServer(installed_codex,home,model_name,peer.origin,'synthetic-bridge-token',deadline,lambda:True)
             try:
                 await app.start()
                 repair={'root_run_id':'root','parent_run_id':'parent','repair_number':1,'candidate_tip_sha':'a'*40,
@@ -279,3 +280,36 @@ def test_relay_whole_deadline_closes_process_and_refuses_reconnection():
                 async with connect(relay.url,additional_headers={'Authorization':'Bearer '+relay.token},proxy=None):pass
         assert starts==1 and relay.failed and relay.process.returncode is not None
     asyncio.run(scenario())
+
+
+def test_fixed_same_model_catalog_preserves_instructions_and_narrows_tools(tmp_path):
+    import hashlib
+    from sovite.repository_native_runtime import install_model_catalog,LUNA_CATALOG_SHA256
+    home=tmp_path/'protected';home.mkdir(mode=0o700)
+    install_model_catalog(home,'gpt-6')
+    path=home/'owner-native-model-catalog.json'
+    assert not path.exists()
+    install_model_catalog(home,'gpt-6-luna')
+    raw=path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest()==LUNA_CATALOG_SHA256
+    assert path.stat().st_mode&0o777==0o600
+    models=json.loads(raw)['models']
+    assert len(models)==1 and models[0]['slug']=='gpt-6-luna'
+    assert models[0]['model_messages'] and models[0]['tool_mode']=='direct'
+    assert models[0]['use_responses_lite'] is False
+    assert models[0]['multi_agent_version'] is None
+    assert models[0]['experimental_supported_tools']==[]
+    install_model_catalog(home,'gpt-6-luna')
+    path.write_text('{}')
+    with pytest.raises(RuntimeFailure,match='native_catalog_unavailable'):
+        install_model_catalog(home,'gpt-6-luna')
+    path.unlink();outside=tmp_path/'outside';outside.write_text('sentinel')
+    path.symlink_to(outside)
+    with pytest.raises(OSError):install_model_catalog(home,'gpt-6-luna')
+    assert outside.read_text()=='sentinel'
+
+
+def test_foreign_response_tool_namespace_is_refused():
+    from sovite.repository_native_runtime import check_response_tools
+    with pytest.raises(RuntimeFailure,match='native_tool_inventory_mismatch'):
+        check_response_tools({'output':[{'type':'function_call','name':'exec_command','namespace':'host'}]})

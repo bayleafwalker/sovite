@@ -15,7 +15,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-from .policy import GO_ENDPOINT, native_harness_kind
+from .policy import GO_ENDPOINT, go_endpoint_matches, native_harness_kind
 
 
 class RuntimeFailure(Exception):
@@ -244,7 +244,7 @@ class AdapterRunner:
             return {"status": "native-provider-selection", "provider": model["adapter"],
                     "model": model["model"], "immutable_weights_verified": False}
         if model["adapter"] == "opencode-go":
-            if model.get("identity_protocol") != "provider-service" or model.get("digest") or model.get("endpoint", "").rstrip("/") not in {GO_ENDPOINT, GO_ENDPOINT + "/chat/completions"}:
+            if model.get("identity_protocol") != "provider-service" or model.get("digest") or not go_endpoint_matches(model):
                 raise RuntimeFailure("model_identity_protocol_unsupported")
             return {"status": "declared-provider-service", "provider": "opencode-go",
                     "model": model["model"], "endpoint": GO_ENDPOINT, "immutable_weights_verified": False}
@@ -636,6 +636,11 @@ class AdapterRunner:
 
 
     async def native_codex(self, recipe: dict, task: str, job_id: str, *, isolated: bool = False) -> dict:
+        if recipe['model']['adapter']=='opencode-go':
+            # The operated Go path is the fixed, per-call-budgeted native VM
+            # bridge. This older direct CLI adapter cannot supply that owner
+            # context and must not create a bypass around it.
+            raise RuntimeFailure('native_go_requires_repository_runtime')
         harness, model = recipe["harness"], recipe["model"]
         self.require_model_adapter(model)
         if model["adapter"] != "openai-compatible" or model.get("wire_api") != "responses":

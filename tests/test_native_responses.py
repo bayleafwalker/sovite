@@ -231,7 +231,8 @@ def test_closed_encrypted_reasoning_and_function_roundtrip():
         validate_body('responses', json.dumps({**payload,'include':[]}).encode(), 'fixed-model')
 
 
-def test_installed_codex_function_loop_and_encrypted_reasoning_roundtrip(tmp_path):
+@pytest.mark.parametrize('provider',['gateway','opencode-go'])
+def test_installed_codex_function_loop_and_encrypted_reasoning_roundtrip(tmp_path,monkeypatch,provider):
     """Opt-in installed binary compatibility, not real-model or VM qualification."""
     import os
     import signal
@@ -244,14 +245,22 @@ def test_installed_codex_function_loop_and_encrypted_reasoning_roundtrip(tmp_pat
     repo = tmp_path/'repo'; repo.mkdir()
     home = tmp_path/'home'; home.mkdir()
     subprocess.run(['git','init','-q',str(repo)], check=True)
-    native_model = {**MODEL,'model':'gpt-6'}
+    model_name='gpt-6-luna' if provider=='opencode-go' else 'gpt-6'
+    native_model = {**MODEL,'model':model_name}
+    usage=USAGE
+    if provider=='opencode-go':
+        from sovite.policy import GO_ENDPOINT
+        native_model.update(adapter='opencode-go',endpoint=GO_ENDPOINT,identity_protocol='provider-service',
+                            api_key_env='SYNTHETIC_GO_COMPAT_KEY')
+        monkeypatch.setenv('SYNTHETIC_GO_COMPAT_KEY','public-synthetic-key-no-provider-authority')
+        usage={**USAGE,'cost':0,'opencode':{'billing_source':'go','list_cost':.0000013,'allowance':.0000052}}
     cipher = 'opaque-synthetic-encrypted-reasoning'
     async def scenario():
         peer = None
         async def chunks():
             turn = len(peer.requests)
             response = {'id':f'resp_synthetic_{turn}','object':'response','created_at':int(time.time()),
-                        'model':'gpt-6','status':'in_progress','output':[]}
+                        'model':model_name,'status':'in_progress','output':[]}
             yield event('response.created', response=response)
             if turn == 1:
                 reasoning = {'type':'reasoning','id':'rs_synthetic','summary':[],
@@ -279,11 +288,19 @@ def test_installed_codex_function_loop_and_encrypted_reasoning_roundtrip(tmp_pat
                 yield event('response.content_part.done', item_id=message['id'], output_index=0, content_index=0, part=part)
                 yield event('response.output_item.done', output_index=0, item=message)
                 response['output'] = [message]
-            yield event('response.completed', response={**response,'status':'completed','usage':USAGE})
+            yield event('response.completed', response={**response,'status':'completed','usage':usage})
         peer = HttpPeer(chunks)
         native_requests = []; bridge_failures = []; handlers = set()
         async with peer.serve():
-            gateway = peer.client(); gateway.model_id = 'gpt-6'
+            if provider=='opencode-go':
+                from types import SimpleNamespace
+                from sovite.repository_native_inference import DirectResponses
+                gateway=DirectResponses(SimpleNamespace(model=native_model,generation='sha256:'+'a'*64,
+                    job_id='synthetic-go-compat-job',fence='b'*32,deadline=time.time()+35))
+                _,headers=gateway._responses_destination(time.time()+30)
+                gateway._responses_destination=lambda deadline:(peer.origin+'/responses',headers)
+            else:
+                gateway = peer.client(); gateway.model_id = model_name
             async def bridge(reader, writer):
                 task = asyncio.current_task(); handlers.add(task)
                 try:
@@ -313,8 +330,13 @@ def test_installed_codex_function_loop_and_encrypted_reasoning_roundtrip(tmp_pat
                 'model_providers.sovite.stream_max_retries':0,'approval_policy':'never','web_search':'disabled',
                 'features.apps':False,'features.hooks':False,'features.memories':False,'features.multi_agent':False,
                 'tools.view_image':False,'project_doc_max_bytes':0}
+            if provider=='opencode-go':
+                from sovite.repository_native_runtime import DISABLED_FEATURES,install_model_catalog
+                install_model_catalog(home,model_name)
+                configs.update({'features.'+name:False for name in DISABLED_FEATURES})
+                configs.update({'agents.enabled':False,'model_catalog_json':str(home/'owner-native-model-catalog.json')})
             command = [executable,'exec','--ignore-user-config','--ignore-rules','--ephemeral','--skip-git-repo-check',
-                       '--sandbox','workspace-write','--cd',str(repo),'--model','gpt-6','--json']
+                       '--sandbox','workspace-write','--cd',str(repo),'--model',model_name,'--json']
             for key,value in configs.items(): command += ['-c',key+'='+json.dumps(value)]
             command += ['Create result.txt containing the synthetic response tool loop marker, then finish.']
             env = {'PATH':os.environ['PATH'],'HOME':str(home),'CODEX_HOME':str(home),

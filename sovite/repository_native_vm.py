@@ -52,7 +52,8 @@ def _source_digest():
     digest = hashlib.sha256()
     for name in ('repository_native_vm.py','repository_native_runtime.py',
                  'repository_native_inference.py','repository_native_git.py',
-                 'repository_native_recovery.py','repository_recovery.py','model_gateway_client.py'):
+                 'repository_native_recovery.py','repository_recovery.py','model_gateway_client.py',
+                 'repository_native_luna_catalog.json'):
         digest.update(name.encode()+b'\0'+Path(__file__).with_name(name).read_bytes())
     return digest.hexdigest()
 
@@ -174,7 +175,11 @@ class NativeVMDriver:
                      and row.profile in {bundle.get('default_profile','local'),'all'}
                      and verify_qualification(row,self.platform.settings))
                 need(tools_current(self.git_facts))
-                Accounting(self.config['accounting'],self.config['accounting']['model_id'])
+                adapter=None
+                if 'opencode_go' in self.config['accounting']:
+                    selected=next(item for item in bundle['models'] if item['id']==self.config['accounting']['model_id'])
+                    adapter=selected['adapter']
+                Accounting(self.config['accounting'],self.config['accounting']['model_id'],adapter=adapter)
                 evidence = row.payload['evidence']
                 need(evidence.get('evidence_kind') == 'deployment')
                 checks = {check['name']:check['status'] for check in evidence['checks']}
@@ -219,7 +224,7 @@ class NativeVMDriver:
 
     def for_attempt(self, context):
         need(self.execution_profile() is not None,'native_vm_qualification_unavailable')
-        Accounting(self.config['accounting'],context.model['id'])
+        Accounting(self.config['accounting'],context.model['id'],adapter=context.model.get('adapter'))
         owner = _owner_module()
         expected = owner.AttemptIdentity(job_id=context.job_id,attempt_id=context.attempt_id,
             workspace_id=context.workspace_id,repository_id=context.repository_id,generation=context.generation,
