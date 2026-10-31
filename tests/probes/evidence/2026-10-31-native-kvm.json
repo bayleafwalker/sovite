@@ -1,0 +1,73 @@
+{
+  "schema_version": "native-vm-transport-evidence/v1",
+  "date": "2026-10-31",
+  "qualified": false,
+  "source": {
+    "sovite_pr": 36,
+    "published_head": "6babd96aacbb3ddc5f56ec918c0ad30c1f71604d",
+    "canonical_merge": "42d3ea6ddbd445de735a63c13ca4ae011897ce65",
+    "runtime_sha256": "4edb811318c56d1b4a8650914e4cb10fa161be8404211de553fe326565e0f28f",
+    "probe_sha256": "a4ac6fbc7c568ef5cf486133c61f1da5b0f951c31444e99581bef1a6758b4f6b"
+  },
+  "owner_source": {
+    "repository": "gitops-nixos",
+    "commit": "731eaa4a9054409b42b91dac4f2c106ca6b122b3",
+    "fixture": "tests/nixos/native-guest-routine-vm.nix"
+  },
+  "controlled_overlay": [
+    "Replace initialize/info-only client smoke with this exact portable probe and published runtime module.",
+    "Run Python3.12 with websockets on the separate KVM peer, using pinned Codex0.166 and the routine2222 forced-command lane.",
+    "Seed candidate config/hook attack files, run8 synthetic-model requests, then root quiesce/export and nonroot quarantine verification."
+  ],
+  "native": {
+    "version": "codex-cli 0.166.0",
+    "elf_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
+  },
+  "results": {
+    "model_requests": 8,
+    "paid_model_calls": 0,
+    "distinct_kvm_filesystems": true,
+    "native_methods": [
+      "environment/info",
+      "environment/status",
+      "environmentConfig/read",
+      "fs/getMetadata",
+      "fs/readFile",
+      "fs/watchMissing",
+      "initialize",
+      "initialized",
+      "process/start",
+      "process/terminate",
+      "process/write"
+    ],
+    "checks": [
+      "shell and stdin effects confined to guest",
+      "supervisor sentinel/environment/bridge token excluded",
+      "candidate MCP/hooks/features cannot create supervisor authority",
+      "actual builtin apply_patch unsupported without effects",
+      "user-input refusal and Git metadata read-only boundary preserved",
+      "uncommitted edits retained after root quiescence",
+      "original root-cached seed used despite candidate HEAD/seed-copy tampering",
+      "nonroot quarantine verifies exact base/seed parent/linear tip/digests and marker/image/refusal bytes"
+    ]
+  },
+  "runs": [
+    {
+      "seconds": 37.79,
+      "derivation": "/nix/store/3y0lfl3y5586gyjrcaza81rhw3c41sv4-vm-test-run-native-guest-routine-single-use.drv",
+      "log_sha256": "716d742ed9864c688a8f7404eced3825962cfd354a3f4c3c3a96d9439ff129d7"
+    },
+    {
+      "seconds": 43.71,
+      "derivation": "/nix/store/dqfar5zszbzvqyk2v5w2nbashddxnnzf-vm-test-run-native-guest-routine-single-use.drv",
+      "log_sha256": "8a86ed1bf1039f8e09fc10d389a017019342614cb782a3e5b41f041be0588e30",
+      "additional_scope": "Exact root observer policy/NAR stability and real reboot/restored prestart/retained hostkey refusal"
+    }
+  ],
+  "limits": [
+    "Synthetic model and unqualified authority shim; no actual provider/model/Work qualification.",
+    "No interruption/unknown-spend candidate recovery claim. Root quiescence is separate from successful work.",
+    "Temporary integration expression hash alone does not freeze the controlled fixture overlay.",
+    "No fixture private key paths, credential values, raw model context or candidate bytes retained here."
+  ]
+}
