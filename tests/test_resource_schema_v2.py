@@ -3,11 +3,11 @@ import hashlib
 import os
 
 import pytest
-from sqlalchemy import event, inspect, select
+from sqlalchemy import event, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 from sovite import resource_schema
-from sovite.db import Database, DatabaseSchemaError, MetadataRow, MIGRATIONS
+from sovite.db import AuditEvent, Database, DatabaseSchemaError, MetadataRow, MIGRATIONS
 from test_migrations import database
 
 
@@ -67,7 +67,14 @@ def version(db):
 
 
 def test_existing_schema6_requires_offline_cutover_preserves_rows_and_v1_meaning(database):
-    schema6(database); before=snapshot(database)
+    schema6(database)
+    with database.sessions.begin() as session:
+        database.audit(session,'fixture-operator','migration_fixture_audit','schema6-migration-fixture',
+            {'schema_version':6,'fixture':'recovery-retention-marker'})
+    before=snapshot(database)
+    audit_before=database.verify_audit()
+    with database.engine.connect() as connection:
+        audit_rows_before=[dict(row) for row in connection.execute(select(AuditEvent.__table__)).mappings()]
     statements=[]
     def capture(connection,cursor,statement,parameters,context,executemany):
         statements.append(statement)
@@ -80,6 +87,9 @@ def test_existing_schema6_requires_offline_cutover_preserves_rows_and_v1_meaning
     assert statements and version(database)==6 and snapshot(database)==before
     database.migrate(); assert version(database)==7
     assert snapshot(database)==before
+    assert database.verify_audit()==audit_before
+    with database.engine.connect() as connection:
+        assert [dict(row) for row in connection.execute(select(AuditEvent.__table__)).mappings()]==audit_rows_before
     with database.sessions() as session:
         from sovite.db import ResourceWorkloadScope
         row=session.get(ResourceWorkloadScope,'old-workload')
@@ -93,6 +103,78 @@ def test_existing_schema6_requires_offline_cutover_preserves_rows_and_v1_meaning
         with pytest.raises(DatabaseSchemaError) as error:old.check()
         assert error.value.code=='database_schema_newer'
     finally:old.engine.dispose()
+
+
+@pytest.mark.parametrize(('table_name','constraint_name'),[
+    ('resource_workload_scopes','resource_scope_target_shape'),
+    ('resource_owner_requests','resource_request_target_shape'),
+])
+@pytest.mark.parametrize('mutation',['drop','weaken'])
+def test_schema7_startup_refuses_missing_or_weakened_shape_check_read_only(database,table_name,constraint_name,mutation):
+    if database.engine.dialect.name!='postgresql':
+        pytest.skip('PostgreSQL supports direct CHECK removal for this compatibility test')
+    schema6(database);database.migrate()
+    quote=database.engine.dialect.identifier_preparer.quote
+    owner=(quote(database.schema)+'.' if database.schema else '')+quote(table_name)
+    constraint=quote(constraint_name)
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(f'ALTER TABLE {owner} DROP CONSTRAINT {constraint}')
+        if mutation=='weaken':
+            connection.exec_driver_sql(f'ALTER TABLE {owner} ADD CONSTRAINT {constraint} CHECK (true)')
+    statements=[]
+    def capture(connection,cursor,statement,parameters,context,executemany):
+        statements.append(statement)
+        assert not context.isddl and statement.lstrip().split()[0].upper()=='SELECT'
+    event.listen(database.engine,'before_cursor_execute',capture)
+    try:
+        with pytest.raises(DatabaseSchemaError) as error:database.initialize('never')
+        assert error.value.code=='database_schema_incomplete'
+    finally:event.remove(database.engine,'before_cursor_execute',capture)
+    assert statements and version(database)==7
+
+
+def test_schema6_sqlite_refuses_same_shape_partial_index_that_rebuild_would_drop(database):
+    if database.engine.dialect.name!='sqlite':
+        pytest.skip('SQLite rebuilds resource tables; PostgreSQL alters them in place')
+    schema6(database)
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql("CREATE INDEX extra_partial_job ON resource_owner_requests(job_id) WHERE state='pending'")
+    with pytest.raises(resource_schema.ResourceSchemaError,match='resource_schema6_incompatible'):
+        database.migrate()
+    names={row['name'] for row in inspect(database.engine).get_indexes('resource_owner_requests')}
+    assert {'ix_resource_owner_requests_job_id','extra_partial_job'}<=names
+    assert version(database)==6
+
+
+def test_schema6_postgres_migration_preserves_target_table_owners_and_acls(database):
+    if database.engine.dialect.name!='postgresql':
+        pytest.skip('PostgreSQL owner and ACL catalog check')
+    schema6(database)
+    quote=database.engine.dialect.identifier_preparer.quote
+    for table_name in ('resource_workload_scopes','resource_owner_requests'):
+        owner=(quote(database.schema)+'.' if database.schema else '')+quote(table_name)
+        with database.engine.begin() as connection:
+            connection.exec_driver_sql(f'GRANT SELECT, INSERT ON TABLE {owner} TO PUBLIC')
+            if table_name=='resource_workload_scopes':
+                connection.exec_driver_sql(f'GRANT UPDATE (observation_id) ON TABLE {owner} TO PUBLIC')
+
+    def ownership_acl():
+        result={}
+        with database.engine.connect() as connection:
+            for table_name in ('resource_workload_scopes','resource_owner_requests'):
+                row=connection.execute(text(
+                    'SELECT c.relowner::text,c.relacl::text, '
+                    "COALESCE((SELECT jsonb_agg(jsonb_build_array(a.attnum,a.attname,a.attacl::text) ORDER BY a.attnum) "
+                    "FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attacl IS NOT NULL),'[]'::jsonb)::text "
+                    'FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace '
+                    'WHERE n.nspname=:schema AND c.relname=:name'),
+                    {'schema':database.schema,'name':table_name}).one()
+                result[table_name]=tuple(row)
+        return result
+
+    before=ownership_acl()
+    database.migrate()
+    assert ownership_acl()==before
 
 
 def test_failure_after_actual_resource_ddl_rolls_back_data_shape_and_version(database,monkeypatch):

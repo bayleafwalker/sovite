@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -335,6 +336,74 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+_CHECK_TOKEN = re.compile(r"\s*(?:(?P<word>[A-Za-z_][A-Za-z0-9_]*)|(?P<paren>[()]))")
+
+
+def _check_expression_tree(expression: str):
+    """Parse the boolean/null-check grammar used by the schema's named guards.
+
+    PostgreSQL and SQLite add harmless grouping parentheses when reflecting a
+    CHECK. Keep normalization deliberately narrow: accept only identifiers,
+    IS [NOT] NULL, AND, OR and grouping parentheses.
+    """
+    tokens = []
+    offset = 0
+    while offset < len(expression):
+        match = _CHECK_TOKEN.match(expression, offset)
+        if match is None:
+            if expression[offset:].strip() == "":
+                break
+            raise ValueError("unsupported check expression syntax")
+        tokens.append((match.group("word") or match.group("paren")).lower())
+        offset = match.end()
+    position = 0
+
+    def take(expected=None):
+        nonlocal position
+        if position >= len(tokens):
+            raise ValueError("incomplete check expression")
+        token = tokens[position]
+        if expected is not None and token != expected:
+            raise ValueError("unexpected check expression token")
+        position += 1
+        return token
+
+    def atom():
+        if position < len(tokens) and tokens[position] == "(":
+            take("(")
+            value = disjunction()
+            take(")")
+            return value
+        column = take()
+        if column in {"and", "or", "is", "not", "null"}:
+            raise ValueError("expected check column")
+        take("is")
+        negated = position < len(tokens) and tokens[position] == "not"
+        if negated:
+            take("not")
+        take("null")
+        return ("is-not-null" if negated else "is-null", column)
+
+    def conjunction():
+        value = atom()
+        while position < len(tokens) and tokens[position] == "and":
+            take("and")
+            value = ("and", value, atom())
+        return value
+
+    def disjunction():
+        value = conjunction()
+        while position < len(tokens) and tokens[position] == "or":
+            take("or")
+            value = ("or", value, conjunction())
+        return value
+
+    tree = disjunction()
+    if position != len(tokens):
+        raise ValueError("trailing check expression tokens")
+    return tree
+
+
 class Database:
     schema_version = MIGRATIONS[-1][0]
 
@@ -391,6 +460,20 @@ class Database:
             for constraint in table.constraints:
                 if isinstance(constraint, UniqueConstraint) and not any(row["column_names"] == [column.name for column in constraint.columns] for row in unique):
                     raise DatabaseSchemaError("database_schema_incomplete", f"Missing unique constraint on {table.name}")
+            checks = inspector.get_check_constraints(table.name, schema=self.schema)
+            by_name = {row.get("name"): row for row in checks if row.get("name")}
+            for constraint in table.constraints:
+                if not isinstance(constraint, CheckConstraint):
+                    continue
+                actual = by_name.get(constraint.name)
+                if actual is None:
+                    raise DatabaseSchemaError("database_schema_incomplete", f"Missing check constraint {constraint.name} on {table.name}")
+                try:
+                    matches = _check_expression_tree(str(actual.get("sqltext", ""))) == _check_expression_tree(str(constraint.sqltext))
+                except ValueError:
+                    matches = False
+                if not matches:
+                    raise DatabaseSchemaError("database_schema_incomplete", f"Incompatible check constraint {constraint.name} on {table.name}")
 
     def _version(self, connection) -> int:
         names = set(inspect(connection).get_table_names(schema=self.schema))
