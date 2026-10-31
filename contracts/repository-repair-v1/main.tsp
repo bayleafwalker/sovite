@@ -36,6 +36,21 @@ model RepairAccepted {
   root_run_id: Identity;
   @minValue(1) @maxValue(3) repair_number: int32;
 }
+@minLength(71) @maxLength(71) @pattern("^sha256:[0-9a-f]{64}$")
+scalar DigestRef extends string;
+model FeedbackContextRequest {
+  parent_run_id: Identity;
+  feedback_contract_id: Identity;
+}
+model FeedbackContext {
+  parent_run_id: Identity;
+  source_digest: DigestRef;
+  contract_id: Identity;
+  contract_revision: DigestRef;
+  expected_generation: DigestRef;
+  candidate_sha256: Sha256;
+  @minLength(40) @maxLength(40) @pattern("^[0-9a-f]{40}$") candidate_tip_sha: string;
+}
 model ErrorDetail {
   @minLength(1) @maxLength(96) code: string;
   @minLength(1) @maxLength(512) message: string;
@@ -50,4 +65,8 @@ model ErrorEnvelope { detail: ErrorDetail; }
 @error model Error503 is JsonResponse<503, ErrorEnvelope>;
 @route("/api/repository-runs/v1/repairs") @post
 op repositoryRepairSubmit(@body body: RepairSubmission): JsonResponse<201, RepairAccepted>
+  | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;
+
+@route("/api/repository-runs/v1/repair-feedback-context") @post
+op repositoryRepairFeedbackContext(@body body: FeedbackContextRequest): JsonResponse<200, FeedbackContext>
   | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;

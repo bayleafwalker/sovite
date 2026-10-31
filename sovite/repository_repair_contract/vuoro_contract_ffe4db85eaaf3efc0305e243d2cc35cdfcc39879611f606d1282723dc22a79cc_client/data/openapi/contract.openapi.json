@@ -6,6 +6,104 @@
   },
   "tags": [],
   "paths": {
+    "/api/repository-runs/v1/repair-feedback-context": {
+      "post": {
+        "operationId": "repositoryRepairFeedbackContext",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackContext"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access is unauthorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackContextRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/repository-runs/v1/repairs": {
       "post": {
         "operationId": "repositoryRepairSubmit",
@@ -107,6 +205,12 @@
   },
   "components": {
     "schemas": {
+      "DigestRef": {
+        "type": "string",
+        "minLength": 71,
+        "maxLength": 71,
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
       "ErrorDetail": {
         "type": "object",
         "required": [
@@ -137,6 +241,65 @@
         "properties": {
           "detail": {
             "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "FeedbackContext": {
+        "type": "object",
+        "required": [
+          "parent_run_id",
+          "source_digest",
+          "contract_id",
+          "contract_revision",
+          "expected_generation",
+          "candidate_sha256",
+          "candidate_tip_sha"
+        ],
+        "properties": {
+          "parent_run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "source_digest": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "contract_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "contract_revision": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "expected_generation": {
+            "$ref": "#/components/schemas/DigestRef"
+          },
+          "candidate_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "candidate_tip_sha": {
+            "type": "string",
+            "minLength": 40,
+            "maxLength": 40,
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "FeedbackContextRequest": {
+        "type": "object",
+        "required": [
+          "parent_run_id",
+          "feedback_contract_id"
+        ],
+        "properties": {
+          "parent_run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "feedback_contract_id": {
+            "$ref": "#/components/schemas/Identity"
           }
         },
         "additionalProperties": {

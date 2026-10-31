@@ -1,10 +1,35 @@
 {
-  "contractVersion": "1.0.0",
-  "exposures": {"repositoryRepairSubmit": "internal"},
+  "contractVersion": "1.1.0",
+  "exposures": {
+    "repositoryRepairSubmit": "internal",
+    "repositoryRepairFeedbackContext": "internal"
+  },
   "byteBounds": {
     "repositoryRepairSubmit": {
       "requestMaxBytes": 65536,
-      "responseMaxBytes": {"201": 4096, "401": 4096, "403": 4096, "404": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}
+      "responseMaxBytes": {
+        "201": 4096,
+        "401": 4096,
+        "403": 4096,
+        "404": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
+    },
+    "repositoryRepairFeedbackContext": {
+      "requestMaxBytes": 65536,
+      "responseMaxBytes": {
+        "200": 4096,
+        "401": 4096,
+        "403": 4096,
+        "404": 4096,
+        "409": 4096,
+        "413": 4096,
+        "422": 4096,
+        "503": 4096
+      }
     }
   }
 }

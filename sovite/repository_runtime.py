@@ -119,8 +119,8 @@ def protected_directory(value: str | Path, *, create: bool = False) -> Path:
 def _read_config(path):
     data = json.loads(protected_bytes(path), object_pairs_hook=_unique_pairs,
                       parse_constant=lambda _: _need(False))
-    _need(type(data) is dict and set(data) == {
-        "schema_version", "state_root", "bindings", "driver", "retention"})
+    required = {"schema_version", "state_root", "bindings", "driver", "retention"}
+    _need(type(data) is dict and set(data) in (required, required | {"repair"}))
     _need(data["schema_version"] == SCHEMA and type(data["bindings"]) is list
           and 1 <= len(data["bindings"]) <= 256 and type(data["driver"]) is dict)
     _need(type(data["state_root"]) is str and Path(data["state_root"]).is_absolute())
@@ -266,6 +266,7 @@ class RepositoryRuntime:
     execution: Any = None
     publication: Any = None
     diagnostic: str = "repository_runtime_not_configured"
+    repair: Any = None
 
 
 def compose_repository_runtime(settings, platform, *, driver_factory=None):
@@ -296,6 +297,17 @@ def compose_repository_runtime(settings, platform, *, driver_factory=None):
         from .repository_candidate_export import CandidateExportOwner
         exporter = CandidateExportOwner(platform, resolver, execution)
         publication = _retention(exporter, config["retention"]) if config["retention"] is not None else None
-        return RepositoryRuntime(owner, execution, publication, "repository_runtime_composed")
+        repair = None
+        if config.get("repair") is not None:
+            from .repository_repairs import RepositoryRepairService, RepairPolicy
+            selected = config["repair"]
+            _need(type(selected) is dict and set(selected) == {"max_repairs", "feedback_contract_ids"}
+                  and type(selected["feedback_contract_ids"]) is list
+                  and 1 <= len(selected["feedback_contract_ids"]) <= 64
+                  and publication is not None
+                  and getattr(driver, "supports_repository_repair_context", False) is True)
+            policy = RepairPolicy(selected["max_repairs"], tuple(selected["feedback_contract_ids"]))
+            repair = RepositoryRepairService(owner, publication, policy)
+        return RepositoryRuntime(owner, execution, publication, "repository_runtime_composed", repair)
     except Exception:
         return RepositoryRuntime(diagnostic="repository_runtime_unavailable")

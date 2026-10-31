@@ -141,7 +141,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     app.state.platform = platform
     app.state.repository_run_owner = repository_run_owner
     app.state.repository_runtime = runtime
-    app.state.repository_repair_service = None
+    app.state.repository_repair_service = runtime.repair if runtime is not None else None
     from .authority_api import install_routes
     install_routes(app, platform, settings)
     from .execution_api import install_routes as install_execution_routes
@@ -288,6 +288,25 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         owner = repository_owner()
         return {"run": owner.submit(body.packet, preview_id=body.preview_id,
                                     principal_id=auth[0], idempotency_key=idempotency_key)}
+
+    @app.post("/api/repository-runs/v1/repair-feedback-context")
+    async def repository_repair_feedback_context(request: Request, auth=Depends(repository_caller)):
+        service = app.state.repository_repair_service
+        if service is None or service.owner is not repository_owner():
+            raise RepositoryRunError("repository_repair_unavailable", "No qualified repair consumer is installed", 503)
+        from vuoro_contracts import ContractError, parse_json
+        from .repository_repair_contract.runtime import load_bundle, FEEDBACK_CONTEXT_OPERATION
+        try:
+            body = parse_json(await request.body(), max_bytes=65536)
+            load_bundle().validate_request(FEEDBACK_CONTEXT_OPERATION, body)
+        except ContractError:
+            raise RepositoryRunError("invalid_request", "The context request does not match the owner contract", 422) from None
+        try:
+            return service.feedback_context(body, principal_id=auth[0])
+        except RepositoryRunError:
+            raise
+        except (ContractError, ValueError, KeyError, TypeError):
+            raise RepositoryRunError("repository_repair_unavailable", "The current feedback context is unavailable", 409) from None
 
     @app.post("/api/repository-runs/v1/repairs", status_code=201)
     async def submit_repository_repair(request: Request,

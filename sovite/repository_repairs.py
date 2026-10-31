@@ -162,10 +162,64 @@ def recheck(platform, session, row, recipe):
     candidate_release(platform, session, parent, repair, recipe)
 
 
+def _parent_packet(parent, maximum_usd):
+    prior = parent.resolved["repository_run"]
+    _need(maximum_usd <= prior["max_cost_usd"])
+    return validate_run_packet({"schema_version":"portable-work/v1",
+        **{key:prior[key] for key in ("workspace_id", "repository_id", "executor_id", "base_sha", "deadline", "concurrency")},
+        "goal":parent.task, "max_cost_usd":maximum_usd})
+
+
 class RepositoryRepairService:
     def __init__(self, owner, retention, policy):
         _need(isinstance(policy, RepairPolicy))
         self.owner, self.retention, self.policy = owner, retention, policy
+
+    def feedback_context(self, body, *, principal_id):
+        """Read exact approval inputs; this operation makes no approval."""
+        from .repository_repair_contract.runtime import load_bundle, FEEDBACK_CONTEXT_OPERATION
+        from .flow import contract_revision
+        contract_bundle = load_bundle()
+        contract_bundle.validate_request(FEEDBACK_CONTEXT_OPERATION, body)
+        _need(body["feedback_contract_id"] in self.policy.feedback_contract_ids)
+        owner, platform = self.owner, self.owner.platform
+        _need(getattr(getattr(owner.executor, "executor", None), "supports_repository_repair_context", False) is True)
+        projection = owner.get(body["parent_run_id"], principal_id=principal_id)
+        _need(projection["state"] == "completed")
+        with platform.db.sessions.begin() as session:
+            platform.db.authority_lock(session)
+            bundle, generation = platform.active(session)
+            contract = next((c for c in bundle.get("output_contracts", [])
+                             if c["id"] == body["feedback_contract_id"]), None)
+            _need(contract is not None)
+            outputs._require_approver(platform, contract, principal_id, "caller")
+            parent, recipe = outputs._source(platform, session, body["parent_run_id"], generation)
+            _need(parent.caller == principal_id)
+            owner._binding(_parent_packet(parent, parent.resolved["repository_run"]["max_cost_usd"]), principal_id)
+            ranks = class_ranks(bundle)
+            input_class = recipe.get("input_class", recipe["grant"]["input_class"])
+            _need(ranks[recipe["grant"]["output_class"]] <= ranks[contract["source_class"]]
+                  and ranks[contract["output_class"]] <= ranks[input_class]
+                  and recipe["model"]["destination"] in contract["destinations"])
+            retained = [entry for entry in parent.resolved["repository_run"]["evidence"]
+                        if entry.get("label") == "retained-candidate"]
+            _need(len(retained) == 1)
+            source = {"candidate_sha256":retained[0]["sha256"],
+                      "candidate_release_id":retained[0]["receipt"]["release_id"]}
+            data = _json(candidate_release(platform, session, parent, source, recipe))
+            _need(data["run_id"] == parent.id)
+            platform.store.get(parent.artifact_key, parent.artifact_sha256)
+            result = {"parent_run_id":parent.id, "source_digest":"sha256:"+parent.artifact_sha256,
+                "contract_id":contract["id"], "contract_revision":contract_revision(contract),
+                "expected_generation":generation, "candidate_sha256":retained[0]["sha256"],
+                "candidate_tip_sha":data["tip_sha"]}
+            # Mutable settings can revoke an approving identity during I/O.
+            outputs._require_approver(platform, contract, principal_id, "caller")
+            platform.authorize_existing_job(session, parent)
+            candidate_release(platform, session, parent, source, recipe)
+            owner._binding(_parent_packet(parent, parent.resolved["repository_run"]["max_cost_usd"]), principal_id)
+            contract_bundle.validate_response(FEEDBACK_CONTEXT_OPERATION, 200, result)
+            return result
 
     async def submit(self, body, *, principal_id, idempotency_key):
         owner, platform = self.owner, self.owner.platform
@@ -178,13 +232,9 @@ class RepositoryRepairService:
         with platform.db.sessions() as session:
             parent = session.get(Job, body["parent_run_id"])
             _need(parent is not None and parent.caller == principal_id)
-            prior = parent.resolved["repository_run"]
-            _need(body["max_cost_usd"] <= prior["max_cost_usd"])
-            # The original owner-authenticated intent supplies every field
-            # except a lowerable child spend cap. No second packet wire model.
-            packet = validate_run_packet({"schema_version":"portable-work/v1",
-                **{key:prior[key] for key in ("workspace_id", "repository_id", "executor_id", "base_sha", "deadline", "concurrency")},
-                "goal":parent.task, "max_cost_usd":body["max_cost_usd"]})
+            # Original owner-authenticated intent supplies every field except
+            # a lowerable child spend cap. No second packet wire model.
+            packet = _parent_packet(parent, body["max_cost_usd"])
         owner._binding(packet, principal_id)
         _need(projection["state"] == "completed" and projection["repository_id"] == packet["repository_id"])
         retained = [entry for entry in projection["evidence"] if entry.get("label") == "retained-candidate"]
