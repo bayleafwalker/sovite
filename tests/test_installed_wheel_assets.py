@@ -93,19 +93,35 @@ def test_installed_wheel_refuses_invalid_remote_worker_heartbeat_before_journal_
     target = tmp_path / "installed"
     wheelhouse.mkdir()
     target.mkdir()
-    uv = shutil.which("uv")
-    assert uv is not None, "uv is required to build the cold installed-wheel check"
+    build_python = sys.executable
+    pip_available = subprocess.run(
+        [build_python, "-m", "pip", "--version"], capture_output=True, text=True,
+    ).returncode == 0
     base_env = os.environ.copy()
     base_env.setdefault("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
-    subprocess.run([
-        uv, "build", "--no-build-isolation", "--python", sys.executable,
-        "--wheel", "--out-dir", str(wheelhouse), str(ROOT),
-    ], check=True, cwd=tmp_path, env=base_env, capture_output=True, text=True, timeout=120)
+    if pip_available:
+        subprocess.run([
+            build_python, "-m", "pip", "wheel", "--no-index", "--no-deps",
+            "--no-build-isolation", "--wheel-dir", str(wheelhouse), str(ROOT),
+        ], check=True, cwd=tmp_path, capture_output=True, text=True, timeout=120)
+    else:
+        uv = shutil.which("uv")
+        assert uv is not None, "pip or uv is required to build the cold installed-wheel check"
+        subprocess.run([
+            uv, "build", "--no-build-isolation", "--python", build_python,
+            "--wheel", "--out-dir", str(wheelhouse), str(ROOT),
+        ], check=True, cwd=tmp_path, env=base_env, capture_output=True, text=True, timeout=120)
     wheels = list(wheelhouse.glob("sovite_platform-*.whl"))
     assert len(wheels) == 1
-    subprocess.run([
-        uv, "pip", "install", "--no-deps", "--target", str(target), str(wheels[0]),
-    ], check=True, cwd=tmp_path, env=base_env, capture_output=True, text=True, timeout=60)
+    if pip_available:
+        subprocess.run([
+            build_python, "-m", "pip", "install", "--no-index", "--no-deps",
+            "--target", str(target), str(wheels[0]),
+        ], check=True, cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    else:
+        subprocess.run([
+            shutil.which("uv"), "pip", "install", "--no-deps", "--target", str(target), str(wheels[0]),
+        ], check=True, cwd=tmp_path, env=base_env, capture_output=True, text=True, timeout=60)
 
     for heartbeat in (None, "relative-heartbeat"):
         journal = tmp_path / ("execution-missing.json" if heartbeat is None else "execution-relative.json")
