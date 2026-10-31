@@ -164,7 +164,9 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             if origin and origin.rstrip("/") != settings.public_origin:
                 code = "execution_scope_denied" if execution_route else "origin_denied"
                 return JSONResponse({"detail": {"code": code, "message": "Request origin is not permitted"}}, status_code=403)
-            limit = 65_536 if execution_route else settings.max_request_bytes + 4096
+            recovery_metadata_route=(request.url.path.startswith('/api/repository-runs/v1/runs/')
+                and request.url.path.rsplit('/',1)[-1] in {'recovery','recovery-context','recovery-release'})
+            limit = 4096 if recovery_metadata_route else (65_536 if execution_route else settings.max_request_bytes + 4096)
             length = request.headers.get("content-length")
             try:
                 if length is not None and int(length) > limit:
@@ -175,6 +177,8 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
                 return JSONResponse({"detail": {"code": "invalid_request", "message": "Invalid request"}}, status_code=status_code)
             data = bytearray()
             async for part in request.stream():
+                if recovery_metadata_route and len(data)+len(part)>limit:
+                    return JSONResponse({'detail':{'code':'request_too_large','message':'Request exceeds the configured limit'}},status_code=413)
                 data.extend(part)
                 if len(data) > limit:
                     code = "execution_payload_too_large" if execution_route else "request_too_large"
@@ -362,7 +366,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         from vuoro_contracts import ContractError,parse_json
         from .repository_repair_contract.runtime import load_bundle,RECOVERY_CAPTURE_OPERATION
         try:
-            body=parse_json(await request.body(),max_bytes=65536)
+            body=parse_json(await request.body(),max_bytes=4096)
             contract=load_bundle()
             contract.validate_parameter(RECOVERY_CAPTURE_OPERATION,'path','run_id',run_id)
             contract.validate_request(RECOVERY_CAPTURE_OPERATION,body)
@@ -370,6 +374,36 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             raise RepositoryRunError('invalid_request','The recovery request does not match the owner contract',422) from None
         result=await owner.recover(run_id,body['attempt_id'],principal_id=auth[0],workspace_id=body['workspace_id'])
         contract.validate_response(RECOVERY_CAPTURE_OPERATION,200,result)
+        return result
+
+    async def recovery_release_request(run_id,request,operation):
+        from vuoro_contracts import ContractError,parse_json
+        from .repository_repair_contract.runtime import load_bundle
+        try:
+            body=parse_json(await request.body(),max_bytes=4096)
+            contract=load_bundle()
+            contract.validate_parameter(operation,'path','run_id',run_id)
+            contract.validate_request(operation,body)
+            return body,contract
+        except ContractError:
+            raise RepositoryRunError('invalid_request','The recovery metadata request does not match the owner contract',422) from None
+
+    @app.post('/api/repository-runs/v1/runs/{run_id}/recovery-context')
+    async def recovery_context(run_id: str,request: Request,auth=Depends(repository_caller)):
+        from .repository_repair_contract.runtime import RECOVERY_CONTEXT_OPERATION
+        from .repository_recovery_release import RecoveryReleaseService
+        body,contract=await recovery_release_request(run_id,request,RECOVERY_CONTEXT_OPERATION)
+        result=RecoveryReleaseService(repository_owner()).context(run_id,body,principal_id=auth[0])
+        contract.validate_response(RECOVERY_CONTEXT_OPERATION,200,result)
+        return result
+
+    @app.post('/api/repository-runs/v1/runs/{run_id}/recovery-release')
+    async def recovery_release(run_id: str,request: Request,auth=Depends(repository_caller)):
+        from .repository_repair_contract.runtime import RECOVERY_RELEASE_OPERATION
+        from .repository_recovery_release import RecoveryReleaseService
+        body,contract=await recovery_release_request(run_id,request,RECOVERY_RELEASE_OPERATION)
+        result=RecoveryReleaseService(repository_owner()).release(run_id,body,principal_id=auth[0])
+        contract.validate_response(RECOVERY_RELEASE_OPERATION,200,result)
         return result
 
     @app.post("/api/repository-runs/v1/runs/{run_id}/candidate-retention")

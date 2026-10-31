@@ -1,0 +1,10 @@
+{
+  "schema_version": "sovite-repository-recovery-exact-copy/v1",
+  "source_kind": "repository-recovery-artifact",
+  "operation": "copy-exact-canonical-utf8-json",
+  "maximum_bytes": 8388608,
+  "output_class": "same-as-actual-source",
+  "authority": "current-existing-output-contract-approver-and-destinations",
+  "publication_eligible": false,
+  "repair_eligible": false
+}

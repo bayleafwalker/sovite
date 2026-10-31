@@ -1,0 +1,85 @@
+{
+  "schema_version": "sovite-recovery-copy-source-evidence/v1",
+  "date": "2026-10-31",
+  "qualified": false,
+  "source": {
+    "base_commit": "ec5b710589b0a48b8e18aaa18de05cb3e29f8964",
+    "implementation_commit": "0af5f53970e0b8eb579e0acfc65a0af1b52ed941",
+    "implementation_sha256": "34e0d7c4c6a7527121b39a1c52a49218589c5dccef8832dd8e355f0946e7fa09"
+  },
+  "contract": {
+    "version": "1.3.0",
+    "integrity_sha256": "4b83e978ed83be672f4f93cb413aa1500a8ed91bbc8e5866ebf8391ef7fd3e3f",
+    "two_independent_generations_identical": true,
+    "preceding_named_definitions_unchanged": 23
+  },
+  "results": [
+    {
+      "name": "combined-owner-output-recovery",
+      "tests": 128,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "junit_sha256": "deb13b36e222b6d16b2dee2a2e3454a84bdcccc0534b1768cba43ba5f9cb5e8a"
+    },
+    {
+      "name": "final-revocation-faults",
+      "tests": 36,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "junit_sha256": "e63588925e0c1579bd489312959714c1d3bfd657ced4886c57119e9dcec2f8e6"
+    },
+    {
+      "name": "rebased-resource-api-compatibility",
+      "tests": 79,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "junit_sha256": "0764898a69cc3d0181b3c4ee652918ba76a8f24f41097b901a3b7b26fc93a489"
+    }
+  ],
+  "negative_controls": [
+    {
+      "guard": "literal-class",
+      "exit_code": 1,
+      "tests": 1,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "guard": "exact-copy-bytes",
+      "exit_code": 1,
+      "tests": 1,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "guard": "early-stream-limit",
+      "exit_code": 1,
+      "tests": 1,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "checks": [
+    "Actual loopback HTTP copy of protected source larger than64KiB on SQLite and PostgreSQL",
+    "Ordinary caller content approval keeps existing request limit",
+    "Lost committed HTTP release acknowledgement reconciles one release",
+    "Current source and approving identity rechecked after artifact persistence",
+    "Literal source class preserved; generic review procedure refused",
+    "Actual Workspace lost begin/upload/finalize acknowledgements reconcile",
+    "Fresh current reader recovers after producer expiry and disposable state loss",
+    "Outsider and revoked Workspace member cannot reread ready bytes",
+    "Metadata stream refuses after4096bytes without reading whole request",
+    "Original uncertain job, usage, reservations and slots unchanged"
+  ],
+  "limits": [
+    "Source qualification only; deterministic interrupted callback and owned disposable databases.",
+    "Separate native KVM interruption evidence does not install a production profile.",
+    "No model/provider call, acceptance, Work success, automatic repair or deployment is claimed."
+  ]
+}

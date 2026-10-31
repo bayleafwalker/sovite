@@ -159,3 +159,44 @@ tests reject authority fields, alternate path identities, raw byte fields,
 successful outcomes, promoted eligibility and unexpected success statuses.
 This contract source and its tests do not establish a live recovery capture,
 release, native-runtime qualification or deployment.
+
+## Exact stored-source release (contract 1.3)
+
+An eligible caller first captures the exact attempt, then posts its
+`workspace_id`, `attempt_id`, `source_digest`, `contract_id` and `destination_id`
+to `/api/repository-runs/v1/runs/{run_id}/recovery-context`. The reply exposes
+only the exact source identity, current generation/contract/procedure digests,
+class and configured destinations. It returns no candidate bytes and makes no
+approval. Both execution/publication eligibility flags remain false.
+
+Automation requires the existing published output contract to select the exact
+[fixed machine-copy procedure](repository-recovery-exact-copy-v1.json), with
+reference owner `sovite`, resource `repository-recovery-exact-copy`, revision
+`v1`, and its canonical JSON SHA256 as `content_digest`. This procedure checks
+an exact canonical stored recovery source, copies its bytes, and preserves its
+actual class. It performs no human review or declassification. Generic review
+procedures are unavailable to this automatic route. Installing a reference does
+not enable a caller: the existing output contract's current approvers,
+destinations, grant, generation and deployment authority still govern every use.
+
+`POST /api/repository-runs/v1/runs/{run_id}/recovery-release` accepts those same
+selectors plus `expected_generation` and `expected_contract_revision`. The
+owner rereads and validates the exact stored source, refuses a class change,
+and reuses its existing approval authority and deterministic release identity.
+The reply is release metadata only; released bytes can subsequently be read or
+retained through the existing authorized output/Workspace paths. Unknown
+acknowledgement is reconciled by reacquiring the exact context and replaying
+the same selectors, without execution, recapture or an additional approval.
+
+Only this intrinsic stored-source procedure can copy up to 8MiB. It accepts no
+caller-supplied content, size limit, role, purpose or authority override. Ordinary
+content approval retains its existing 64KiB wire/configured bounds. Ordinary
+approval and subsequent release reads also enforce byte equality for a contract
+selecting this fixed procedure. Each new metadata operation, including capture,
+rejects its request stream at 4096 bytes before buffering the whole body.
+
+Version1.3 is additive: all23 released1.2 named definitions, including the20
+preceding1.1 definitions, remain byte-identical. Tests use the generated client,
+real loopback HTTP, both owner database backends and actual Workspace recovery.
+The original uncertain job, unknown charge reservations, active slots and
+repair/publication ineligibility remain unchanged.

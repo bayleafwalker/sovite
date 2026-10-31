@@ -84,7 +84,7 @@ def test_recovery_source_and_generated_inventory_match_exact_owner_provenance():
     actual=hashlib.sha256(json.dumps(inventory,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     assert actual==provenance['generatedSdk']['treeSha256']
     assert hashlib.sha256((package/'data/integrity.json').read_bytes()).hexdigest()==runtime.INTEGRITY
-    assert runtime.load_bundle().manifest['contractVersion']=='1.2.0'
+    assert runtime.load_bundle().manifest['contractVersion']=='1.3.0'
 
 
 def test_additive_recovery_keeps_all_released_1_1_named_schemas_unchanged():
@@ -93,6 +93,7 @@ def test_additive_recovery_keeps_all_released_1_1_named_schemas_unchanged():
     package=resources.files(runtime.PACKAGE)
     definitions=json.loads(package.joinpath('data/schema/contract.schema.json').read_text())['$defs']
     previous={name:value for name,value in definitions.items()
-        if name not in {'RecoveryCaptureRequest','RecoveryCaptured','GitSha'}}
+        if name not in {'RecoveryCaptureRequest','RecoveryCaptured','GitSha','RecoveryContextRequest','RecoveryReleaseContext',
+                        'RecoveryReleaseRequest','RecoveryReleased'}}
     digest=hashlib.sha256(json.dumps(previous,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     assert digest=='a21feb2b5332dac3a1c63175241c91305ba0a420c88af977ba491bf68cfef13e'

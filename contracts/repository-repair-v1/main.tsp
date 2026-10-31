@@ -93,3 +93,43 @@ op repositoryRepairFeedbackContext(@body body: FeedbackContextRequest): JsonResp
 @route("/api/repository-runs/v1/runs/{run_id}/recovery") @post
 op repositoryRecoveryCapture(@path run_id: Identity, @body body: RecoveryCaptureRequest): JsonResponse<200, RecoveryCaptured>
   | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;
+
+model RecoveryContextRequest {
+  workspace_id: Identity;
+  attempt_id: Identity;
+  source_digest: DigestRef;
+  contract_id: Identity;
+  destination_id: Identity;
+}
+model RecoveryReleaseContext {
+  kind: "repository-recovery-artifact";
+  run_id: Identity;
+  attempt_id: Identity;
+  source_digest: DigestRef;
+  contract_id: Identity;
+  contract_revision: DigestRef;
+  expected_generation: DigestRef;
+  procedure_digest: DigestRef;
+  @minLength(1) @maxLength(32) output_class: string;
+  @minItems(1) @maxItems(1000) destinations: Identity[];
+  publication_eligible: false;
+  repair_eligible: false;
+}
+model RecoveryReleaseRequest {
+  ...RecoveryContextRequest;
+  expected_generation: DigestRef;
+  expected_contract_revision: DigestRef;
+}
+model RecoveryReleased {
+  release_id: OutputRelease;
+  @minLength(1) @maxLength(32) output_class: string;
+  output_digest: DigestRef;
+  contract_revision: DigestRef;
+  @minItems(1) @maxItems(1000) destinations: Identity[];
+}
+@route("/api/repository-runs/v1/runs/{run_id}/recovery-context") @post
+op repositoryRecoveryContext(@path run_id: Identity, @body body: RecoveryContextRequest): JsonResponse<200, RecoveryReleaseContext>
+  | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;
+@route("/api/repository-runs/v1/runs/{run_id}/recovery-release") @post
+op repositoryRecoveryRelease(@path run_id: Identity, @body body: RecoveryReleaseRequest): JsonResponse<200, RecoveryReleased>
+  | Error401 | Error403 | Error404 | Error409 | Error413 | Error422 | Error503;

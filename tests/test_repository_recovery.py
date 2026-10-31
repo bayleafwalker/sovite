@@ -52,7 +52,7 @@ class Descriptor:
 
 
 @pytest.fixture
-def interrupted(prepared,tmp_path,monkeypatch):
+def interrupted(prepared,tmp_path,monkeypatch,request):
     platform,exporter,_,_,mirror,base=prepared
     lifecycle=exporter.execution
     lifecycle.timeout_seconds=1
@@ -106,6 +106,9 @@ def interrupted(prepared,tmp_path,monkeypatch):
                 guest=tmp_path/'guest'
                 git('clone','--no-hardlinks',str(worktree),str(guest))
                 (guest/'src'/'main.txt').write_text('partial guest edit before interruption\n')
+                if getattr(request,'param',0):
+                    import secrets
+                    (guest/'src'/'large.txt').write_text(secrets.token_hex(request.param))
                 git('add','-A',cwd=guest)
                 git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','partial',cwd=guest)
                 tip=git('rev-parse','HEAD',cwd=guest)
