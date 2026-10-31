@@ -31,10 +31,12 @@ jobs:
     env:
       SOVITE_WORKSPACE_TEST_DSN: host=127.0.0.1 port=5432 user=postgres password=retention-fixture-only dbname=postgres
       SOVITE_WORKSPACE_REQUIRE_PG: '1'
+      SOVITE_TEST_POSTGRES_URL: postgresql+psycopg://postgres:retention-fixture-only@127.0.0.1:5432/postgres
+      SOVITE_REPAIR_REQUIRE_PG: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install -r requirements.lock && pip install -e '.[test,retention]'
-      - run: python -m pytest tests/test_repository_candidate_retention.py -q
+      - run: python -m pytest tests/test_repository_candidate_retention.py tests/test_repository_repairs.py -q

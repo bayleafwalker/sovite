@@ -141,6 +141,7 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     app.state.platform = platform
     app.state.repository_run_owner = repository_run_owner
     app.state.repository_runtime = runtime
+    app.state.repository_repair_service = None
     from .authority_api import install_routes
     install_routes(app, platform, settings)
     from .execution_api import install_routes as install_execution_routes
@@ -287,6 +288,30 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
         owner = repository_owner()
         return {"run": owner.submit(body.packet, preview_id=body.preview_id,
                                     principal_id=auth[0], idempotency_key=idempotency_key)}
+
+    @app.post("/api/repository-runs/v1/repairs", status_code=201)
+    async def submit_repository_repair(request: Request,
+                                      idempotency_key: str = Header(alias="Idempotency-Key", min_length=16, max_length=128,
+                                                                     pattern=r"^[A-Za-z0-9_.-]+$"),
+                                      auth=Depends(repository_caller)):
+        service = app.state.repository_repair_service
+        if service is None or service.owner is not repository_owner():
+            raise RepositoryRunError("repository_repair_unavailable", "No qualified repair consumer is installed", 503)
+        from vuoro_contracts import ContractError, parse_json
+        from .repository_repair_contract.runtime import load_bundle, OPERATION
+        try:
+            body = parse_json(await request.body(), max_bytes=65536)
+            contract = load_bundle()
+            contract.validate_request(OPERATION, body)
+        except ContractError:
+            raise RepositoryRunError("invalid_request", "The repair request does not match the owner contract", 422) from None
+        from .repository_candidate_retention import CandidateRetentionError
+        try:
+            result = await service.submit(body, principal_id=auth[0], idempotency_key=idempotency_key)
+        except (CandidateRetentionError, ContractError, ValueError, KeyError, TypeError):
+            raise RepositoryRunError("repository_repair_unavailable", "The current retained input is unavailable", 409) from None
+        contract.validate_response(OPERATION, 201, result)
+        return result
 
     @app.get("/api/repository-runs/v1/runs")
     async def list_repository_runs(workspace_id: str, limit: int = 100,

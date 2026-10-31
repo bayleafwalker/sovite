@@ -27,13 +27,18 @@ def candidate_destinations():
 
 
 @pytest.fixture
-def prepared(tmp_path, candidate_destinations):
+def candidate_additional_contracts():
+    return []
+
+
+@pytest.fixture
+def prepared(tmp_path, candidate_destinations, candidate_additional_contracts):
     bundle, _ = policy.load_bundle(ROOT / 'config/platform.local.yaml')
     known = {d['id'] for d in bundle['destinations']}
     bundle['destinations'].extend({'id':d, 'name':'Private workspace fixture', 'kind':'local', 'boundary':'private', 'clearance':'C3', 'allowed_hosts':['workspace.invalid']}
                                  for d in candidate_destinations if d not in known)
     bundle['output_contracts'] = [{'id':'candidate-export','source_class':'C3','output_class':'C3',
-        'destinations':candidate_destinations, 'approvers':['cloud-codex'], 'procedure_ref':revision_ref('candidate-review')}]
+        'destinations':candidate_destinations, 'approvers':['cloud-codex'], 'procedure_ref':revision_ref('candidate-review')}] + candidate_additional_contracts
     config=tmp_path/'bundle.yaml'; config.write_text(yaml.safe_dump(bundle))
     settings=Settings(database_url=f'sqlite:///{tmp_path}/control.db', bundle_path=str(config),
         artifact_path=str(tmp_path/'artifacts'), operator_token='operator-repo-test-token-0000000000',

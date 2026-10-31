@@ -1,0 +1,13 @@
+emit:
+  - "@typespec/openapi3"
+  - "@typespec/json-schema"
+options:
+  "@typespec/openapi3":
+    openapi-versions: ["3.0.0"]
+    output-file: "contract.openapi.json"
+    file-type: json
+    seal-object-schemas: true
+  "@typespec/json-schema":
+    bundleId: "contract.schema.json"
+    file-type: json
+    seal-object-schemas: true

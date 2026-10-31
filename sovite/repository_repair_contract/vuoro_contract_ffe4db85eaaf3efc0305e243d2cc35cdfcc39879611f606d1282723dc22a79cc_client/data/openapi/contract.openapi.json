@@ -1,0 +1,281 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Sovite Repository Repair v1",
+    "version": "0.0.0"
+  },
+  "tags": [],
+  "paths": {
+    "/api/repository-runs/v1/repairs": {
+      "post": {
+        "operationId": "repositoryRepairSubmit",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": "The request has succeeded and a new resource has been created as a result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepairAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access is unauthorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepairSubmission"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Identity": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      },
+      "OutputRelease": {
+        "type": "string",
+        "minLength": 72,
+        "maxLength": 72,
+        "pattern": "^release_[0-9a-f]{64}$"
+      },
+      "RepairAccepted": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "parent_run_id",
+          "root_run_id",
+          "repair_number"
+        ],
+        "properties": {
+          "run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "parent_run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "root_run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "repair_number": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 3
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "RepairFeedback": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "parent_run_id",
+          "candidate_export_sha256",
+          "candidate_tip_sha",
+          "result",
+          "feedback"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-repository-repair-feedback/v1"
+            ]
+          },
+          "parent_run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "candidate_export_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "candidate_tip_sha": {
+            "type": "string",
+            "minLength": 40,
+            "maxLength": 40,
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "check_failed",
+              "review_failed"
+            ]
+          },
+          "feedback": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 48000
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "RepairSubmission": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "parent_run_id",
+          "candidate_sha256",
+          "feedback_release_id",
+          "preview_id",
+          "max_cost_usd"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "enum": [
+              "sovite-repository-repair/v1"
+            ]
+          },
+          "parent_run_id": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "candidate_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "feedback_release_id": {
+            "$ref": "#/components/schemas/OutputRelease"
+          },
+          "preview_id": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "max_cost_usd": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "maximum": 100000
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "Sha256": {
+        "type": "string",
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    }
+  }
+}

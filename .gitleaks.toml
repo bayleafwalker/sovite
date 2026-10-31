@@ -15,3 +15,10 @@ paths = ['''^sovite/execution_contract/vuoro_contract_c3c73ae52d117dd8407c15d4b4
 regexes = ['''\{"files":\{"openapi/contract\.openapi\.json":"878d611931eb4e20ded878c5c6a0a696db1e4ba3827498792661cc3a96aa465b","operation\-manifest\.json":"26c68aa1bd262b88f8084ab1f0a85c2a558db5f2a2c04f01fc121a4c4db6e1a0","schema/contract\.schema\.json":"b240964586f95b7398249932cef9ab78afe83389bf92f517b3c3ed1c2ca88bc1"\},"schemaVersion":"vuoro\-contract\-integrity/v1"\}''']
 regexTarget = "line"
 condition = "AND"
+
+[[allowlists]]
+description = "Generated repair contract inventory contains only these exact non-secret file SHA-256 values"
+paths = ['''^sovite/repository_repair_contract/vuoro_contract_ffe4db85eaaf3efc0305e243d2cc35cdfcc39879611f606d1282723dc22a79cc_client/data/integrity\.json$''']
+regexes = ['''^\{"files":\{"openapi/contract\.openapi\.json":"b202135e4509e14691c39ffed00844d9b0e41b6eb12ac6f6de92b49b22334035","operation\-manifest\.json":"8a2cbce07bc661cb213e78a96331e4384e3d12a9259a181325ad503fa142c01c","schema/contract\.schema\.json":"175a12016b52d40e2d68bfc03f7b11a1c0910d4ae6d3e18cdf59c83eda647fb9"\},"schemaVersion":"vuoro\-contract\-integrity/v1"\}$''']
+regexTarget = "line"
+condition = "AND"
