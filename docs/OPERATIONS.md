@@ -641,6 +641,20 @@ qualification. Other bundled inference and native-runtime source does not
 qualify Responses C0 or any model/service for production use. Source packaging
 and rendered deployment configuration likewise do not establish live adoption.
 
+### Candidate 0.1.25
+
+This candidate adds the operator-only native activation read in repository
+repair contract 1.4 and binds native activation to the current owner attempt.
+It also adds the default-off repository-only worker mode used by the fixed
+native cohost. The owner rechecks the current lease and execution authority
+before effects; activation does not extend the original execution deadline.
+See [the repository repair contract](contracts/repository-repair-v1.md) for
+the exact read and refusal boundaries.
+
+The database remains at schema 7. Source tests and release packaging do not
+establish deployment, a separate native VM, model qualification, or production
+serving. Existing schema migration and rollback requirements still apply.
+
 ### Repository execution host composition
 
 The optional [installed repository runtime](repository-runtime.md) connects a
