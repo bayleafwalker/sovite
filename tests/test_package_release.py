@@ -42,6 +42,21 @@ def test_release_archive_contains_locked_tsp_sources_and_verified_sdk_inventory(
             assert hashlib.sha256(archive.read(sdk_data + path)).hexdigest() == expected
 
 
+def test_source_release_includes_native_luna_catalog_license_with_exact_manifest(tmp_path):
+    relative = "sovite/repository_native_luna_catalog.LICENSE"
+    expected = (ROOT / relative).read_bytes()
+    output = tmp_path / "sovite-source.zip"
+    package_release.package(output)
+
+    with ZipFile(output) as archive:
+        assert archive.read("sovite/" + relative) == expected
+        manifest = json.loads(archive.read("sovite/RELEASE-MANIFEST.json"))
+        assert manifest["files"][relative] == {
+            "sha256": hashlib.sha256(expected).hexdigest(),
+            "bytes": len(expected),
+        }
+
+
 def test_contract_provenance_ignores_runtime_bytecode_but_rejects_sdk_source_edits(tmp_path, monkeypatch):
     provenance = json.loads((ROOT / "contracts/execution-v1/provenance.json").read_text())
     sdk_name = provenance["generatedSdk"]["package"].rsplit(".", 1)[-1]
