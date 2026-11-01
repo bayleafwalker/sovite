@@ -56,9 +56,11 @@ class _HandshakeDiagnostics:
         self.events.append({"elapsed_ms": elapsed, **safe})
 
     def note(self):
-        return "handshake_diagnostics=" + json.dumps(
-            {"events": list(self.events), "dropped": min(self.dropped, 2**31 - 1)},
-            sort_keys=True, separators=(",", ":"))
+        def render(value):
+            return "true" if value is True else "false" if value is False else str(value)
+        events = "|".join(",".join(key + ":" + render(event[key]) for key in sorted(event))
+                          for event in self.events)
+        return "handshake_diagnostics dropped=" + str(min(self.dropped, 2**31 - 1)) + " events=" + events
 
 
 def _error_category(error):

@@ -15,10 +15,16 @@ SENTINEL = "private-diagnostic-sentinel-do-not-print"
 
 def note_for(error):
     notes = getattr(error, "__notes__", [])
-    matching = [note for note in notes if note.startswith("handshake_diagnostics=")]
+    matching = [note for note in notes if note.startswith("handshake_diagnostics dropped=")]
     assert len(matching) == 1
     assert SENTINEL not in matching[0]
-    return json.loads(matching[0].split("=", 1)[1])
+    header, encoded = matching[0].split(" events=", 1)
+    events = []
+    for event in filter(None, encoded.split("|")):
+        fields = dict(field.split(":", 1) for field in event.split(","))
+        fields["elapsed_ms"] = int(fields["elapsed_ms"])
+        events.append(fields)
+    return {"events": events, "dropped": int(header.rsplit("=", 1)[1])}
 
 
 @pytest.mark.parametrize("action", ["open", "hello"])
@@ -79,7 +85,9 @@ def test_diagnostics_are_bounded_and_never_echo_unknown_error_codes():
         diagnostics.add(stage="serve", outcome="enter")
     diagnostics.add(secret=SENTINEL, action=SENTINEL, tls_present=SENTINEL)
     encoded = diagnostics.note()
-    payload = json.loads(encoded.split("=", 1)[1])
+    class Noted:
+        __notes__ = [encoded]
+    payload = note_for(Noted())
     assert len(payload["events"]) == 16 and payload["dropped"] == 10
     assert all(0 <= item["elapsed_ms"] <= 60000 for item in payload["events"])
     assert _error_category(GatewayError(SENTINEL)) == "gateway_error"
@@ -113,4 +121,4 @@ def test_successful_setup_is_silent_and_restores_wrapper(authority_env, capsys):
         assert HelperConnection.serve is original_serve
     asyncio.run(scenario())
     captured = capsys.readouterr()
-    assert "handshake_diagnostics=" not in captured.out + captured.err
+    assert "handshake_diagnostics dropped=" not in captured.out + captured.err
