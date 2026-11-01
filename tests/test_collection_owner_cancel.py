@@ -21,7 +21,7 @@ def fixture(db):
                "deadline_ms": 100, "retain_until_ms": 200}
     _, canonical, request_digest = create_request_identity(json.dumps(request).encode())
     policy = {"schema_version": "sovite.collection-owner-policy/v1", "policy_revision": 1,
-              "policy_digest": "5" * 64, "scope_id": "scope", "scope_policy_digest": "6" * 64,
+              "policy_digest": "5" * 64, "scope_id": "scope", "scope_policy_revision": 1, "scope_policy_digest": "6" * 64,
               "principals": principals, "seed_digest": "7" * 64, "base_sha": "8" * 64,
               "paths_digest": "9" * 64, "minimum_retention_ms": 100,
               "maximum_retain_until_ms": 500, "resource_deadline_ms": 100,

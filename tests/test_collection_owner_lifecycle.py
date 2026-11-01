@@ -299,3 +299,20 @@ def test_altered_epoch_binding_never_current(tmp_path, monkeypatch):
         assert owner.read(db, session_id="session", credential=operator())["state"] == "stopped_unknown"
     finally:
         db.engine.dispose()
+
+
+def test_scope_policy_revision_change_inhibits_instead_of_rebinding(tmp_path, monkeypatch):
+    db = Database(f"sqlite:///{tmp_path}/owner.db")
+    db.migrate()
+    try:
+        digest = fixture(db)
+        evidence = snapshot(db)
+        monkeypatch.setattr(owner, "_trusted_snapshot", lambda: evidence)
+        scope = Base.metadata.tables["program_budget_scopes"]
+        with db.engine.begin() as connection:
+            connection.execute(scope.update().values(policy_revision=2))
+        with pytest.raises(owner.CollectionOwnerError):
+            change(db, digest, "admit", 0)
+        assert owner.read(db, session_id="session", credential=operator())["state"] == "stopped_unknown"
+    finally:
+        db.engine.dispose()

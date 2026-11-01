@@ -54,7 +54,7 @@ def immutable_payload_digest(payload):
 
 
 def _validate_policy(policy):
-    keys = {"schema_version", "policy_revision", "policy_digest", "scope_id", "scope_policy_digest",
+    keys = {"schema_version", "policy_revision", "policy_digest", "scope_id", "scope_policy_revision", "scope_policy_digest",
             "principals", "seed_digest", "base_sha", "paths_digest", "minimum_retention_ms",
             "maximum_retain_until_ms", "resource_deadline_ms", "commissioning_deadline_ms",
             "permit_deadline_ms", "epoch_authorization_digest"}
@@ -65,7 +65,7 @@ def _validate_policy(policy):
     for name in ("seed_digest", "base_sha", "paths_digest", "policy_digest", "scope_policy_digest", "epoch_authorization_digest"):
         if type(policy[name]) is not str or not re.fullmatch(r"[0-9a-f]{64}", policy[name]):
             _deny()
-    for name in ("policy_revision", "minimum_retention_ms", "maximum_retain_until_ms", "resource_deadline_ms",
+    for name in ("policy_revision", "scope_policy_revision", "minimum_retention_ms", "maximum_retain_until_ms", "resource_deadline_ms",
                  "commissioning_deadline_ms", "permit_deadline_ms"):
         if type(policy[name]) is not int or not 0 < policy[name] <= MAX_INTEGER:
             _deny()
@@ -198,7 +198,7 @@ def _scope(session, policy):
     scope = _table("program_budget_scopes")
     row = session.execute(select(scope).where(scope.c.id == policy["scope_id"]).with_for_update()).mappings().one_or_none()
     if (row is None or row["policy_digest"] != policy["scope_policy_digest"]
-            or row["policy_revision"] != policy["policy_revision"]):
+            or row["policy_revision"] != policy["scope_policy_revision"]):
         _deny()
     return row
 
@@ -236,7 +236,7 @@ def _integrity(session, row, payload):
     subject_row = session.execute(select(subject).where(subject.c.scope_id == row["scope_id"],
         subject.c.subject_id == row["id"])).mappings().one_or_none()
     return bool(scope_row and subject_row and scope_row["policy_digest"] == policy["scope_policy_digest"]
-                and scope_row["policy_revision"] == policy["policy_revision"]
+                and scope_row["policy_revision"] == policy["scope_policy_revision"]
                 and subject_row["purpose"] == "collection" and subject_row["binding_digest"] == row["immutable_digest"])
 
 
