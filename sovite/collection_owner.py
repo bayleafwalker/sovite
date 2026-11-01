@@ -235,9 +235,11 @@ def _integrity(session, row, payload):
     scope_row = session.execute(select(scope).where(scope.c.id == row["scope_id"])).mappings().one_or_none()
     subject_row = session.execute(select(subject).where(subject.c.scope_id == row["scope_id"],
         subject.c.subject_id == row["id"])).mappings().one_or_none()
-    return bool(scope_row and subject_row and scope_row["policy_digest"] == policy["scope_policy_digest"]
-                and scope_row["policy_revision"] == policy["scope_policy_revision"]
-                and subject_row["purpose"] == "collection" and subject_row["binding_digest"] == row["immutable_digest"])
+    if not scope_row or not subject_row or subject_row["purpose"] != "collection" or subject_row["binding_digest"] != row["immutable_digest"]:
+        return "corrupt"
+    if scope_row["policy_digest"] != policy["scope_policy_digest"] or scope_row["policy_revision"] != policy["scope_policy_revision"]:
+        return "policy_changed"
+    return "current"
 
 
 def _epoch_binding_valid(row, epoch, payload):
@@ -394,7 +396,10 @@ def transition(database, *, session_id, credential, expected_revision, immutable
         guard = _guard(session, session_id)
         epochs = _epoch_rows(session, session_id)
         clean = _clean(session, session_id, row["scope_id"])
-        if not clean or not _integrity(session, row, payload) or not _guard_consistent(row, guard, epochs, payload):
+        integrity = _integrity(session, row, payload)
+        if integrity == "policy_changed":
+            _deny()
+        if not clean or integrity != "current" or not _guard_consistent(row, guard, epochs, payload):
             if row["state"] in {"created", "admitted", "active"}:
                 _change_state(session, row, "stopped_unknown")
                 _audit_state(database, session, row, credential, "collection.inhibited", "stopped_unknown", row["revision"] + 1)
@@ -478,8 +483,11 @@ def currentness(database, *, session_id, credential):
             matches = True
         guard = _guard(session, session_id)
         epochs = _epoch_rows(session, session_id)
-        if not _guard_consistent(row, guard, epochs, payload) or not _integrity(session, row, payload):
+        integrity = _integrity(session, row, payload)
+        if not _guard_consistent(row, guard, epochs, payload) or integrity == "corrupt":
             _deny("collection_unavailable", 503)
+        if integrity == "policy_changed":
+            matches = False
         clean = _clean(session, session_id, row["scope_id"])
         valid_epoch = (len(epochs) == 1 and epochs[0]["state"] == "active"
                        and _epoch_binding_valid(row, epochs[0], payload))

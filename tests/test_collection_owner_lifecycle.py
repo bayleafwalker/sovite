@@ -301,7 +301,7 @@ def test_altered_epoch_binding_never_current(tmp_path, monkeypatch):
         db.engine.dispose()
 
 
-def test_scope_policy_revision_change_inhibits_instead_of_rebinding(tmp_path, monkeypatch):
+def test_scope_policy_revision_change_refuses_without_rebinding(tmp_path, monkeypatch):
     db = Database(f"sqlite:///{tmp_path}/owner.db")
     db.migrate()
     try:
@@ -313,6 +313,7 @@ def test_scope_policy_revision_change_inhibits_instead_of_rebinding(tmp_path, mo
             connection.execute(scope.update().values(policy_revision=2))
         with pytest.raises(owner.CollectionOwnerError):
             change(db, digest, "admit", 0)
-        assert owner.read(db, session_id="session", credential=operator())["state"] == "stopped_unknown"
+        assert owner.read(db, session_id="session", credential=operator())["state"] == "created"
+        assert owner.currentness(db, session_id="session", credential=operator())["current"] is False
     finally:
         db.engine.dispose()
