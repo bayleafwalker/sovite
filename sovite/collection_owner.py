@@ -102,6 +102,7 @@ def _binding(row):
                 _deny()
         if policy["scope_id"] != row["scope_id"] or request["retain_until_ms"] > row["retain_until_ms"]:
             _deny()
+        _retention(policy, row["deadline_ms"], row["retain_until_ms"])
         if row["purpose"] != "operator_c0_collection":
             _deny()
         return payload
@@ -196,7 +197,8 @@ def _current_snapshot():
 def _scope(session, policy):
     scope = _table("program_budget_scopes")
     row = session.execute(select(scope).where(scope.c.id == policy["scope_id"]).with_for_update()).mappings().one_or_none()
-    if row is None or row["policy_digest"] != policy["scope_policy_digest"]:
+    if (row is None or row["policy_digest"] != policy["scope_policy_digest"]
+            or row["policy_revision"] != policy["policy_revision"]):
         _deny()
     return row
 
@@ -234,7 +236,25 @@ def _integrity(session, row, payload):
     subject_row = session.execute(select(subject).where(subject.c.scope_id == row["scope_id"],
         subject.c.subject_id == row["id"])).mappings().one_or_none()
     return bool(scope_row and subject_row and scope_row["policy_digest"] == policy["scope_policy_digest"]
+                and scope_row["policy_revision"] == policy["policy_revision"]
                 and subject_row["purpose"] == "collection" and subject_row["binding_digest"] == row["immutable_digest"])
+
+
+def _epoch_binding_valid(row, epoch, payload):
+    policy = payload["policy"]
+    try:
+        if (epoch["epoch"] != 1 or epoch["epoch_purpose"] != "execution"
+                or epoch["principal_id"] != policy["principals"]["collection-agent"]
+                or epoch["authorization_digest"] != policy["epoch_authorization_digest"]
+                or type(epoch["deadline_ms"]) is not int
+                or epoch["deadline_ms"] > min(row["deadline_ms"], policy["permit_deadline_ms"],
+                    policy["commissioning_deadline_ms"], policy["resource_deadline_ms"])
+                or epoch["retain_until_ms"] > row["retain_until_ms"]):
+            return False
+        _retention(policy, epoch["deadline_ms"], epoch["retain_until_ms"])
+        return True
+    except (CollectionOwnerError, KeyError, TypeError):
+        return False
 
 
 def _guard_consistent(row, guard, epochs, payload):
@@ -242,15 +262,11 @@ def _guard_consistent(row, guard, epochs, payload):
         return False
     if row["state"] in {"created", "admitted"}:
         history = not epochs or (row["state"] == "admitted" and len(epochs) == 1
-                    and epochs[0]["epoch"] == 1 and epochs[0]["state"] == "closed"
-                    and epochs[0]["epoch_purpose"] == "execution" and epochs[0]["principal_id"] ==
-                    payload["policy"]["principals"]["collection-agent"])
+                    and epochs[0]["state"] == "closed" and _epoch_binding_valid(row, epochs[0], payload))
         return guard["active_epoch"] is None and row["current_epoch"] is None and history
     if row["state"] == "active":
         return (guard["active_epoch"] == 1 and row["current_epoch"] == 1 and len(epochs) == 1
-                and epochs[0]["epoch"] == 1 and epochs[0]["state"] == "active"
-                and epochs[0]["epoch_purpose"] == "execution" and epochs[0]["principal_id"] ==
-                payload["policy"]["principals"]["collection-agent"])
+                and epochs[0]["state"] == "active" and _epoch_binding_valid(row, epochs[0], payload))
     return True
 
 
@@ -465,9 +481,8 @@ def currentness(database, *, session_id, credential):
         if not _guard_consistent(row, guard, epochs, payload) or not _integrity(session, row, payload):
             _deny("collection_unavailable", 503)
         clean = _clean(session, session_id, row["scope_id"])
-        valid_epoch = (len(epochs) == 1 and epochs[0]["epoch"] == 1 and epochs[0]["state"] == "active"
-                       and epochs[0]["epoch_purpose"] == "execution" and epochs[0]["principal_id"] ==
-                       payload["policy"]["principals"]["collection-agent"])
+        valid_epoch = (len(epochs) == 1 and epochs[0]["state"] == "active"
+                       and _epoch_binding_valid(row, epochs[0], payload))
         state_matches = row["state"] == "active" and row["current_epoch"] == 1 and guard["active_epoch"] == 1
         if row["state"] == "active" and (not state_matches or not valid_epoch):
             _deny("collection_unavailable", 503)

@@ -276,3 +276,26 @@ def test_unknown_accounting_is_retained_and_inhibits(tmp_path, monkeypatch):
         assert db.verify_audit()["valid"]
     finally:
         db.engine.dispose()
+
+
+def test_altered_epoch_binding_never_current(tmp_path, monkeypatch):
+    db = Database(f"sqlite:///{tmp_path}/owner.db")
+    db.migrate()
+    try:
+        digest = fixture(db)
+        evidence = snapshot(db)
+        monkeypatch.setattr(owner, "_trusted_snapshot", lambda: evidence)
+        change(db, digest, "admit", 0)
+        change(db, digest, "start", 1, credential=agent(), epoch_deadline_ms=80,
+               retain_until_ms=200, authorization_digest="a" * 64)
+        epochs = Base.metadata.tables["collection_epochs"]
+        with db.engine.begin() as connection:
+            connection.execute(epochs.update().values(authorization_digest="f" * 64))
+        with pytest.raises(owner.CollectionOwnerError) as error:
+            owner.currentness(db, session_id="session", credential=agent())
+        assert error.value.status == 503
+        with pytest.raises(owner.CollectionOwnerError):
+            change(db, digest, "close", 2, credential=agent())
+        assert owner.read(db, session_id="session", credential=operator())["state"] == "stopped_unknown"
+    finally:
+        db.engine.dispose()
