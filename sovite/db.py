@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, Float, Index, Integer, JSON, String, Text, UniqueConstraint, create_engine, event, inspect, select
+from sqlalchemy import Boolean, CheckConstraint, Float, ForeignKeyConstraint, Index, Integer, JSON, String, Text, UniqueConstraint, create_engine, event, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -336,25 +336,36 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
-_CHECK_TOKEN = re.compile(r"\s*(?:(?P<word>[A-Za-z_][A-Za-z0-9_]*)|(?P<paren>[()]))")
+_CHECK_TOKEN = re.compile(r"\s*(?:(?P<word>[A-Za-z_][A-Za-z0-9_]*)|(?P<number>-?[0-9]+)|(?P<string>'(?:[^']|'')*')|(?P<operator>>=|<=|<>|!=|=|>|<|::)|(?P<punct>[(),\[\]]))")
 
 
 def _check_expression_tree(expression: str):
-    """Parse the boolean/null-check grammar used by the schema's named guards.
-
-    PostgreSQL and SQLite add harmless grouping parentheses when reflecting a
-    CHECK. Keep normalization deliberately narrow: accept only identifiers,
-    IS [NOT] NULL, AND, OR and grouping parentheses.
-    """
+    """Parse only explicitly supported portable CHECK expressions, fail closed."""
+    # PostgreSQL renders VARCHAR IN literals as a text-cast ANY array.
+    # Accept only this exact reflected shape and only string literals.
+    reflected = re.fullmatch(
+        r"\(\(([A-Za-z_][A-Za-z0-9_]*)\)::text = ANY \(\(ARRAY\[((?:'(?:[^']|'')*'::character varying)(?:, '(?:[^']|'')*'::character varying)*)\]\)::text\[\]\)\)",
+        expression,
+    )
+    if reflected is None:
+        reflected = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_]*)::text = ANY \(ARRAY\[((?:'(?:[^']|'')*'::character varying)(?:, '(?:[^']|'')*'::character varying)*)\]::text\[\]\)",
+            expression,
+        )
+    if reflected:
+        literals = re.findall(r"'((?:[^']|'')*)'::character varying", reflected.group(2))
+        return ("in", reflected.group(1).lower(), tuple(("string", value.replace("''", "'")) for value in literals))
     tokens = []
     offset = 0
     while offset < len(expression):
         match = _CHECK_TOKEN.match(expression, offset)
         if match is None:
-            if expression[offset:].strip() == "":
+            if not expression[offset:].strip():
                 break
             raise ValueError("unsupported check expression syntax")
-        tokens.append((match.group("word") or match.group("paren")).lower())
+        kind = match.lastgroup
+        value = match.group(kind)
+        tokens.append((kind, value if kind == "string" else value.lower()))
         offset = match.end()
     position = 0
 
@@ -363,37 +374,80 @@ def _check_expression_tree(expression: str):
         if position >= len(tokens):
             raise ValueError("incomplete check expression")
         token = tokens[position]
-        if expected is not None and token != expected:
+        if expected is not None and token[1] != expected:
             raise ValueError("unexpected check expression token")
         position += 1
         return token
 
+    def peek(value):
+        return position < len(tokens) and tokens[position][1] == value
+
+    def literal():
+        kind, value = take()
+        if kind == "number":
+            result = ("integer", int(value))
+        elif kind == "string":
+            result = ("string", value[1:-1].replace("''", "'"))
+        else:
+            raise ValueError("expected literal")
+        if peek("::"):
+            take("::")
+            cast = take()[1]
+            if (cast, kind) not in {("text", "string"), ("integer", "number")}:
+                raise ValueError("unsupported cast")
+        return result
+
+    def items(end):
+        values = [literal()]
+        while peek(","):
+            take(",")
+            values.append(literal())
+        take(end)
+        return tuple(values)
+
     def atom():
-        if position < len(tokens) and tokens[position] == "(":
+        if peek("("):
             take("(")
             value = disjunction()
             take(")")
             return value
-        column = take()
-        if column in {"and", "or", "is", "not", "null"}:
+        kind, column = take()
+        if kind != "word" or column in {"and", "or", "is", "not", "null", "in"}:
             raise ValueError("expected check column")
-        take("is")
-        negated = position < len(tokens) and tokens[position] == "not"
-        if negated:
-            take("not")
-        take("null")
-        return ("is-not-null" if negated else "is-null", column)
+        if peek("is"):
+            take("is")
+            negated = peek("not")
+            if negated:
+                take("not")
+            take("null")
+            return ("is-not-null" if negated else "is-null", column)
+        if peek("in"):
+            take("in")
+            take("(")
+            return ("in", column, items(")"))
+        op = take()[1]
+        if op not in {"=", "!=", "<>", ">", ">=", "<", "<="}:
+            raise ValueError("unsupported check operator")
+        if op == "=" and peek("any"):
+            take("any")
+            take("(")
+            take("array")
+            take("[")
+            values = items("]")
+            take(")")
+            return ("in", column, values)
+        return ("comparison", column, op, literal())
 
     def conjunction():
         value = atom()
-        while position < len(tokens) and tokens[position] == "and":
+        while peek("and"):
             take("and")
             value = ("and", value, atom())
         return value
 
     def disjunction():
         value = conjunction()
-        while position < len(tokens) and tokens[position] == "or":
+        while peek("or"):
             take("or")
             value = ("or", value, conjunction())
         return value
@@ -441,6 +495,8 @@ class Database:
     def _structure(self, connection, tables):
         inspector = inspect(connection)
         names = set(inspector.get_table_names(schema=self.schema))
+        if connection.dialect.name == "sqlite" and connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() != 1:
+            raise DatabaseSchemaError("database_schema_incomplete", "SQLite foreign key enforcement is disabled")
         for table in tables:
             if table.name not in names:
                 raise DatabaseSchemaError("database_schema_incomplete", f"Missing table {table.name}; restore or migrate a supported schema")
@@ -460,6 +516,43 @@ class Database:
             for constraint in table.constraints:
                 if isinstance(constraint, UniqueConstraint) and not any(row["column_names"] == [column.name for column in constraint.columns] for row in unique):
                     raise DatabaseSchemaError("database_schema_incomplete", f"Missing unique constraint on {table.name}")
+            if connection.dialect.name == "postgresql":
+                foreign_keys = inspector.get_foreign_keys(table.name, schema=self.schema, postgresql_ignore_search_path=True)
+                default_schema = self.schema or connection.execute(text("SELECT current_schema()")).scalar_one()
+            else:
+                foreign_keys = inspector.get_foreign_keys(table.name, schema=self.schema)
+                default_schema = self.schema
+            for constraint in table.constraints:
+                if not isinstance(constraint, ForeignKeyConstraint):
+                    continue
+                elements = list(constraint.elements)
+                expected_schema = elements[0].column.table.schema or default_schema
+                expected = ([element.parent.name for element in elements], expected_schema,
+                            elements[0].column.table.name, [element.column.name for element in elements])
+                matches = [row for row in foreign_keys if
+                           (row.get("constrained_columns"), row.get("referred_schema") or default_schema,
+                            row.get("referred_table"), row.get("referred_columns")) == expected]
+                def action(value):
+                    return (value or "NO ACTION").upper()
+                if len(matches) != 1:
+                    raise DatabaseSchemaError("database_schema_incomplete", f"Missing or ambiguous foreign key on {table.name}")
+                options = matches[0].get("options") or {}
+                if (action(options.get("ondelete")) != action(constraint.ondelete)
+                        or action(options.get("onupdate")) != action(constraint.onupdate)
+                        or (options.get("match") or "SIMPLE").upper() != (constraint.match or "SIMPLE").upper()
+                        or bool(options.get("deferrable", False)) != bool(constraint.deferrable)
+                        or options.get("initially") is not None or constraint.initially is not None):
+                    raise DatabaseSchemaError("database_schema_incomplete", f"Incompatible foreign key on {table.name}")
+                if connection.dialect.name == "postgresql":
+                    name = matches[0].get("name")
+                    valid = connection.execute(text("""SELECT c.convalidated FROM pg_catalog.pg_constraint c
+                        JOIN pg_catalog.pg_class t ON t.oid = c.conrelid
+                        JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+                        WHERE c.contype = 'f' AND t.relname = :table AND c.conname = :name
+                          AND n.nspname = COALESCE(:schema, current_schema())"""),
+                        {"table": table.name, "name": name, "schema": self.schema}).scalar_one_or_none()
+                    if valid is not True:
+                        raise DatabaseSchemaError("database_schema_incomplete", f"Unvalidated foreign key on {table.name}")
             checks = inspector.get_check_constraints(table.name, schema=self.schema)
             by_name = {row.get("name"): row for row in checks if row.get("name")}
             for constraint in table.constraints:
