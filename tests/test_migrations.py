@@ -99,7 +99,7 @@ def test_upgrade_v1_preserves_jobs_bundle_and_operational_state(database, databa
     database_cli("migrate")
     assert "binding_runtime_state" in inspect(db.engine).get_table_names(schema=db.schema)
     with db.sessions.begin() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 7}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 8}
         assert session.get(MetadataRow, "active_generation").value == {"generation": generation}
         assert session.get(BundleRevision, generation).bundle == bundle
         job = session.get(Job, "old-job")
@@ -125,7 +125,7 @@ def test_fresh_schema_stores_and_reads_binding_state(database):
     db.migrate()
     db.initialize()
     with db.sessions.begin() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 7}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 8}
         session.add(BindingState(id="model-a"))
     with db.sessions.begin() as session:
         state = session.get(BindingState, "model-a")
@@ -151,7 +151,7 @@ def test_upgrade_is_idempotent_after_table_creation(database):
     db.initialize()
     db.initialize()
     with db.sessions() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 7}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 8}
         assert session.get(BindingState, "model-a").inhibited
 
 
@@ -539,6 +539,12 @@ _HISTORICAL_TABLES = {
     3: frozenset({"execution_authority", "helper_enrollments", "helper_sessions", "inference_requests"}),
     4: frozenset({"setup_principals", "setup_drafts"}),
 }
+_SCHEMA8_TABLES = frozenset({
+    "program_budget_scopes", "program_budget_subjects", "program_reservations", "program_slots",
+    "collection_sessions", "collection_epochs", "collection_epoch_guards", "collection_enrollments",
+    "collection_operations", "collection_acknowledgements", "collection_checkpoints",
+    "collection_observations", "collection_retention_refs",
+})
 _SCHEMA5_FIELDS = {
     "worker_execution_leases": {
         "job_id": (String, 64, False), "workload_id": (String, 160, False),
@@ -659,15 +665,16 @@ def _read_only_sql(statements):
 def test_schema5_migration_ledger_preserves_historical_meanings():
     import sovite.db as owner
     _assert_historical_migrations()
-    assert len(owner.MIGRATIONS) == 7, "schema-7 append migration is missing"
-    assert [number for number, _ in owner.MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7]
+    assert len(owner.MIGRATIONS) == 8, "schema-8 append migration is missing"
+    assert [number for number, _ in owner.MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert {table.name for table in owner.MIGRATIONS[7][1]} == _SCHEMA8_TABLES
     assert {table.name for table in owner.MIGRATIONS[4][1]} == set(_SCHEMA5_FIELDS)
     assert {table.name for table in owner.MIGRATIONS[5][1]} == {
         "resource_gateway_enrollments", "resource_workload_scopes",
         "resource_output_grants", "resource_owner_requests"}
     assert set(Base.metadata.tables) == _historical_layout(4) | set(_SCHEMA5_FIELDS) | {
         "resource_gateway_enrollments", "resource_workload_scopes",
-        "resource_output_grants", "resource_owner_requests"}
+        "resource_output_grants", "resource_owner_requests"} | _SCHEMA8_TABLES
     for model_name, table_name in (("WorkerExecutionLease", "worker_execution_leases"),
                                    ("WorkerExecutionOperation", "worker_execution_operations")):
         model = getattr(owner, model_name, None)
@@ -697,7 +704,7 @@ def test_schema5_to_6_requires_explicit_migration_and_preserves_rows(database):
     assert "resource_owner_requests" not in inspect(db.engine).get_table_names(schema=db.schema)
     db.migrate()
     with db.sessions() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 7}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 8}
         assert session.get(Job, "before-resource-owner").task == "kept"
     assert {"resource_gateway_enrollments", "resource_workload_scopes",
         "resource_output_grants", "resource_owner_requests"} <= set(
@@ -731,7 +738,7 @@ def test_schema5_upgrade_preserves_every_historical_row_and_authored_bytes(datab
             for name in _SCHEMA5_FIELDS:
                 assert connection.execute(select(Base.metadata.tables[name])).all() == [], "legacy jobs must not get backfilled reservations or operations"
         with database.sessions() as session:
-            assert session.get(MetadataRow, "schema_version").value == {"version": 7}
+            assert session.get(MetadataRow, "schema_version").value == {"version": 8}
         database.migrate()
 
 

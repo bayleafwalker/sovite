@@ -129,3 +129,14 @@ def test_postgres_fk_to_search_path_decoy_is_rejected(db):
         with pytest.raises(DatabaseSchemaError, match="foreign key"):
             db._structure(connection, metadata.sorted_tables)
         connection.exec_driver_sql(f'DROP SCHEMA "{decoy}" CASCADE')
+
+
+def test_postgres_string_reflection_normalization_is_narrow():
+    columns = {"state", "verb"}
+    expected = _check_expression_tree("state = 'open' OR verb IN ('seed-v1', 'exec-v1')")
+    actual = _check_expression_tree("state::text = 'open'::text OR (verb::text = ANY (ARRAY['seed-v1'::character varying, 'exec-v1'::character varying]::text[]))", text_columns=columns)
+    assert actual == expected
+    assert _check_expression_tree("state IN ('only')") == _check_expression_tree("state = 'only'")
+    assert _check_expression_tree("state = 'state::text'", text_columns=columns) != _check_expression_tree("state = 'state'")
+    with pytest.raises(ValueError, match="declared string column"):
+        _check_expression_tree("amount::text = '1'::text", text_columns=columns)
