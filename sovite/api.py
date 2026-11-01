@@ -147,6 +147,9 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     app.state.repository_run_owner = repository_run_owner
     app.state.repository_runtime = runtime
     app.state.repository_repair_service = runtime.repair if runtime is not None else None
+    if settings.collection_owner_enabled:
+        from .collection_owner_api import install_routes as install_collection_owner_routes
+        install_collection_owner_routes(app, platform, settings)
     from .authority_api import install_routes
     install_routes(app, platform, settings)
     from .execution_api import install_routes as install_execution_routes

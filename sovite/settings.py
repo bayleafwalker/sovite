@@ -54,8 +54,27 @@ class Settings:
     setup_installation_id: str = ""
     installation_id: str = ""
     repository_runtime_config: str | None = None
+    collection_owner_enabled: bool = False
+    collection_credentials: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
+        if type(self.collection_owner_enabled) is not bool or not isinstance(self.collection_credentials, dict):
+            raise ValueError("invalid collection configuration")
+        if self.collection_owner_enabled:
+            from .collection_identity import CollectionCredential, validate_credentials
+            try:
+                values = tuple(CollectionCredential(entry["principal_id"], capability, entry["token"])
+                    for capability, entry in self.collection_credentials.items()
+                    if type(entry) is dict and set(entry) == {"principal_id", "token"})
+                validate_credentials(values, reserved_tokens=tuple(filter(None, (
+                    self.operator_token, self.author_token, self.activator_token, self.authority_token,
+                    *self.caller_tokens.values(), *self.execution_tokens.values()))))
+                if len(values) != len(self.collection_credentials):
+                    raise ValueError("invalid collection configuration")
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("invalid collection configuration") from None
+        elif self.collection_credentials:
+            raise ValueError("collection credentials require the collection owner")
         if set(self.caller_tokens) & {"operator", "author", "activator"}:
             raise ValueError("Caller identities must not reuse administrative role names")
         if not isinstance(self.execution_tokens, dict) or not all(
@@ -156,6 +175,8 @@ class Settings:
             setup_installation_id=env.get("SOVITE_SETUP_INSTALLATION_ID", ""),
             installation_id=env.get("SOVITE_INSTALLATION_ID", ""),
             repository_runtime_config=env.get("SOVITE_REPOSITORY_RUNTIME_CONFIG") or None,
+            collection_owner_enabled=truth("COLLECTION_OWNER_ENABLED", False) if auth_role is None else False,
+            collection_credentials=json.loads(env.get("SOVITE_COLLECTION_CREDENTIALS", "{}")) if auth_role is None else {},
         )
         if result.artifact_backend not in {"filesystem", "s3"}:
             raise ValueError("artifact backend must be filesystem or s3")
