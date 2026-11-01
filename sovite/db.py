@@ -311,14 +311,19 @@ class SetupDraft(Base):
 from .resource_schema import legacy_tables
 _RESOURCE_V6 = legacy_tables()
 
+from .collection_schema import define_collection_schema
+_COLLECTION_V8 = define_collection_schema(Base.metadata)
+_COLLECTION_NAMES = {table.name for table in _COLLECTION_V8}
+
 MIGRATIONS = (
-    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations", "resource_gateway_enrollments", "resource_workload_scopes", "resource_output_grants", "resource_owner_requests"})),
+    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in _COLLECTION_NAMES and table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations", "resource_gateway_enrollments", "resource_workload_scopes", "resource_output_grants", "resource_owner_requests"})),
     (2, (BindingState.__table__,)),
     (3, (ExecutionAuthority.__table__, HelperEnrollment.__table__, HelperSession.__table__, RequestLedger.__table__)),
     (4, (SetupPrincipal.__table__, SetupDraft.__table__)),
     (5, (WorkerExecutionLease.__table__, WorkerExecutionOperation.__table__)),
     (6, _RESOURCE_V6),
     (7, (ResourceWorkloadScope.__table__, ResourceOwnerRequest.__table__)),
+    (8, _COLLECTION_V8),
 )
 
 
@@ -339,22 +344,27 @@ def digest(value: Any) -> str:
 _CHECK_TOKEN = re.compile(r"\s*(?:(?P<word>[A-Za-z_][A-Za-z0-9_]*)|(?P<number>-?[0-9]+)|(?P<string>'(?:[^']|'')*')|(?P<operator>>=|<=|<>|!=|=|>|<|::)|(?P<punct>[(),\[\]]))")
 
 
-def _check_expression_tree(expression: str):
+def _check_expression_tree(expression: str, *, text_columns=frozenset()):
     """Parse only explicitly supported portable CHECK expressions, fail closed."""
-    # PostgreSQL renders VARCHAR IN literals as a text-cast ANY array.
-    # Accept only this exact reflected shape and only string literals.
-    reflected = re.fullmatch(
-        r"\(\(([A-Za-z_][A-Za-z0-9_]*)\)::text = ANY \(\(ARRAY\[((?:'(?:[^']|'')*'::character varying)(?:, '(?:[^']|'')*'::character varying)*)\]\)::text\[\]\)\)",
-        expression,
+    # PostgreSQL may cast VARCHAR columns and render IN as an ANY array.
+    # Match complete safe fragments while preserving quoted strings verbatim.
+    reflected_fragment = re.compile(
+        r"(?P<quoted>'(?:[^']|'')*')|"
+        r"(?P<any>(?P<any_col>[A-Za-z_][A-Za-z0-9_]*)::text = ANY \(ARRAY\["
+        r"(?P<values>'(?:[^']|'')*'::character varying(?:, '(?:[^']|'')*'::character varying)*)"
+        r"\]::text\[\]\))|(?P<column>(?P<column_name>[A-Za-z_][A-Za-z0-9_]*)::text)"
     )
-    if reflected is None:
-        reflected = re.fullmatch(
-            r"([A-Za-z_][A-Za-z0-9_]*)::text = ANY \(ARRAY\[((?:'(?:[^']|'')*'::character varying)(?:, '(?:[^']|'')*'::character varying)*)\]::text\[\]\)",
-            expression,
-        )
-    if reflected:
-        literals = re.findall(r"'((?:[^']|'')*)'::character varying", reflected.group(2))
-        return ("in", reflected.group(1).lower(), tuple(("string", value.replace("''", "'")) for value in literals))
+    def normalize(match):
+        if match.group("quoted") is not None:
+            return match.group("quoted")
+        name = match.group("any_col") or match.group("column_name")
+        if name.lower() not in text_columns:
+            raise ValueError("cast requires a declared string column")
+        if match.group("any") is not None:
+            values = re.sub(r"('(?:[^']|'')*')::character varying", r"\1", match.group("values"))
+            return f"{name} IN ({values})"
+        return name
+    expression = reflected_fragment.sub(normalize, expression)
     tokens = []
     offset = 0
     while offset < len(expression):
@@ -382,12 +392,14 @@ def _check_expression_tree(expression: str):
     def peek(value):
         return position < len(tokens) and tokens[position][1] == value
 
-    def literal():
+    def literal(*, allow_column=False):
         kind, value = take()
         if kind == "number":
             result = ("integer", int(value))
         elif kind == "string":
             result = ("string", value[1:-1].replace("''", "'"))
+        elif allow_column and kind == "word" and value not in {"and", "or", "is", "not", "null", "in"}:
+            result = ("column", value)
         else:
             raise ValueError("expected literal")
         if peek("::"):
@@ -424,7 +436,8 @@ def _check_expression_tree(expression: str):
         if peek("in"):
             take("in")
             take("(")
-            return ("in", column, items(")"))
+            values = items(")")
+            return ("comparison", column, "=", values[0]) if len(values) == 1 else ("in", column, values)
         op = take()[1]
         if op not in {"=", "!=", "<>", ">", ">=", "<", "<="}:
             raise ValueError("unsupported check operator")
@@ -436,7 +449,7 @@ def _check_expression_tree(expression: str):
             values = items("]")
             take(")")
             return ("in", column, values)
-        return ("comparison", column, op, literal())
+        return ("comparison", column, op, literal(allow_column=True))
 
     def conjunction():
         value = atom()
@@ -564,7 +577,9 @@ class Database:
                 if (actual.get("dialect_options") or {}).get("not_valid"):
                     raise DatabaseSchemaError("database_schema_incomplete", f"Unvalidated check constraint {constraint.name} on {table.name}")
                 try:
-                    matches = _check_expression_tree(str(actual.get("sqltext", ""))) == _check_expression_tree(str(constraint.sqltext))
+                    text_columns = {column.name.lower() for column in table.columns if column.type._type_affinity is String}
+                    matches = (_check_expression_tree(str(actual.get("sqltext", "")), text_columns=text_columns)
+                               == _check_expression_tree(str(constraint.sqltext), text_columns=text_columns))
                 except ValueError:
                     matches = False
                 if not matches:
