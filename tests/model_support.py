@@ -5,6 +5,7 @@ from unittest.mock import patch
 import copy
 import json
 import time
+from threading import Lock
 from types import SimpleNamespace
 
 import httpx
@@ -132,8 +133,30 @@ def authority_env(database, tmp_path, v2_bundle):
                            bundle=bundle, path=tmp_path, model=model, role=role)
 
 
+_handshake_patch_lock = Lock()
+
+
+@asynccontextmanager
+async def _handshake_fixture_lock():
+    # A process-wide lock prevents patch restoration races across event loops.
+    # Waiting happens before the helper is started and is cancellation-safe.
+    while not _handshake_patch_lock.acquire(blocking=False):
+        await asyncio.sleep(.01)
+    try:
+        yield
+    finally:
+        _handshake_patch_lock.release()
+
+
 @asynccontextmanager
 async def connected(env, *, stall=False, helper_type=PilotHelper):
+    async with _handshake_fixture_lock():
+        async with _connected_unlocked(env, stall=stall, helper_type=helper_type) as result:
+            yield result
+
+
+@asynccontextmanager
+async def _connected_unlocked(env, *, stall=False, helper_type=PilotHelper):
     tls, key = certificates(env.path)
     provision_enrollment(env.platform, enrollment_id=ASSERTION['enrollment_id'], binding_id=env.model['id'],
                          installation_id=ASSERTION['installation_id'], role=env.role['id'], certificate=(env.path / 'helper.pem').read_bytes())

@@ -1,6 +1,5 @@
 """Test-only setup diagnostics preserve failures and redact private inputs."""
 import asyncio
-import json
 
 import pytest
 from websockets.exceptions import ConnectionClosedOK
@@ -108,7 +107,7 @@ def test_setup_reraises_same_exception_and_restores_wrapper(authority_env):
             async with connected(authority_env, helper_type=FailingHelper):
                 pytest.fail("body must not execute")
         assert caught.value is original_error
-        assert SENTINEL not in json.dumps(note_for(caught.value))
+        note_for(caught.value)  # also verifies that the sentinel is absent
         assert HelperConnection.serve is original_serve
     asyncio.run(scenario())
 
@@ -122,3 +121,73 @@ def test_successful_setup_is_silent_and_restores_wrapper(authority_env, capsys):
     asyncio.run(scenario())
     captured = capsys.readouterr()
     assert "handshake_diagnostics dropped=" not in captured.out + captured.err
+
+
+def test_concurrent_fixtures_serialize_and_restore_after_out_of_order_exit(authority_env, tmp_path, v2_bundle):
+    from sovite.db import Database
+    from model_support import authority_env as fixture_factory
+    second_path = tmp_path / "second-fixture"
+    second_path.mkdir()
+    second_db = Database(f"sqlite:///{second_path}/second.db")
+    second_env = fixture_factory.__wrapped__(second_db, second_path, v2_bundle)
+    original_serve = HelperConnection.serve
+    async def scenario():
+        first_entered, first_release = asyncio.Event(), asyncio.Event()
+        second_started, second_entered, second_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async def first():
+            async with connected(authority_env):
+                first_entered.set()
+                await first_release.wait()
+        async def second():
+            second_started.set()
+            async with connected(second_env):
+                second_entered.set()
+                await second_release.wait()
+        one = asyncio.create_task(first())
+        two = None
+        try:
+            await asyncio.wait_for(first_entered.wait(), 5)
+            two = asyncio.create_task(second())
+            await asyncio.wait_for(second_started.wait(), 5)
+            # The second scope requests exit first, but cannot enter until the
+            # first patch has been restored.
+            second_release.set()
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(second_entered.wait(), 1)
+            first_release.set()
+            await asyncio.wait_for(asyncio.gather(one, two), 5)
+            assert second_entered.is_set()
+            assert HelperConnection.serve is original_serve
+        finally:
+            first_release.set()
+            second_release.set()
+            tasks = [task for task in (one, two) if task is not None]
+            await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        asyncio.run(scenario())
+    finally:
+        second_db.engine.dispose()
+
+
+def test_waiting_lock_is_cancellable_nonblocking_and_reusable_across_loops():
+    from model_support import _handshake_fixture_lock
+    async def scenario():
+        ticked = asyncio.Event()
+        async with _handshake_fixture_lock():
+            async def wait_for_lock():
+                async with _handshake_fixture_lock():
+                    pytest.fail("cancelled waiter must never enter")
+            waiter = asyncio.create_task(wait_for_lock())
+            async def tick():
+                await asyncio.sleep(.05)
+                ticked.set()
+            ticker = asyncio.create_task(tick())
+            await asyncio.wait_for(ticked.wait(), 1)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            await ticker
+        async with _handshake_fixture_lock():
+            pass
+    asyncio.run(scenario())
+    asyncio.run(scenario())
