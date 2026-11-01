@@ -1,11 +1,9 @@
 import asyncio
 from contextlib import asynccontextmanager
 from collections import deque
-from unittest.mock import patch
 import copy
 import json
 import time
-from threading import Lock
 from types import SimpleNamespace
 
 import httpx
@@ -23,7 +21,7 @@ from sovite.connector.helper import LOGGER, HelperSettings, PilotHelper
 from sovite.connector.identity import digest, manifest
 from sovite.connector.protocol import SUBPROTOCOL
 from sovite.gateway.client import AuthorityClient
-from sovite.gateway.runtime import Gateway, HelperConnection
+from sovite.gateway.runtime import Gateway
 from sovite.gateway.client import GatewayError
 from sovite.service import Platform
 from sovite.settings import Settings
@@ -42,8 +40,8 @@ class _HandshakeDiagnostics:
             self.dropped += 1
         allowed = {
             "action": {"start", "open", "hello", "touch", "fence"},
-            "stage": {"connect", "serve"},
-            "outcome": {"ok", "error", "enter"},
+            "stage": {"connect", "setup"},
+            "outcome": {"ok", "error", "unknown"},
             "category": {"authority_unavailable", "model_identity_mismatch", "workload_denied",
                          "model_protocol_error", "model_host_unavailable", "gateway_fenced",
                          "gateway_error", "timeout", "other"},
@@ -133,37 +131,8 @@ def authority_env(database, tmp_path, v2_bundle):
                            bundle=bundle, path=tmp_path, model=model, role=role)
 
 
-_handshake_patch_lock = Lock()
-_handshake_patch_owner = None
-
-
-@asynccontextmanager
-async def _handshake_fixture_lock():
-    # A process-wide lock prevents patch restoration races across event loops.
-    # Waiting happens before the helper is started and is cancellation-safe.
-    global _handshake_patch_owner
-    task = asyncio.current_task()
-    if _handshake_patch_owner is task:
-        raise RuntimeError("handshake fixture is not reentrant")
-    while not _handshake_patch_lock.acquire(blocking=False):
-        await asyncio.sleep(.01)
-    _handshake_patch_owner = task
-    try:
-        yield
-    finally:
-        _handshake_patch_owner = None
-        _handshake_patch_lock.release()
-
-
 @asynccontextmanager
 async def connected(env, *, stall=False, helper_type=PilotHelper):
-    async with _handshake_fixture_lock():
-        async with _connected_unlocked(env, stall=stall, helper_type=helper_type) as result:
-            yield result
-
-
-@asynccontextmanager
-async def _connected_unlocked(env, *, stall=False, helper_type=PilotHelper):
     tls, key = certificates(env.path)
     provision_enrollment(env.platform, enrollment_id=ASSERTION['enrollment_id'], binding_id=env.model['id'],
                          installation_id=ASSERTION['installation_id'], role=env.role['id'], certificate=(env.path / 'helper.pem').read_bytes())
@@ -177,44 +146,34 @@ async def _connected_unlocked(env, *, stall=False, helper_type=PilotHelper):
     diagnostics = _HandshakeDiagnostics()
     gateway = _DiagnosticGateway(client, diagnostics)
     await gateway.start()
-    original_serve = HelperConnection.serve
-    async def diagnostic_serve(connection):
-        if connection.gateway is not gateway:
-            return await original_serve(connection)
-        diagnostics.add(stage="serve", outcome="enter")
+    async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
+        settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
+            ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
+            signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
+            identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
+        helper = helper_type(settings)
+        task = asyncio.create_task(helper.run())
         try:
-            return await original_serve(connection)
-        except Exception as error:
-            diagnostics.add(stage="serve", outcome="error", category=_error_category(error))
-            raise
-    with patch.object(HelperConnection, "serve", diagnostic_serve):
-        async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
-            settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
-                ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
-                signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
-                identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
-            helper = helper_type(settings)
-            task = asyncio.create_task(helper.run())
             try:
-                try:
-                    async with asyncio.timeout(5):
-                        while env.model['id'] not in gateway.sessions:
-                            if task.done():
-                                task.result()
-                            await asyncio.sleep(.01)
-                except Exception as error:
-                    error.add_note(diagnostics.note())
-                    raise
-                env.gateway, env.helper, env.engine, env.helper_settings = gateway, helper, engine, settings
-                yield env
-            finally:
-                await gateway.close()
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                http_server.close()
-                await http_server.wait_closed()
-                if engine.handlers:
-                    await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
+                async with asyncio.timeout(5):
+                    while env.model['id'] not in gateway.sessions:
+                        if task.done():
+                            task.result()
+                        await asyncio.sleep(.01)
+            except Exception as error:
+                diagnostics.add(stage="setup", outcome="unknown")
+                error.add_note(diagnostics.note())
+                raise
+            env.gateway, env.helper, env.engine, env.helper_settings = gateway, helper, engine, settings
+            yield env
+        finally:
+            await gateway.close()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            http_server.close()
+            await http_server.wait_closed()
+            if engine.handlers:
+                await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
 
 
 async def infer(env, **changes):

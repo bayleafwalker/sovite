@@ -45,6 +45,9 @@ def test_authority_failure_keeps_original_close_and_records_safe_stage(authority
         diagnostic = note_for(caught.value)
         assert any(event.get("action") == action and event.get("outcome") == "error"
                    and event.get("category") == "authority_unavailable" for event in diagnostic["events"])
+        connect = next(event for event in diagnostic["events"] if event.get("stage") == "connect")
+        assert all(connect[name] == "true" for name in
+                   ("tls_present", "tls13", "subprotocol_ok", "no_extensions", "path_ok"))
         assert authority_env.settings.authority_token not in str(getattr(caught.value, "__notes__", []))
     asyncio.run(scenario())
 
@@ -58,8 +61,11 @@ def test_serve_error_preserves_close_and_redacts_exception_message(authority_env
             async with connected(authority_env):
                 pytest.fail("body must not execute")
         diagnostic = note_for(caught.value)
-        assert any(event.get("stage") == "serve" and event.get("outcome") == "error"
-                   and event.get("category") == "other" for event in diagnostic["events"])
+        assert any(event.get("action") == "open" and event.get("outcome") == "ok"
+                   for event in diagnostic["events"])
+        assert any(event.get("stage") == "setup" and event.get("outcome") == "unknown"
+                   for event in diagnostic["events"])
+        assert not any(event.get("stage") == "serve" for event in diagnostic["events"])
     asyncio.run(scenario())
 
 
@@ -123,83 +129,41 @@ def test_successful_setup_is_silent_and_restores_wrapper(authority_env, capsys):
     assert "handshake_diagnostics dropped=" not in captured.out + captured.err
 
 
-def test_concurrent_fixtures_serialize_and_restore_after_out_of_order_exit(authority_env, tmp_path, v2_bundle):
-    from sovite.db import Database
+def test_nested_out_of_order_fixtures_work_across_event_loops(tmp_path, v2_bundle):
     from model_support import authority_env as fixture_factory
-    second_path = tmp_path / "second-fixture"
-    second_path.mkdir()
-    second_db = Database(f"sqlite:///{second_path}/second.db")
-    second_env = fixture_factory.__wrapped__(second_db, second_path, v2_bundle)
+    from sovite.db import Database
     original_serve = HelperConnection.serve
-    async def scenario():
-        first_entered, first_release = asyncio.Event(), asyncio.Event()
-        second_started, second_entered, second_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        async def first():
-            async with connected(authority_env):
-                first_entered.set()
-                await first_release.wait()
-        async def second():
-            second_started.set()
-            async with connected(second_env):
-                second_entered.set()
-                await second_release.wait()
-        one = asyncio.create_task(first())
-        two = None
+    async def scenario(first, second):
+        outer, inner = connected(first), connected(second)
+        outer_open = inner_open = False
         try:
-            await asyncio.wait_for(first_entered.wait(), 5)
-            two = asyncio.create_task(second())
-            await asyncio.wait_for(second_started.wait(), 5)
-            # The second scope requests exit first, but cannot enter until the
-            # first patch has been restored.
-            second_release.set()
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(second_entered.wait(), 1)
-            first_release.set()
-            await asyncio.wait_for(asyncio.gather(one, two), 5)
-            assert second_entered.is_set()
+            await outer.__aenter__()
+            outer_open = True
+            await inner.__aenter__()
+            inner_open = True
+            assert HelperConnection.serve is original_serve
+            await outer.__aexit__(None, None, None)
+            outer_open = False
+            assert second.model['id'] in second.gateway.sessions
+            await inner.__aexit__(None, None, None)
+            inner_open = False
             assert HelperConnection.serve is original_serve
         finally:
-            first_release.set()
-            second_release.set()
-            tasks = [task for task in (one, two) if task is not None]
-            await asyncio.gather(*tasks, return_exceptions=True)
-    try:
-        asyncio.run(scenario())
-    finally:
-        second_db.engine.dispose()
-
-
-def test_waiting_lock_is_cancellable_nonblocking_and_reusable_across_loops():
-    from model_support import _handshake_fixture_lock
-    async def scenario():
-        ticked = asyncio.Event()
-        async with _handshake_fixture_lock():
-            async def wait_for_lock():
-                async with _handshake_fixture_lock():
-                    pytest.fail("cancelled waiter must never enter")
-            waiter = asyncio.create_task(wait_for_lock())
-            async def tick():
-                await asyncio.sleep(.05)
-                ticked.set()
-            ticker = asyncio.create_task(tick())
-            await asyncio.wait_for(ticked.wait(), 1)
-            waiter.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await waiter
-            await ticker
-        async with _handshake_fixture_lock():
-            pass
-    asyncio.run(scenario())
-    asyncio.run(scenario())
-
-
-def test_same_task_nested_fixture_lock_fails_explicitly():
-    from model_support import _handshake_fixture_lock
-    async def nested():
-        async with _handshake_fixture_lock():
-            async with _handshake_fixture_lock():
-                pytest.fail("nested fixture must not enter")
-    async def scenario():
-        with pytest.raises(RuntimeError, match="handshake fixture is not reentrant"):
-            await asyncio.wait_for(nested(), .5)
-    asyncio.run(scenario())
+            if inner_open:
+                await inner.__aexit__(None, None, None)
+            if outer_open:
+                await outer.__aexit__(None, None, None)
+    for index in range(2):
+        envs, databases = [], []
+        try:
+            for side in range(2):
+                directory = tmp_path / f"fixture-{index}-{side}"
+                directory.mkdir()
+                db = Database(f"sqlite:///{directory}/test.db")
+                databases.append(db)
+                envs.append(fixture_factory.__wrapped__(db, directory, v2_bundle))
+            asyncio.run(scenario(*envs))
+        finally:
+            for db in databases:
+                db.engine.dispose()
+    assert HelperConnection.serve is original_serve
