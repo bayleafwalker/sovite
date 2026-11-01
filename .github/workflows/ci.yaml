@@ -55,6 +55,7 @@ jobs:
     env:
       SOVITE_TEST_POSTGRES_URL: postgresql+psycopg://sovite_resource_test:resource-fixture-only@127.0.0.1:5432/sovite_resource_test
       SOVITE_RESOURCE_REQUIRE_PG: '1'
+      SOVITE_SCHEMA_REQUIRE_PG: '1'
       SOVITE_TEST_POSTGRES_ROLE_ADMIN_URL: postgresql+psycopg://postgres:resource-fixture-only@127.0.0.1:5432/sovite_resource_test
     steps:
       - uses: actions/checkout@v4
@@ -76,4 +77,5 @@ jobs:
           tests/test_resource_gateway_v2.py tests/test_resource_contract_v2.py
           tests/test_resource_target_executors.py tests/test_resource_gateway_v2_cli.py
           tests/test_resource_owner_api.py tests/test_resource_gateway_store.py
-          tests/test_resource_gateway_service.py tests/test_migrations.py -q
+          tests/test_resource_gateway_service.py tests/test_migrations.py
+          tests/test_schema_verification.py -q
