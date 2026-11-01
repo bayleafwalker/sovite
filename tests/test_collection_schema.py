@@ -214,3 +214,34 @@ def test_retained_ack_cannot_be_orphaned(db):
     with pytest.raises(IntegrityError):
         with db.sessions.begin() as session:
             session.execute(t["collection_acknowledgements"].delete())
+
+
+def test_window_and_retention_order_constraints(db):
+    db.migrate()
+    t = Base.metadata.tables
+    h = "a" * 64
+    with pytest.raises(IntegrityError):
+        with db.sessions.begin() as session:
+            session.execute(insert(t["program_budget_scopes"]), dict(id="bad", policy_revision=1,
+                window_start_ms=10, window_end_ms=10, usd_limit_micro=0, allowance_unit="units",
+                allowance_limit_micro=0, slot_limit=0, policy_digest=h))
+    rows(db)
+    for name in ("collection_sessions", "collection_epochs"):
+        with pytest.raises(IntegrityError):
+            with db.sessions.begin() as session:
+                session.execute(t[name].update().values(retain_until_ms=1))
+
+
+def test_operation_deadline_order_and_reconciliation_refusal(db):
+    db.migrate()
+    audit = rows(db)
+    t = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.execute(insert(t["collection_epochs"]), dict(session_id="session", epoch=3,
+            epoch_purpose="reconciliation", principal_id="principal", authorization_digest="a" * 64,
+            deadline_ms=30, retain_until_ms=100, state="authorized"))
+    for changes in ({"start_not_after_ms": 11, "execution_not_after_ms": 10},
+                    {"epoch": 3, "epoch_purpose": "reconciliation", "verb": "quiesce-v1"}):
+        with pytest.raises(IntegrityError):
+            with db.sessions.begin() as session:
+                session.execute(insert(t["collection_operations"]), operation(audit, **changes))

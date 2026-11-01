@@ -361,7 +361,7 @@ def _check_expression_tree(expression: str, *, text_columns=frozenset()):
         if name.lower() not in text_columns:
             raise ValueError("cast requires a declared string column")
         if match.group("any") is not None:
-            values = match.group("values").replace("::character varying", "")
+            values = re.sub(r"('(?:[^']|'')*')::character varying", r"\1", match.group("values"))
             return f"{name} IN ({values})"
         return name
     expression = reflected_fragment.sub(normalize, expression)
@@ -392,12 +392,14 @@ def _check_expression_tree(expression: str, *, text_columns=frozenset()):
     def peek(value):
         return position < len(tokens) and tokens[position][1] == value
 
-    def literal():
+    def literal(*, allow_column=False):
         kind, value = take()
         if kind == "number":
             result = ("integer", int(value))
         elif kind == "string":
             result = ("string", value[1:-1].replace("''", "'"))
+        elif allow_column and kind == "word" and value not in {"and", "or", "is", "not", "null", "in"}:
+            result = ("column", value)
         else:
             raise ValueError("expected literal")
         if peek("::"):
@@ -447,7 +449,7 @@ def _check_expression_tree(expression: str, *, text_columns=frozenset()):
             values = items("]")
             take(")")
             return ("in", column, values)
-        return ("comparison", column, op, literal())
+        return ("comparison", column, op, literal(allow_column=True))
 
     def conjunction():
         value = atom()

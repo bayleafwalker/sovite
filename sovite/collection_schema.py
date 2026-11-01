@@ -21,7 +21,7 @@ def define_collection_schema(metadata: MetaData):
         Column("allowance_limit_micro", BigInteger, nullable=False), Column("slot_limit", Integer, nullable=False),
         Column("policy_digest", String(64), nullable=False),
         CheckConstraint("policy_revision > 0", name="program_scope_revision_positive"),
-        CheckConstraint("window_start_ms >= 0 AND window_end_ms > 0", name="program_scope_window_positive"),
+        CheckConstraint("window_start_ms >= 0 AND window_end_ms > window_start_ms", name="program_scope_window_order"),
         CheckConstraint("usd_limit_micro >= 0 AND allowance_limit_micro >= 0 AND slot_limit >= 0", name="program_scope_limits_nonnegative"))
 
     subject = Table("program_budget_subjects", metadata,
@@ -46,7 +46,7 @@ def define_collection_schema(metadata: MetaData):
         UniqueConstraint("principal_id", "idempotency_key", name="collection_session_idempotency"),
         CheckConstraint("purpose IN ('operator_c0_collection')", name="collection_session_purpose"),
         CheckConstraint("state IN ('created', 'admitted', 'active', 'quiescing', 'captured', 'complete', 'cancel_pending', 'cancelled', 'failed', 'stopped_unknown')", name="collection_session_state"),
-        CheckConstraint("revision >= 0 AND deadline_ms > 0 AND retain_until_ms > 0", name="collection_session_bounds"),
+        CheckConstraint("revision >= 0 AND deadline_ms > 0 AND retain_until_ms >= deadline_ms", name="collection_session_bounds"),
         CheckConstraint("(cancel_revision IS NULL AND cancel_at_ms IS NULL) OR (cancel_revision IS NOT NULL AND cancel_at_ms IS NOT NULL)", name="collection_session_cancel_pair"),
         CheckConstraint("state <> 'cancel_pending' OR cancel_revision IS NOT NULL", name="collection_session_cancel_pending"),
         CheckConstraint("state <> 'cancelled' OR cancel_revision IS NOT NULL", name="collection_session_cancelled"))
@@ -59,7 +59,7 @@ def define_collection_schema(metadata: MetaData):
         Column("ended_at_ms", BigInteger, nullable=True),
         fk(["session_id"], ["collection_sessions.id"], "collection_epoch_session_fk"),
         UniqueConstraint("session_id", "epoch", "epoch_purpose", name="collection_epoch_purpose_key"),
-        CheckConstraint("epoch > 0 AND deadline_ms > 0 AND retain_until_ms > 0", name="collection_epoch_bounds"),
+        CheckConstraint("epoch > 0 AND deadline_ms > 0 AND retain_until_ms >= deadline_ms", name="collection_epoch_bounds"),
         CheckConstraint("epoch_purpose IN ('execution', 'reconciliation', 'recovery')", name="collection_epoch_purpose"),
         CheckConstraint("state IN ('authorized', 'active', 'closed', 'unknown')", name="collection_epoch_state"))
 
@@ -100,8 +100,8 @@ def define_collection_schema(metadata: MetaData):
         CheckConstraint("epoch_purpose IN ('execution', 'reconciliation', 'recovery')", name="collection_operation_purpose"),
         CheckConstraint("verb IN ('seed-v1', 'exec-v1', 'quiesce-v1', 'export-v1')", name="collection_operation_verb"),
         CheckConstraint("state IN ('intent', 'acknowledged', 'unknown')", name="collection_operation_state"),
-        CheckConstraint("epoch_purpose = 'execution' OR verb IN ('quiesce-v1', 'export-v1')", name="collection_operation_recovery_verb"),
-        CheckConstraint("ordinal >= 0 AND start_not_after_ms > 0 AND execution_not_after_ms > 0", name="collection_operation_bounds"),
+        CheckConstraint("epoch_purpose = 'execution' OR (epoch_purpose = 'recovery' AND verb IN ('quiesce-v1', 'export-v1'))", name="collection_operation_recovery_verb"),
+        CheckConstraint("ordinal >= 0 AND start_not_after_ms > 0 AND execution_not_after_ms >= start_not_after_ms", name="collection_operation_bounds"),
         CheckConstraint("(authorization_envelope IS NULL AND authorization_envelope_digest IS NULL) OR (authorization_envelope IS NOT NULL AND authorization_envelope_digest IS NOT NULL)", name="collection_operation_signed_pair"))
 
     ack = Table("collection_acknowledgements", metadata,

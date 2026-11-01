@@ -8,7 +8,7 @@ from sqlalchemy import CheckConstraint, Column, ForeignKeyConstraint, Index, Int
 from sovite.db import Database, DatabaseSchemaError, _check_expression_tree
 
 
-def tables(*, target="parent", delete="RESTRICT", update="RESTRICT", check="amount >= 0", unique=True, index=True, foreign=True, deferrable=False):
+def tables(*, target="parent", delete="RESTRICT", update="RESTRICT", check="amount >= 0", state_check="state IN ('ready', 'done')", unique=True, index=True, foreign=True, deferrable=False):
     metadata = MetaData()
     Table("parent", metadata, Column("id", Integer, primary_key=True))
     Table("other", metadata, Column("id", Integer, primary_key=True))
@@ -16,7 +16,7 @@ def tables(*, target="parent", delete="RESTRICT", update="RESTRICT", check="amou
                   Column("parent_id", Integer, nullable=False), Column("amount", Integer, nullable=False),
                   Column("state", String(16), nullable=False),
                   CheckConstraint(check, name="child_amount_check"),
-                  CheckConstraint("state IN ('ready', 'done')", name="child_state_check"))
+                  CheckConstraint(state_check, name="child_state_check"))
     if foreign:
         child.append_constraint(ForeignKeyConstraint(["parent_id"], [f"{target}.id"], ondelete=delete,
                                                      onupdate=update, deferrable=deferrable, name="child_parent_fk"))
@@ -63,10 +63,11 @@ def test_valid_structure(db):
     verify(db, tables(), tables())
 
 
-@pytest.mark.parametrize("damage", ["target", "delete", "update", "check", "unique", "index", "missing_fk", "deferred"])
+@pytest.mark.parametrize("damage", ["target", "delete", "update", "check", "literal_cast", "unique", "index", "missing_fk", "deferred"])
 def test_changed_constraint_is_rejected(db, damage):
     changes = {"target": {"target": "other"}, "delete": {"delete": "CASCADE"},
                "update": {"update": "CASCADE"}, "check": {"check": "amount > 0"},
+               "literal_cast": {"state_check": "state IN ('ready::character varying', 'done')"},
                "unique": {"unique": False}, "index": {"index": False},
                "missing_fk": {"foreign": False}, "deferred": {"deferrable": True}}
     with pytest.raises(DatabaseSchemaError, match="foreign key|check constraint|unique constraint|index"):
@@ -140,3 +141,12 @@ def test_postgres_string_reflection_normalization_is_narrow():
     assert _check_expression_tree("state = 'state::text'", text_columns=columns) != _check_expression_tree("state = 'state'")
     with pytest.raises(ValueError, match="declared string column"):
         _check_expression_tree("amount::text = '1'::text", text_columns=columns)
+
+
+def test_postgres_cast_suffix_inside_literal_is_not_removed():
+    expected = _check_expression_tree("state IN ('safe', 'done')")
+    altered = _check_expression_tree(
+        "state::text = ANY (ARRAY['safe::character varying'::character varying, 'done'::character varying]::text[])",
+        text_columns={"state"},
+    )
+    assert altered != expected
