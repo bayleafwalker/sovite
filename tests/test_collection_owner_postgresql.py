@@ -92,3 +92,37 @@ def test_postgres_duplicate_create_and_post_cancel_currentness(pg, monkeypatch):
                  immutable_digest=digest, reason_code="stop")
     assert not owner.currentness(pg, session_id=session_id, credential=agent())["current"]
     assert pg.verify_audit()["valid"]
+
+
+def test_postgres_cross_scope_subject_inhibits(pg, monkeypatch):
+    from sovite.collection_transaction import owner_transaction
+    from sovite.db import Base
+    digest = fixture(pg)
+    evidence = snapshot(pg)
+    monkeypatch.setattr(owner, "_trusted_snapshot", lambda: evidence)
+    with owner_transaction(pg) as session:
+        tables = Base.metadata.tables
+        session.execute(tables["program_budget_scopes"].insert().values(id="other-scope", policy_revision=1,
+            window_start_ms=0, window_end_ms=1000, usd_limit_micro=0, allowance_unit="unit",
+            allowance_limit_micro=0, slot_limit=0, policy_digest="6" * 64))
+        session.execute(tables["program_budget_subjects"].insert().values(scope_id="other-scope",
+            subject_id="session", purpose="collection", binding_digest=digest))
+    with pytest.raises(owner.CollectionOwnerError):
+        change(pg, digest, "admit", 0)
+    assert owner.read(pg, session_id="session", credential=operator())["state"] == "stopped_unknown"
+
+
+def test_postgres_malformed_active_epoch_never_current(pg, monkeypatch):
+    from sovite.db import Base
+    digest = fixture(pg)
+    evidence = snapshot(pg)
+    monkeypatch.setattr(owner, "_trusted_snapshot", lambda: evidence)
+    change(pg, digest, "admit", 0)
+    change(pg, digest, "start", 1, credential=agent(), epoch_deadline_ms=80,
+           retain_until_ms=200, authorization_digest="a" * 64)
+    epochs = Base.metadata.tables["collection_epochs"]
+    with pg.engine.begin() as connection:
+        connection.execute(epochs.update().values(started_at_ms=None))
+    with pytest.raises(owner.CollectionOwnerError) as error:
+        owner.currentness(pg, session_id="session", credential=agent())
+    assert error.value.status == 503

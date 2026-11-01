@@ -317,3 +317,79 @@ def test_scope_policy_revision_change_refuses_without_rebinding(tmp_path, monkey
         assert owner.currentness(db, session_id="session", credential=operator())["current"] is False
     finally:
         db.engine.dispose()
+
+
+@pytest.mark.parametrize("with_obligation", [False, True])
+def test_cross_scope_subject_or_obligation_inhibits(tmp_path, monkeypatch, with_obligation):
+    from sovite.collection_transaction import owner_transaction
+    db = Database(f"sqlite:///{tmp_path}/owner.db")
+    db.migrate()
+    try:
+        digest = fixture(db)
+        evidence = snapshot(db)
+        monkeypatch.setattr(owner, "_trusted_snapshot", lambda: evidence)
+        with owner_transaction(db) as session:
+            tables = Base.metadata.tables
+            session.execute(tables["program_budget_scopes"].insert().values(id="other-scope", policy_revision=1,
+                window_start_ms=0, window_end_ms=1000, usd_limit_micro=0, allowance_unit="unit",
+                allowance_limit_micro=0, slot_limit=0, policy_digest="6" * 64))
+            session.execute(tables["program_budget_subjects"].insert().values(scope_id="other-scope",
+                subject_id="session", purpose="collection", binding_digest=digest))
+            if with_obligation:
+                audit = db.audit(session, "fixture", "collection.test", "session")
+                session.flush()
+                session.execute(tables["program_reservations"].insert().values(scope_id="other-scope", call_id="call",
+                    subject_id="session", purpose="collection", effect_key="effect", reserved_usd_micro=12,
+                    reserved_allowance_micro=8, actual_usd_micro=None, actual_allowance_micro=None,
+                    permit_digest="a" * 64, meter_digest="b" * 64, price_digest="c" * 64,
+                    permit_expires_ms=100, state="unknown", audit_sequence=audit.sequence))
+                session.execute(tables["program_slots"].insert().values(scope_id="other-scope", slot_id="slot",
+                    subject_id="session", call_id="call", state="unknown", audit_sequence=audit.sequence))
+        with pytest.raises(owner.CollectionOwnerError):
+            change(db, digest, "admit", 0)
+        assert owner.read(db, session_id="session", credential=operator())["state"] == "stopped_unknown"
+    finally:
+        db.engine.dispose()
+
+
+@pytest.mark.parametrize("started,ended", [(None, None), (11, 12), (90, None)])
+def test_active_epoch_timestamp_corruption_never_current(tmp_path, monkeypatch, started, ended):
+    db = Database(f"sqlite:///{tmp_path}/owner.db")
+    db.migrate()
+    try:
+        digest = fixture(db)
+        evidence = snapshot(db)
+        monkeypatch.setattr(owner, "_trusted_snapshot", lambda: evidence)
+        change(db, digest, "admit", 0)
+        change(db, digest, "start", 1, credential=agent(), epoch_deadline_ms=80,
+               retain_until_ms=200, authorization_digest="a" * 64)
+        epoch = Base.metadata.tables["collection_epochs"]
+        with db.engine.begin() as connection:
+            connection.execute(epoch.update().values(started_at_ms=started, ended_at_ms=ended))
+        with pytest.raises(owner.CollectionOwnerError) as error:
+            owner.currentness(db, session_id="session", credential=agent())
+        assert error.value.status == 503
+    finally:
+        db.engine.dispose()
+
+
+@pytest.mark.parametrize("started,ended", [(None, 12), (11, None), (11, 10), (11, 12)])
+def test_closed_epoch_timestamp_corruption_refused(tmp_path, monkeypatch, started, ended):
+    db = Database(f"sqlite:///{tmp_path}/owner.db")
+    db.migrate()
+    try:
+        digest = fixture(db)
+        evidence = snapshot(db)
+        monkeypatch.setattr(owner, "_trusted_snapshot", lambda: evidence)
+        change(db, digest, "admit", 0)
+        change(db, digest, "start", 1, credential=agent(), epoch_deadline_ms=80,
+               retain_until_ms=200, authorization_digest="a" * 64)
+        change(db, digest, "close", 2, credential=agent())
+        epoch = Base.metadata.tables["collection_epochs"]
+        with db.engine.begin() as connection:
+            connection.execute(epoch.update().values(started_at_ms=started, ended_at_ms=ended))
+        with pytest.raises(owner.CollectionOwnerError) as error:
+            owner.currentness(db, session_id="session", credential=agent())
+        assert error.value.status == 503
+    finally:
+        db.engine.dispose()
