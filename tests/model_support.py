@@ -1,5 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
+from collections import deque
+from unittest.mock import patch
 import copy
 import json
 import time
@@ -20,10 +22,84 @@ from sovite.connector.helper import LOGGER, HelperSettings, PilotHelper
 from sovite.connector.identity import digest, manifest
 from sovite.connector.protocol import SUBPROTOCOL
 from sovite.gateway.client import AuthorityClient
-from sovite.gateway.runtime import Gateway
+from sovite.gateway.runtime import Gateway, HelperConnection
+from sovite.gateway.client import GatewayError
 from sovite.service import Platform
 from sovite.settings import Settings
 from sovite.worker import Worker
+
+
+class _HandshakeDiagnostics:
+    """Bounded test-only events; never store inputs or exception messages."""
+    def __init__(self):
+        self.started = time.monotonic()
+        self.events = deque(maxlen=16)
+        self.dropped = 0
+
+    def add(self, **fields):
+        if len(self.events) == self.events.maxlen:
+            self.dropped += 1
+        allowed = {
+            "action": {"start", "open", "hello", "touch", "fence"},
+            "stage": {"connect", "serve"},
+            "outcome": {"ok", "error", "enter"},
+            "category": {"authority_unavailable", "model_identity_mismatch", "workload_denied",
+                         "model_protocol_error", "model_host_unavailable", "gateway_fenced",
+                         "gateway_error", "timeout", "other"},
+            "predicates": {"unavailable"},
+        }
+        booleans = {"tls_present", "tls13", "subprotocol_ok", "no_extensions", "path_ok"}
+        safe = {key: value for key, value in fields.items()
+                if (key in booleans and type(value) is bool)
+                or (key in allowed and type(value) is str and value in allowed[key])}
+        elapsed = min(60000, max(0, int((time.monotonic() - self.started) * 1000)))
+        self.events.append({"elapsed_ms": elapsed, **safe})
+
+    def note(self):
+        return "handshake_diagnostics=" + json.dumps(
+            {"events": list(self.events), "dropped": min(self.dropped, 2**31 - 1)},
+            sort_keys=True, separators=(",", ":"))
+
+
+def _error_category(error):
+    safe_codes = {"authority_unavailable", "model_identity_mismatch", "workload_denied",
+                  "model_protocol_error", "model_host_unavailable", "gateway_fenced"}
+    if isinstance(error, GatewayError):
+        return error.code if type(error.code) is str and error.code in safe_codes else "gateway_error"
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    return "other"
+
+
+class _DiagnosticGateway(Gateway):
+    """Call the real gateway while retaining only fixed diagnostic categories."""
+    def __init__(self, authority, diagnostics):
+        super().__init__(authority)
+        self.diagnostics = diagnostics
+
+    async def call(self, action, **fields):
+        recorded = type(action) is str and action in {"start", "open", "hello", "touch", "fence"}
+        try:
+            result = await super().call(action, **fields)
+        except Exception as error:
+            if recorded:
+                self.diagnostics.add(action=action, outcome="error", category=_error_category(error))
+            raise
+        if recorded:
+            self.diagnostics.add(action=action, outcome="ok")
+        return result
+
+    async def connect(self, socket):
+        try:
+            tls = socket.transport.get_extra_info("ssl_object")
+            self.diagnostics.add(stage="connect", tls_present=tls is not None,
+                tls13=bool(tls and tls.version() == "TLSv1.3"),
+                subprotocol_ok=socket.subprotocol == SUBPROTOCOL,
+                no_extensions=not bool(socket.protocol.extensions),
+                path_ok=socket.request.path == "/connector")
+        except Exception:
+            self.diagnostics.add(stage="connect", predicates="unavailable")
+        return await super().connect(socket)
 
 
 @pytest.fixture
@@ -66,31 +142,47 @@ async def connected(env, *, stall=False, helper_type=PilotHelper):
     (env.path / 'identity.json').write_text(json.dumps(metadata))
     (env.path / 'model.gguf').write_bytes(b'weights')
     client = AuthorityClient('http://control.test', env.settings.authority_token, transport=httpx.ASGITransport(app=env.app))
-    gateway = Gateway(client)
+    diagnostics = _HandshakeDiagnostics()
+    gateway = _DiagnosticGateway(client, diagnostics)
     await gateway.start()
-    async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
-        settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
-            ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
-            signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
-            identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
-        helper = helper_type(settings)
-        task = asyncio.create_task(helper.run())
+    original_serve = HelperConnection.serve
+    async def diagnostic_serve(connection):
+        if connection.gateway is not gateway:
+            return await original_serve(connection)
+        diagnostics.add(stage="serve", outcome="enter")
         try:
-            async with asyncio.timeout(5):
-                while env.model['id'] not in gateway.sessions:
-                    if task.done():
-                        task.result()
-                    await asyncio.sleep(.01)
-            env.gateway, env.helper, env.engine, env.helper_settings = gateway, helper, engine, settings
-            yield env
-        finally:
-            await gateway.close()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            http_server.close()
-            await http_server.wait_closed()
-            if engine.handlers:
-                await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
+            return await original_serve(connection)
+        except Exception as error:
+            diagnostics.add(stage="serve", outcome="error", category=_error_category(error))
+            raise
+    with patch.object(HelperConnection, "serve", diagnostic_serve):
+        async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
+            settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
+                ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
+                signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
+                identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
+            helper = helper_type(settings)
+            task = asyncio.create_task(helper.run())
+            try:
+                try:
+                    async with asyncio.timeout(5):
+                        while env.model['id'] not in gateway.sessions:
+                            if task.done():
+                                task.result()
+                            await asyncio.sleep(.01)
+                except Exception as error:
+                    error.add_note(diagnostics.note())
+                    raise
+                env.gateway, env.helper, env.engine, env.helper_settings = gateway, helper, engine, settings
+                yield env
+            finally:
+                await gateway.close()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                http_server.close()
+                await http_server.wait_closed()
+                if engine.handlers:
+                    await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
 
 
 async def infer(env, **changes):
