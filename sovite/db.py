@@ -315,8 +315,12 @@ from .collection_schema import define_collection_schema
 _COLLECTION_V8 = define_collection_schema(Base.metadata)
 _COLLECTION_NAMES = {table.name for table in _COLLECTION_V8}
 
+from .program_ledger_schema import define_program_ledger_schema
+_PROGRAM_LEDGER_V9 = define_program_ledger_schema(Base.metadata)
+_PROGRAM_LEDGER_NAMES = {table.name for table in _PROGRAM_LEDGER_V9}
+
 MIGRATIONS = (
-    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in _COLLECTION_NAMES and table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations", "resource_gateway_enrollments", "resource_workload_scopes", "resource_output_grants", "resource_owner_requests"})),
+    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in _COLLECTION_NAMES and table.name not in _PROGRAM_LEDGER_NAMES and table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations", "resource_gateway_enrollments", "resource_workload_scopes", "resource_output_grants", "resource_owner_requests"})),
     (2, (BindingState.__table__,)),
     (3, (ExecutionAuthority.__table__, HelperEnrollment.__table__, HelperSession.__table__, RequestLedger.__table__)),
     (4, (SetupPrincipal.__table__, SetupDraft.__table__)),
@@ -324,6 +328,7 @@ MIGRATIONS = (
     (6, _RESOURCE_V6),
     (7, (ResourceWorkloadScope.__table__, ResourceOwnerRequest.__table__)),
     (8, _COLLECTION_V8),
+    (9, _PROGRAM_LEDGER_V9),
 )
 
 
@@ -351,8 +356,8 @@ def _check_expression_tree(expression: str, *, text_columns=frozenset()):
     reflected_fragment = re.compile(
         r"(?P<quoted>'(?:[^']|'')*')|"
         r"(?P<any>(?P<any_col>[A-Za-z_][A-Za-z0-9_]*)::text = ANY \(ARRAY\["
-        r"(?P<values>'(?:[^']|'')*'::character varying(?:, '(?:[^']|'')*'::character varying)*)"
-        r"\]::text\[\]\))|(?P<column>(?P<column_name>[A-Za-z_][A-Za-z0-9_]*)::text)"
+        r"(?P<values>'(?:[^']|'')*'::character varying(?:::text)?(?:, '(?:[^']|'')*'::character varying(?:::text)?)*)"
+        r"\](?:::text\[\])?\))|(?P<column>(?P<column_name>[A-Za-z_][A-Za-z0-9_]*)::text)"
     )
     def normalize(match):
         if match.group("quoted") is not None:
@@ -361,7 +366,7 @@ def _check_expression_tree(expression: str, *, text_columns=frozenset()):
         if name.lower() not in text_columns:
             raise ValueError("cast requires a declared string column")
         if match.group("any") is not None:
-            values = re.sub(r"('(?:[^']|'')*')::character varying", r"\1", match.group("values"))
+            values = re.sub(r"('(?:[^']|'')*')::character varying(?:::text)?", r"\1", match.group("values"))
             return f"{name} IN ({values})"
         return name
     expression = reflected_fragment.sub(normalize, expression)
@@ -632,6 +637,10 @@ class Database:
             if connection.dialect.name == "sqlite" and version < self.schema_version:
                 connection.exec_driver_sql("PRAGMA journal_mode=WAL")
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
+            if version < 9:
+                inspector = inspect(connection)
+                if any(inspector.has_table(table.name, schema=self.schema) for table in _PROGRAM_LEDGER_V9):
+                    raise DatabaseSchemaError("database_schema_incomplete", "Unexpected partial ledger migration")
             for number, tables in MIGRATIONS:
                 if number <= version:
                     continue
