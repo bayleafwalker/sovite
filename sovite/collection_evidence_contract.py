@@ -54,7 +54,8 @@ def _reject(*_args):
 
 def _preflight(raw: bytes) -> None:
     # Bound nesting before invoking the JSON decoder, including malformed inputs.
-    depth = 0
+    stack = []
+    elements = 0
     quoted = escaped = False
     for byte in raw:
         if quoted:
@@ -64,17 +65,25 @@ def _preflight(raw: bytes) -> None:
                 escaped = True
             elif byte == 34:
                 quoted = False
-        elif byte == 34:
+            continue
+        if stack and stack[-1][0] == 91 and stack[-1][1] and byte not in (9, 10, 13, 32, 93):
+            elements += 1
+            if elements > 16:
+                _reject()
+            stack[-1][1] = False
+        if byte == 34:
             quoted = True
         elif byte in (91, 123):
-            depth += 1
-            if depth > 4:
+            stack.append([byte, byte == 91])
+            if len(stack) > 4:
                 _reject()
         elif byte in (93, 125):
-            depth -= 1
-            if depth < 0:
+            if not stack:
                 _reject()
-    if quoted or depth != 0:
+            stack.pop()
+        elif byte == 44 and stack and stack[-1][0] == 91:
+            stack[-1][1] = True
+    if quoted or stack:
         _reject()
 
 

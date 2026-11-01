@@ -162,3 +162,55 @@ def test_no_production_import_or_route():
                 assert all("collection_evidence_contract" not in alias.name for alias in node.names)
             if isinstance(node, ast.ImportFrom):
                 assert "collection_evidence_contract" not in (node.module or "")
+
+
+def test_predecode_array_and_member_limits():
+    from sovite.collection_evidence_contract import _decode, _preflight
+
+    _preflight(b'[' + b','.join([b'0'] * 16) + b']')
+    with pytest.raises(InvalidReceipt):
+        _preflight(b'[' + b','.join([b'0'] * 17) + b']')
+    _preflight(b'[[0,1],[2,3]]')  # two outer and four inner elements
+    with pytest.raises(InvalidReceipt):
+        _preflight(b'[[' + b','.join([b'0'] * 15) + b'],0]')
+    def members(n):
+        return ('{' + ','.join(f'"k{i}":0' for i in range(n)) + '}').encode()
+    assert len(_decode(members(40))) == 40
+    with pytest.raises(InvalidReceipt):
+        _decode(members(41))
+
+
+@pytest.mark.parametrize("old,new", [
+    ('return type(value) is str and _DIGEST.fullmatch(value) is not None', 'return True'),
+    ('return type(value) is int and minimum <= value <= maximum', 'return True'),
+    ('set(value) != _COMMON | _VARIANTS[tag]', 'False'),
+    ('if key in result:', 'if False:'),
+    ('value["claim_scope"] != value["recipe_id"]', 'False'),
+    ('value["outcome"] != "unknown" or not all', 'False or not all'),
+    ('tag == "dispatch-unknown" and count is not None', 'False'),
+    ('any(a >= b for a, b in zip(custody, custody[1:]))', 'False'),
+    ('end - start > 120_000', 'False'),
+    ('if elements > 16:', 'if False:'),
+    ('if members > 40:', 'if False:'),
+])
+def test_guard_mutations_are_detected(tmp_path, old, new):
+    """A disabled guard must make the corresponding negative suite fail."""
+    import os
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / 'sovite/collection_evidence_contract.py').read_text()
+    assert source.count(old) == 1
+    (tmp_path / 'sovite').mkdir()
+    (tmp_path / 'tests').mkdir()
+    (tmp_path / 'sovite/__init__.py').write_text('')
+    (tmp_path / 'sovite/collection_evidence_contract.py').write_text(source.replace(old, new, 1))
+    (tmp_path / 'tests/test_collection_evidence_contract.py').write_text(Path(__file__).read_text())
+    result = subprocess.run(
+        [sys.executable, '-m', 'pytest', '-q', '-x', 'tests/test_collection_evidence_contract.py',
+         '-k', 'not guard_mutations and not no_production_import_or_route'],
+        cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(tmp_path), 'PYTHONDONTWRITEBYTECODE': '1'},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 1 and 'failed' in result.stdout, result.stdout + result.stderr
