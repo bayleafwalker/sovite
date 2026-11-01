@@ -27,6 +27,7 @@ from sovite import policy
 from sovite.authority import checksum, execution_context
 from sovite.db import (
     Base,
+    Database,
     ExecutionAuthority,
     GrantState,
     Job,
@@ -169,10 +170,10 @@ def reopen(owner):
     return leases.LeaseService(fresh, "reopened-unbound-service", {})
 
 
-def test_owner_fixture_actual_schema8_submit_and_authorize_control(owner):
+def test_owner_fixture_current_schema_submit_and_authorize_control(owner):
     job = submit(owner)
     with owner.platform.db.sessions() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 8}
+        assert session.get(MetadataRow, "schema_version").value == {"version": Database.schema_version}
         assert (
             owner.platform.authorize(
                 session, job.grant_id, job.caller, generation=job.generation

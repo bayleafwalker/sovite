@@ -85,7 +85,7 @@ def test_existing_schema6_requires_offline_cutover_preserves_rows_and_v1_meaning
         assert error.value.code=='database_schema_older'
     finally:event.remove(database.engine,'before_cursor_execute',capture)
     assert statements and version(database)==6 and snapshot(database)==before
-    database.migrate(); assert version(database)==8
+    database.migrate(); assert version(database)==Database.schema_version
     assert snapshot(database)==before
     assert database.verify_audit()==audit_before
     with database.engine.connect() as connection:
@@ -96,7 +96,7 @@ def test_existing_schema6_requires_offline_cutover_preserves_rows_and_v1_meaning
         assert row.target_catalog is None
         assert (row.observation_id,row.namespace,row.pod_name)==('old-observation','old-namespace','old-pod')
     database.initialize('never'); database.migrate()
-    assert version(database)==8 and snapshot(database)==before
+    assert version(database)==Database.schema_version and snapshot(database)==before
     class Older(Database):schema_version=6
     old=Older(database.engine.url.render_as_string(hide_password=False),schema=database.schema)
     try:
@@ -134,7 +134,7 @@ def test_schema7_startup_refuses_missing_or_weakened_shape_check_read_only(datab
         with pytest.raises(DatabaseSchemaError) as error:database.initialize('never')
         assert error.value.code=='database_schema_incomplete'
     finally:event.remove(database.engine,'before_cursor_execute',capture)
-    assert statements and version(database)==8
+    assert statements and version(database)==Database.schema_version
 
 
 @pytest.mark.parametrize('replace_expected_index',[False,True])

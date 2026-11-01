@@ -57,6 +57,7 @@ jobs:
       SOVITE_RESOURCE_REQUIRE_PG: '1'
       SOVITE_SCHEMA_REQUIRE_PG: '1'
       SOVITE_COLLECTION_SCHEMA_REQUIRE_PG: '1'
+      SOVITE_LEDGER_SCHEMA_REQUIRE_PG: '1'
       SOVITE_COLLECTION_OWNER_REQUIRE_PG: '1'
       SOVITE_TEST_POSTGRES_ROLE_ADMIN_URL: postgresql+psycopg://postgres:resource-fixture-only@127.0.0.1:5432/sovite_resource_test
     steps:
@@ -81,6 +82,8 @@ jobs:
           tests/test_resource_owner_api.py tests/test_resource_gateway_store.py
           tests/test_resource_gateway_service.py tests/test_migrations.py
           tests/test_schema_verification.py tests/test_collection_schema.py
+          tests/test_program_ledger_migration.py tests/test_program_ledger_v8_oracle.py
+          tests/test_program_ledger_transactions.py tests/test_program_ledger_unavailable.py
           tests/test_collection_identity.py tests/test_collection_transaction.py
           tests/test_collection_owner_cancel.py tests/test_collection_owner_lifecycle.py
           tests/test_collection_owner_api.py tests/test_collection_owner_postgresql.py -q
