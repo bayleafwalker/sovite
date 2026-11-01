@@ -8,7 +8,7 @@ advertises mutable execution. Explicit fixture construction is unqualified.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -151,6 +151,49 @@ class ForcedSSH:
         finally:
             if process.returncode is None:
                 await stop_process(process)
+
+
+@dataclass(frozen=True)
+class _QuarantinedCandidate:
+    """Internal result of bounded parsing, never an authority token."""
+    quarantine: Path
+    tip: str
+
+
+async def _prepare_quarantine(*, git: NativeGit, root: Path, worktree: Path,
+                              base: str, seed_tip: str, header: dict,
+                              bundle: bytes, areas: list[str]) -> _QuarantinedCandidate:
+    # Quarantine parsing precedes any modification of the protected manager
+    # worktree. No candidate configuration, hooks or executable is imported.
+    quarantine = root/'quarantine.git'
+    await git('init','--bare',str(quarantine))
+    await git('--git-dir='+str(quarantine),'fetch','--no-write-fetch-head',str(worktree),
+         base+':refs/heads/base',seed_tip+':refs/heads/seed')
+    path = root/'candidate.bundle'
+    _atomic_write(path,bundle,exclusive=True)
+    await git('--git-dir='+str(quarantine),'bundle','verify',str(path))
+    heads = (await git('bundle','list-heads',str(path))).decode().strip()
+    tip = header['tip_sha']
+    need(heads == tip+' refs/heads/candidate','native_export_scope_mismatch')
+    await git('--git-dir='+str(quarantine),'fetch','--no-write-fetch-head',str(path),
+         'refs/heads/candidate:refs/heads/candidate')
+    await git('--git-dir='+str(quarantine),'merge-base','--is-ancestor',seed_tip,tip)
+    lines = (await git('--git-dir='+str(quarantine),'rev-list','--parents',base+'..'+tip)).decode().splitlines()
+    need(all(len(line.split()) == 2 for line in lines),'native_candidate_history_refused')
+    changed = (await git('--git-dir='+str(quarantine),'diff','--no-renames','--name-only','-z',base,tip)).split(b'\0')
+    expanded_bytes = 0
+    for raw in filter(None,changed):
+        name = raw.decode('utf-8','strict')
+        need(not any(part in {'..','.git'} for part in Path(name).parts)
+             and not name.startswith('/') and RepositorySessionManager._within_area(name,tuple(areas)),
+             'native_candidate_scope_refused')
+        entry = await git('--git-dir='+str(quarantine),'ls-tree','-z',tip,'--',name)
+        if entry:
+            need(entry.split(b' ',1)[0] in {b'100644',b'100755'},'native_candidate_scope_refused')
+            object_id = entry.split(b'\t',1)[0].split()[-1].decode('ascii')
+            expanded_bytes += int(await git('--git-dir='+str(quarantine),'cat-file','-s',object_id))
+            need(expanded_bytes <= EXPANDED_LIMIT,'native_candidate_expansion_refused')
+    return _QuarantinedCandidate(quarantine=quarantine, tip=tip)
 
 
 class NativeVMDriver:
@@ -400,36 +443,9 @@ class BoundNativeVM:
 
     async def _import(self,root,worktree,base,seed_tip,header,bundle,areas,authorization_check):
         git = NativeGit(self.context.deadline,authorization_check,expected_tools=self.driver.git_facts)
-        # Quarantine parsing precedes any modification of the protected manager
-        # worktree. No candidate configuration, hooks or executable is imported.
-        quarantine = root/'quarantine.git'
-        await git('init','--bare',str(quarantine))
-        await git('--git-dir='+str(quarantine),'fetch','--no-write-fetch-head',str(worktree),
-             base+':refs/heads/base',seed_tip+':refs/heads/seed')
-        path = root/'candidate.bundle'
-        _atomic_write(path,bundle,exclusive=True)
-        await git('--git-dir='+str(quarantine),'bundle','verify',str(path))
-        heads = (await git('bundle','list-heads',str(path))).decode().strip()
-        tip = header['tip_sha']
-        need(heads == tip+' refs/heads/candidate','native_export_scope_mismatch')
-        await git('--git-dir='+str(quarantine),'fetch','--no-write-fetch-head',str(path),
-             'refs/heads/candidate:refs/heads/candidate')
-        await git('--git-dir='+str(quarantine),'merge-base','--is-ancestor',seed_tip,tip)
-        lines = (await git('--git-dir='+str(quarantine),'rev-list','--parents',base+'..'+tip)).decode().splitlines()
-        need(all(len(line.split()) == 2 for line in lines),'native_candidate_history_refused')
-        changed = (await git('--git-dir='+str(quarantine),'diff','--no-renames','--name-only','-z',base,tip)).split(b'\0')
-        expanded_bytes = 0
-        for raw in filter(None,changed):
-            name = raw.decode('utf-8','strict')
-            need(not any(part in {'..','.git'} for part in Path(name).parts)
-                 and not name.startswith('/') and RepositorySessionManager._within_area(name,tuple(areas)),
-                 'native_candidate_scope_refused')
-            entry = await git('--git-dir='+str(quarantine),'ls-tree','-z',tip,'--',name)
-            if entry:
-                need(entry.split(b' ',1)[0] in {b'100644',b'100755'},'native_candidate_scope_refused')
-                object_id = entry.split(b'\t',1)[0].split()[-1].decode('ascii')
-                expanded_bytes += int(await git('--git-dir='+str(quarantine),'cat-file','-s',object_id))
-                need(expanded_bytes <= EXPANDED_LIMIT,'native_candidate_expansion_refused')
+        candidate = await _prepare_quarantine(git=git, root=root, worktree=worktree,
+            base=base, seed_tip=seed_tip, header=header, bundle=bundle, areas=areas)
+        quarantine, tip = candidate.quarantine, candidate.tip
         authorization_check()
         need((await git('-C',str(worktree),'rev-parse','HEAD')).decode().strip() == seed_tip,'native_seed_changed')
         await git('-C',str(worktree),'fetch','--no-write-fetch-head',str(quarantine),'refs/heads/candidate')
