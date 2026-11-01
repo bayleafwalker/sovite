@@ -132,3 +132,36 @@ def test_cancel_refuses_tampered_binding_and_broken_audit(tmp_path):
             assert session.execute(select(sessions.c.state)).scalar_one() == "created"
     finally:
         db.engine.dispose()
+
+
+def test_auth_guard_removal_control_detects_forbidden_cancel(tmp_path, monkeypatch):
+    from sovite import collection_owner as owner
+    db = Database(f"sqlite:///{tmp_path}/unguarded.db")
+    db.migrate()
+    try:
+        digest = fixture(db)
+        agent = CollectionCredential("collection-agent", "collection-agent", "a" * 24)
+        monkeypatch.setattr(owner, "_actor", lambda row, credential, allowed: row["immutable_payload"])
+        result = invoke(db, digest, agent)
+        with pytest.raises(AssertionError):
+            assert result["state"] != "cancel_pending"
+    finally:
+        db.engine.dispose()
+
+
+def test_audit_guard_removal_control_detects_broken_chain(tmp_path, monkeypatch):
+    from sovite import collection_transaction as tx
+    db = Database(f"sqlite:///{tmp_path}/unguarded.db")
+    db.migrate()
+    try:
+        digest = fixture(db)
+        metadata = Base.metadata.tables["platform_metadata"]
+        with db.engine.begin() as conn:
+            conn.execute(metadata.update().where(metadata.c.key == "audit_head").values(
+                value={"sequence": 1, "hash": "0" * 64}))
+        monkeypatch.setattr(tx, "_verify_audit", lambda session: None)
+        invoke(db, digest)
+        with pytest.raises(AssertionError):
+            assert db.verify_audit()["valid"]
+    finally:
+        db.engine.dispose()
