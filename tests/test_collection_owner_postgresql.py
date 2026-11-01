@@ -15,8 +15,10 @@ from test_collection_owner_lifecycle import agent, change, snapshot
 
 @pytest.fixture
 def pg():
-    url = os.environ.get("SOVITE_UNIT3_TEST_POSTGRES")
+    url = os.environ.get("SOVITE_TEST_POSTGRES_URL")
     if not url:
+        if os.environ.get("SOVITE_COLLECTION_OWNER_REQUIRE_PG") == "1":
+            pytest.fail("SOVITE_TEST_POSTGRES_URL is required for collection owner tests")
         pytest.skip("isolated PostgreSQL fixture not configured")
     schema = "unit3_" + uuid.uuid4().hex
     admin = create_engine(url)
