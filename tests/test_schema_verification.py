@@ -34,8 +34,10 @@ def db(request, tmp_path):
         yield database
         database.engine.dispose()
         return
-    url = os.environ.get("SOVITE_ISOLATED_TEST_POSTGRES_URL")
+    url = os.environ.get("SOVITE_TEST_POSTGRES_URL")
     if not url:
+        if os.environ.get("SOVITE_SCHEMA_REQUIRE_PG") == "1":
+            pytest.fail("SOVITE_TEST_POSTGRES_URL is required for schema verification")
         pytest.skip("isolated PostgreSQL fixture not supplied")
     schema = "schema_verify_" + uuid.uuid4().hex
     admin = create_engine(url)
