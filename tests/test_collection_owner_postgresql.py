@@ -66,3 +66,29 @@ def test_postgres_epoch_cas_and_retention(pg, monkeypatch):
     assert owner.currentness(pg, session_id="session", credential=operator())["current"]
     change(pg, digest, "close", 2, credential=agent())
     assert pg.verify_audit()["valid"]
+
+
+def test_postgres_duplicate_create_and_post_cancel_currentness(pg, monkeypatch):
+    import json
+    fixture(pg)
+    evidence = snapshot(pg)
+    monkeypatch.setattr(owner, "_trusted_snapshot", lambda: evidence)
+    raw = json.dumps(evidence["allowed_request"]).encode()
+    barrier = Barrier(2)
+    def create():
+        barrier.wait(timeout=5)
+        return owner.create(pg, raw=raw, credential=operator(), idempotency_key="parallel-create")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: create(), range(2)))
+    assert results[0] == results[1]
+    session_id, digest = results[0]["session_id"], results[0]["immutable_digest"]
+    owner.transition(pg, session_id=session_id, credential=operator(), expected_revision=0,
+                     immutable_digest=digest, action="admit")
+    owner.transition(pg, session_id=session_id, credential=agent(), expected_revision=1,
+                     immutable_digest=digest, action="start", epoch_deadline_ms=80,
+                     retain_until_ms=200, authorization_digest="a" * 64)
+    assert owner.currentness(pg, session_id=session_id, credential=agent())["current"]
+    owner.cancel(pg, session_id=session_id, credential=operator(), expected_revision=2,
+                 immutable_digest=digest, reason_code="stop")
+    assert not owner.currentness(pg, session_id=session_id, credential=agent())["current"]
+    assert pg.verify_audit()["valid"]
