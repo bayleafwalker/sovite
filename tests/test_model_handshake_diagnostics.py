@@ -191,3 +191,15 @@ def test_waiting_lock_is_cancellable_nonblocking_and_reusable_across_loops():
             pass
     asyncio.run(scenario())
     asyncio.run(scenario())
+
+
+def test_same_task_nested_fixture_lock_fails_explicitly():
+    from model_support import _handshake_fixture_lock
+    async def nested():
+        async with _handshake_fixture_lock():
+            async with _handshake_fixture_lock():
+                pytest.fail("nested fixture must not enter")
+    async def scenario():
+        with pytest.raises(RuntimeError, match="handshake fixture is not reentrant"):
+            await asyncio.wait_for(nested(), .5)
+    asyncio.run(scenario())

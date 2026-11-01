@@ -134,17 +134,24 @@ def authority_env(database, tmp_path, v2_bundle):
 
 
 _handshake_patch_lock = Lock()
+_handshake_patch_owner = None
 
 
 @asynccontextmanager
 async def _handshake_fixture_lock():
     # A process-wide lock prevents patch restoration races across event loops.
     # Waiting happens before the helper is started and is cancellation-safe.
+    global _handshake_patch_owner
+    task = asyncio.current_task()
+    if _handshake_patch_owner is task:
+        raise RuntimeError("handshake fixture is not reentrant")
     while not _handshake_patch_lock.acquire(blocking=False):
         await asyncio.sleep(.01)
+    _handshake_patch_owner = task
     try:
         yield
     finally:
+        _handshake_patch_owner = None
         _handshake_patch_lock.release()
 
 
