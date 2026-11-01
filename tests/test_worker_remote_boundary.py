@@ -4,9 +4,11 @@ The shared ``owner`` fixture uses SQLite and the disposable PostgreSQL fixture;
 PostgreSQL cases skip only when its disposable URL is absent.
 """
 import json
+import sys
 import time
 
 from dataclasses import replace
+from types import SimpleNamespace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -14,6 +16,7 @@ import yaml
 
 from sovite import policy
 from sovite.api import create_app
+from sovite.db import Job, WorkerExecutionLease
 from sovite.lease_service import LeaseService
 from test_execution_leases import owner, snapshot, submit  # noqa: F401
 from test_migrations import database  # noqa: F401
@@ -93,20 +96,30 @@ def pull_and_start(client, owner):
     return job, body, started
 
 
-def test_http_pull_after_slow_preparation_advances_clock_without_shortening_lease(owner):
+def test_http_pull_after_slow_preparation_advances_clock_without_shortening_lease(owner, monkeypatch):
     admit_agent_http_owner(owner)
     owner.platform.submit("native-code-review", "synthetic controlled slow preparation",
                           "operations", "slow-http-submit", input_class="C2")
     client = execution_client(owner)
     try:
-        # Deterministically model preparation taking longer than the fixture's
-        # one-second future clock without sleeping or changing lease settings.
-        owner.clock[0] = min(owner.clock[0], time.time() - 2)
+        # Freeze only this test module's wall-clock sample, not the shared time
+        # module or the lease owner's already-injected clock. A later HTTP call
+        # taking more than a second must not affect this comparison.
+        anchor = time.time()
+        monkeypatch.setattr(sys.modules[__name__], "time", SimpleNamespace(time=lambda: anchor))
+        owner.clock[0] = anchor - 2
         job, identity, started = pull_and_start(client, owner)
-        assert owner.clock[0] >= time.time()
+        assert owner.clock[0] == anchor + 1
         assert job["lease_until"] - owner.clock[0] == owner.platform.settings.lease_seconds == 30
         assert started["state"] == "started"
-        assert identity["job_id"] == job["job_id"]
+        for field in ("job_id", "generation", "fence"):
+            assert identity[field] == started[field] == job[field]
+        assert started["lease_until"] == job["lease_until"]
+        with owner.platform.db.sessions() as session:
+            persisted_job = session.get(Job, job["job_id"])
+            persisted_lease = session.get(WorkerExecutionLease, job["job_id"])
+            assert persisted_job.lease_until == persisted_lease.lease_until == job["lease_until"]
+            assert persisted_lease.phase == "started"
     finally:
         client.close()
 
