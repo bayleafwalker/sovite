@@ -13,12 +13,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import cast, inspect, select, text, Text
 
 from .adapters import RuntimeFailure
 from .authority import check_execution_binding, issue_execution, refresh_execution, revoke_execution, sweep_terminal_authority
 from .db import ExecutionAuthority, Job, MetadataRow, WorkerExecutionLease, WorkerExecutionOperation, WorkerHeartbeat
 from .service import Platform, PlatformError, TERMINAL
+
+
+class _HandBackOwnerUnavailable(RuntimeError):
+    """A complete Job/Work owner snapshot could not be established."""
 
 # Arbitrary constant naming the PostgreSQL advisory lock that serializes claims.
 CLAIM_LOCK = 0x50617669746531
@@ -679,44 +683,385 @@ class LeaseService:
             return True
 
     def hand_back(self, job_id: str, fence: str | None = None):
-        """Return a running job on worker shutdown, as lease recovery would but at once."""
-        with self.platform.db.sessions.begin() as session:
-            self.platform.db.authority_lock(session)
-            row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one()
-            lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
-            now = time.time()
-            if not self._eligible_job(row):
-                return
-            if row.status != "running" or row.lease_owner != self.id:
-                return
-            if lease is not None:
+        """Hand back a running job after closing its complete Work-owner snapshot.
+
+        A true result records the local atomic transition only. It does not prove
+        that a child or provider stopped before producing an external effect.
+        """
+        from sqlalchemy import and_, outerjoin
+
+        from .collection_transaction import owner_transaction
+        from .db import Base, MIGRATIONS
+        from .program_ledger import _mark_work_projection_unknown_in_transaction
+        from .repository_runs import RUN_SCHEMA
+        from .work_projection import (
+            WorkProjectionError,
+            _compare_actual_work_projection,
+            _raw_job_object,
+            lock_work_projection_set,
+            work_projections_from_job,
+        )
+
+        database = self.platform.db
+        succeeded = False
+        succeeded_fence = None
+        try:
+            with owner_transaction(database) as session:
+                connection = session.connection()
                 try:
-                    self._check_lease_finite(row, lease)
-                except PlatformError:
-                    return
-                if (lease.phase != "started" or lease.fence != (fence or self.execution_fences.get(job_id))
-                    or row.lease_until is None or lease.lease_until != row.lease_until
-                    or lease.execution_deadline is None or lease.lease_until <= now
-                    or lease.execution_deadline <= now):
-                    return
-            if lease is None and fence is not None:
-                return
-            if row.cancel_requested:
-                row.status, row.error_code = "cancelled", "cancelled"
-            elif not replay_safe(row.resolved):
-                row.status, row.error_code = "blocked", "execution_uncertain"
-            else:
-                # The interrupted attempt was the worker's, not the task's; do not charge it.
-                row.status, row.error_code, row.next_attempt_at = "retry_wait", "worker_shutdown", now
-                row.attempts = max(0, row.attempts - 1)
-            row.lease_owner, row.lease_until, row.updated_at = None, None, now
-            if lease is not None:
-                lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
-            revoke_execution(session, row.id)
-            self._forget_fence(row.id, lease.fence if lease is not None else None)
-            if row.status in TERMINAL:
-                row.finished_at = now
-            self.platform.db.audit(session, self.id, "task.handed_back", row.id, {"status": row.status, "error_code": row.error_code})
+                    version = database._version(connection)
+                    if type(version) is not int or not 1 <= version <= database.schema_version:
+                        raise _HandBackOwnerUnavailable()
+                    expected_tables = [
+                        table for migration, tables in MIGRATIONS
+                        if migration <= version for table in tables
+                    ]
+                    later_table_names = {
+                        table.name for migration, tables in MIGRATIONS
+                        if migration > version for table in tables
+                    }
+                    physical_names = set(inspect(connection).get_table_names(schema=database.schema))
+                    if (any(table.name not in physical_names for table in expected_tables)
+                            or physical_names.intersection(later_table_names)):
+                        raise _HandBackOwnerUnavailable()
+                    database._structure(connection, expected_tables)
+                except _HandBackOwnerUnavailable:
+                    raise
+                except Exception:
+                    raise _HandBackOwnerUnavailable() from None
+
+                tables = Base.metadata.tables
+                job_table = tables["jobs"]
+                probe = session.execute(select(
+                    Job.id, Job.status, Job.caller, Job.attempts, Job.generation,
+                    Job.lease_owner, Job.lease_until, Job.cancel_requested,
+                ).where(Job.id == job_id)).mappings().one_or_none()
+                if probe is None:
+                    return False
+                raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
+                    job_table.c.id == job_id)).scalar_one_or_none()
+                if type(raw) is not str:
+                    raise _HandBackOwnerUnavailable()
+
+                try:
+                    root = _raw_job_object(raw)
+                    if "program_ledger_projections_v1" in root:
+                        raise WorkProjectionError("orphan top-level projection marker")
+                    if "repository_run" in root:
+                        run = root["repository_run"]
+                        if type(run) is not dict or run.get("schema_version") != RUN_SCHEMA:
+                            raise WorkProjectionError("repository-run marker is malformed")
+                        projections_all = work_projections_from_job(raw, allow_absent=True)
+                        attempts = run.get("attempts")
+                        if type(attempts) is not list:
+                            raise WorkProjectionError("repository-run attempts are malformed")
+                        attempt_ids = []
+                        for attempt in attempts:
+                            if type(attempt) is not dict or type(attempt.get("id")) is not str:
+                                raise WorkProjectionError("repository-run attempt identity is malformed")
+                            attempt_ids.append(attempt["id"])
+                        if len(set(attempt_ids)) != len(attempt_ids):
+                            raise WorkProjectionError("repository-run attempt identities are duplicated")
+                    else:
+                        run, attempts, attempt_ids = None, [], []
+                        projections_all = ()
+                    if any(item.work_job_id != job_id for item in projections_all):
+                        raise WorkProjectionError("projection belongs to another Job")
+                except (WorkProjectionError, TypeError, ValueError, RecursionError):
+                    raise _HandBackOwnerUnavailable() from None
+
+                current_attempt = None
+                current_attempt_row = None
+                current_attempt_state = None
+                if run is not None and probe["status"] == "running":
+                    if (type(probe["attempts"]) is not int or isinstance(probe["attempts"], bool)
+                            or probe["attempts"] < 1 or not attempts
+                            or type(attempts[-1]) is not dict):
+                        raise _HandBackOwnerUnavailable()
+                    current_attempt_row = attempts[-1]
+                    current_attempt = current_attempt_row.get("id")
+                    current_attempt_state = current_attempt_row.get("state")
+                    if (current_attempt != f"{job_id}-{probe['attempts']}"
+                            or current_attempt_state not in {"preparing", "awaiting_activation", "running"}):
+                        raise _HandBackOwnerUnavailable()
+                elif run is not None and type(probe["attempts"]) is not int:
+                    raise _HandBackOwnerUnavailable()
+
+                if run is not None:
+                    known_attempt_ids = set(attempt_ids)
+                    for projection in projections_all:
+                        if (projection.attempt_id not in known_attempt_ids
+                                or projection.attempt_id != f"{job_id}-{int(projection.attempt_id.rsplit('-', 1)[1])}"
+                                or int(projection.attempt_id.rsplit("-", 1)[1]) > probe["attempts"]):
+                            raise _HandBackOwnerUnavailable()
+
+                schema_version = version
+                work_intents = []
+                work_bindings = []
+                work_reservations = []
+                work_slots = []
+                legacy_links = []
+                if schema_version >= 8:
+                    reservation_t = tables.get("program_reservations")
+                    subject_t = tables.get("program_budget_subjects")
+                    slot_t = tables.get("program_slots")
+                    if reservation_t is None or subject_t is None or slot_t is None:
+                        raise _HandBackOwnerUnavailable()
+                    work_reservations = session.execute(select(
+                        reservation_t.c.scope_id, reservation_t.c.call_id,
+                        reservation_t.c.subject_id, reservation_t.c.purpose,
+                    ).where(reservation_t.c.subject_id == job_id)).mappings().all()
+                    joined_slots = session.execute(select(
+                        slot_t.c.scope_id, slot_t.c.slot_id, slot_t.c.call_id,
+                        slot_t.c.subject_id, subject_t.c.purpose.label("subject_purpose"),
+                    ).select_from(outerjoin(slot_t, subject_t, and_(
+                        slot_t.c.scope_id == subject_t.c.scope_id,
+                        slot_t.c.subject_id == subject_t.c.subject_id,
+                    ))).where(slot_t.c.subject_id == job_id)).mappings().all()
+                    for slot_row in joined_slots:
+                        purpose = slot_row["subject_purpose"]
+                        if purpose not in {"work", "collection"}:
+                            raise _HandBackOwnerUnavailable()
+                        if purpose == "work":
+                            work_slots.append(slot_row)
+                    for reservation in work_reservations:
+                        if reservation["purpose"] not in {"work", "collection"}:
+                            raise _HandBackOwnerUnavailable()
+                    work_reservations = [row for row in work_reservations if row["purpose"] == "work"]
+
+                if schema_version >= 9:
+                    intent_t = tables.get("program_call_intents")
+                    legacy_t = tables.get("program_legacy_links")
+                    if intent_t is None or legacy_t is None:
+                        raise _HandBackOwnerUnavailable()
+                    work_intents = session.execute(select(
+                        intent_t.c.scope_id, intent_t.c.call_id,
+                        intent_t.c.subject_id, intent_t.c.purpose,
+                        intent_t.c.work_attempt_id,
+                    ).where(intent_t.c.work_job_id == job_id)).mappings().all()
+                    legacy_links = session.execute(select(
+                        legacy_t.c.scope_id, legacy_t.c.batch_id,
+                        legacy_t.c.link_id, legacy_t.c.original_attempt_id,
+                        legacy_t.c.original_call_id, legacy_t.c.original_slot_id,
+                    ).where(legacy_t.c.job_id == job_id)).mappings().all()
+                    if any(row["purpose"] != "work" or row["subject_id"] != job_id
+                           or type(row["work_attempt_id"]) is not str for row in work_intents):
+                        raise _HandBackOwnerUnavailable()
+
+                if schema_version >= 10:
+                    binding_t = tables.get("program_work_projection_bindings")
+                    if binding_t is None:
+                        raise _HandBackOwnerUnavailable()
+                    work_bindings = session.execute(select(
+                        binding_t.c.scope_id, binding_t.c.call_id,
+                        binding_t.c.work_job_id, binding_t.c.attempt_id,
+                    ).where(binding_t.c.work_job_id == job_id)).mappings().all()
+
+                projection_keys = {
+                    (item.scope_id, item.call_id, item.attempt_id)
+                    for item in projections_all
+                }
+                if len(projection_keys) != len(projections_all):
+                    raise _HandBackOwnerUnavailable()
+                if schema_version >= 10:
+                    binding_keys = {
+                        (row["scope_id"], row["call_id"], row["attempt_id"])
+                        for row in work_bindings
+                    }
+                    intent_keys = {
+                        (row["scope_id"], row["call_id"], row["work_attempt_id"])
+                        for row in work_intents
+                    }
+                    if (len(binding_keys) != len(work_bindings)
+                            or len(intent_keys) != len(work_intents)
+                            or binding_keys != projection_keys or intent_keys != projection_keys):
+                        raise _HandBackOwnerUnavailable()
+                elif projections_all or work_intents or work_bindings:
+                    raise _HandBackOwnerUnavailable()
+
+                if schema_version >= 8:
+                    expected_calls = {(item.scope_id, item.call_id) for item in projections_all}
+                    expected_slots = {(item.scope_id, item.slot_id, item.call_id) for item in projections_all}
+                    reservation_calls = {
+                        (row["scope_id"], row["call_id"]) for row in work_reservations
+                    }
+                    slot_keys = {
+                        (row["scope_id"], row["slot_id"], row["call_id"]) for row in work_slots
+                    }
+                    if (len(reservation_calls) != len(work_reservations)
+                            or len(slot_keys) != len(work_slots)
+                            or reservation_calls != expected_calls or slot_keys != expected_slots):
+                        raise _HandBackOwnerUnavailable()
+                if legacy_links:
+                    raise _HandBackOwnerUnavailable()
+
+                current = tuple(
+                    item for item in projections_all
+                    if current_attempt is not None and item.attempt_id == current_attempt
+                )
+                if current_attempt is not None and probe["status"] == "running":
+                    # A projection at the current attempt must be the complete
+                    # current Work call set; historical attempts remain separate.
+                    current_keys = {(item.scope_id, item.call_id) for item in current}
+                    binding_current = {
+                        (row["scope_id"], row["call_id"]) for row in work_bindings
+                        if row["attempt_id"] == current_attempt
+                    }
+                    intent_current = {
+                        (row["scope_id"], row["call_id"]) for row in work_intents
+                        if row["work_attempt_id"] == current_attempt
+                    }
+                    if (len(binding_current) != sum(row["attempt_id"] == current_attempt for row in work_bindings)
+                            or len(intent_current) != sum(row["work_attempt_id"] == current_attempt for row in work_intents)
+                            or binding_current != current_keys or intent_current != current_keys):
+                        raise _HandBackOwnerUnavailable()
+
+                if projections_all:
+                    try:
+                        lock_work_projection_set(session, projections_all)
+                    except Exception:
+                        raise _HandBackOwnerUnavailable() from None
+
+                row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
+                lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
+                locked_raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
+                    job_table.c.id == job_id).with_for_update()).scalar_one_or_none()
+                if row is None:
+                    return False
+                if type(locked_raw) is not str:
+                    raise _HandBackOwnerUnavailable()
+                if (locked_raw != raw or row.status != probe["status"]
+                        or row.attempts != probe["attempts"]
+                        or row.generation != probe["generation"]
+                        or row.lease_owner != probe["lease_owner"]
+                        or row.lease_until != probe["lease_until"]
+                        or row.cancel_requested != probe["cancel_requested"]):
+                    raise _HandBackOwnerUnavailable()
+                if (not self._eligible_job(row) or row.status != "running"
+                        or row.lease_owner != self.id):
+                    return False
+
+                try:
+                    locked_root = _raw_job_object(locked_raw)
+                    locked_all = work_projections_from_job(locked_raw, allow_absent=True)
+                except (WorkProjectionError, TypeError, ValueError, RecursionError):
+                    raise _HandBackOwnerUnavailable() from None
+                if locked_all != projections_all:
+                    raise _HandBackOwnerUnavailable()
+
+                now = time.time()
+                projected_history = bool(projections_all)
+                if lease is not None:
+                    try:
+                        self._check_lease_finite(row, lease)
+                    except PlatformError as error:
+                        if error.code == "owner_unavailable":
+                            raise _HandBackOwnerUnavailable() from None
+                        raise
+                    expected_fence = fence if fence is not None else (
+                        None if projected_history else self.execution_fences.get(job_id)
+                    )
+                    if projected_history and (type(fence) is not str or not fence):
+                        _fail("execution_fenced", 409, "Execution reservation is no longer current")
+                    if (lease.phase != "started" or lease.fence != expected_fence
+                            or row.lease_until is None or lease.lease_until != row.lease_until
+                            or lease.execution_deadline is None or lease.lease_until <= now
+                            or lease.execution_deadline <= now):
+                        if projected_history and fence is not None and lease.fence != fence:
+                            _fail("execution_fenced", 409, "Execution reservation is no longer current")
+                        return False
+                elif projected_history:
+                    raise _HandBackOwnerUnavailable()
+                elif fence is not None:
+                    return False
+
+                if projected_history:
+                    if (current_attempt is None or lease is None
+                            or current_attempt_row is None
+                            or current_attempt_state not in {"preparing", "awaiting_activation", "running"}
+                            or hashlib.sha256(lease.fence.encode("utf-8")).hexdigest()
+                            != current_attempt_row.get("fence_sha256")):
+                        raise _HandBackOwnerUnavailable()
+                    if current:
+                        try:
+                            for projection in current:
+                                _compare_actual_work_projection(
+                                    session, scope_id=projection.scope_id,
+                                    call_id=projection.call_id, allow_cancel_requested=True,
+                                )
+                        except Exception:
+                            raise _HandBackOwnerUnavailable() from None
+
+                next_projections = {}
+                unresolved_work = False
+                if current:
+                    for projection in current:
+                        state = (projection.intent_state, projection.reservation_state,
+                                 projection.slot_state)
+                        if state == ("known", "settled", "released"):
+                            continue
+                        if state not in {
+                            ("committed", "reserved", "held"),
+                            ("unknown", "unknown", "unknown"),
+                        }:
+                            raise _HandBackOwnerUnavailable()
+                        unresolved_work = True
+                        try:
+                            payload = _mark_work_projection_unknown_in_transaction(
+                                database, session, projection,
+                                job_id=job_id, attempt_id=current_attempt,
+                            )
+                        except Exception:
+                            raise _HandBackOwnerUnavailable() from None
+                        if payload is not None:
+                            next_projections[(projection.scope_id, projection.call_id)] = payload
+
+                if row.cancel_requested:
+                    row.status, row.error_code = "cancelled", "cancelled"
+                elif unresolved_work or not replay_safe(row.resolved):
+                    row.status, row.error_code = "blocked", "execution_uncertain"
+                else:
+                    row.status, row.error_code, row.next_attempt_at = "retry_wait", "worker_shutdown", now
+                    if not projected_history:
+                        # The legacy decrement is allowed only after the exact
+                        # schema/JSON/relational empty-set proof above.
+                        row.attempts = max(0, row.attempts - 1)
+
+                if next_projections:
+                    run_locked = locked_root.get("repository_run")
+                    entries = run_locked.get("program_ledger_projections_v1") if type(run_locked) is dict else None
+                    if type(entries) is not list:
+                        raise _HandBackOwnerUnavailable()
+                    run_locked["program_ledger_projections_v1"] = [
+                        next_projections.get((entry.get("scope_id"), entry.get("call_id")), entry)
+                        if type(entry) is dict else entry for entry in entries
+                    ]
+                    row.resolved = locked_root
+
+                row.lease_owner, row.lease_until, row.updated_at = None, None, now
+                if lease is not None:
+                    lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
+                revoke_execution(session, row.id)
+                if row.status in TERMINAL:
+                    row.finished_at = now
+                self.platform.db.audit(session, self.id, "task.handed_back", row.id, {
+                    "status": row.status, "error_code": row.error_code,
+                    "work_state": "unknown_held" if unresolved_work else "unchanged",
+                })
+                succeeded = True
+                succeeded_fence = lease.fence if lease is not None else None
+        except PlatformError:
+            raise
+        except _HandBackOwnerUnavailable:
+            _fail("execution_owner_state_unavailable", 503,
+                  "Execution owner state is unavailable; retry the request")
+        except Exception:
+            _fail("execution_owner_state_unavailable", 503,
+                  "Execution owner state is unavailable; retry the request")
+
+        if succeeded:
+            self._forget_fence(job_id, succeeded_fence)
+        return succeeded
 
     def finish(self, job_id: str, artifact: tuple[str, str] | None = None, error: RuntimeFailure | None = None, cancelled: bool = False, fence: str | None = None):
         with self.platform.db.sessions.begin() as session:
