@@ -72,7 +72,19 @@ jobs:
               connection.execute("CREATE DATABASE sovite_resource_test OWNER sovite_resource_test")
               connection.execute("COMMENT ON DATABASE sovite_resource_test IS 'sovite:disposable-work-projection-test'")
           PYSETUP
-      - run: python -m pytest tests/test_work_projection_rows.py -vv -o faulthandler_timeout=60
+      - name: Run bounded Work projection PostgreSQL tests
+        run: >-
+          python scripts/ci/pg_test_diagnostics.py
+          --timeout-seconds 480
+          --diagnostics-dir "${RUNNER_TEMP}/sovite-work-projection-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Upload scrubbed Work projection diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: work-projection-postgresql-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sovite-work-projection-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 7
+          if-no-files-found: error
 
   resource-targets:
     runs-on: ubuntu-latest
