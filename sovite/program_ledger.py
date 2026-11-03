@@ -81,7 +81,8 @@ def _obligation_totals(obligations):
     return total_usd, total_allowance
 
 
-def _mark_unknown_in_transaction(database, session, tables, *, scope_id, call_id):
+def _mark_unknown_in_transaction(database, session, tables, *, scope_id, call_id,
+                                 audit_detail=None):
     """Conservatively retain an existing obligation inside the owner transaction.
 
     The caller must already hold owner_transaction's audit-head lock. This
@@ -166,8 +167,15 @@ def _mark_unknown_in_transaction(database, session, tables, *, scope_id, call_id
         return "unknown_gate_missing" if locked_gate is None else "unknown_gate_row_inhibited_unverified"
     if locked_gate is not None and locked_gate.mode != "inhibited" and locked_gate.revision >= _MAX_I64:
         raise ValueError("gate revision exhausted")
-    event = database.audit(session, "program-ledger", "mark-unknown", call_id,
-                           {"scope_id": scope_id})
+    detail = {"scope_id": scope_id}
+    if audit_detail is not None:
+        if (type(audit_detail) is not dict
+                or any(type(key) is not str or type(value) is not str
+                       or len(key) > 64 or len(value) > 128
+                       for key, value in audit_detail.items())):
+            raise ValueError("invalid unknown audit context")
+        detail.update(audit_detail)
+    event = database.audit(session, "program-ledger", "mark-unknown", call_id, detail)
     session.flush()
     session.execute(update(reservation).where(reservation.c.scope_id == scope_id, reservation.c.call_id == call_id)
                     .values(state="unknown", audit_sequence=event.sequence))
@@ -179,6 +187,129 @@ def _mark_unknown_in_transaction(database, session, tables, *, scope_id, call_id
         session.execute(update(gate).where(gate.c.scope_id == scope_id)
                         .values(mode="inhibited", revision=locked_gate.revision + 1, audit_sequence=event.sequence))
     return "unknown_gate_missing" if locked_gate is None else "unknown_gate_row_inhibited_unverified"
+
+
+def _mark_work_projection_unknown_in_transaction(database, session, projection, *, job_id, attempt_id):
+    """Record one canonical Work projection as held UNKNOWN after possible dispatch.
+
+    The caller must have joined and locked the stored projection and relational
+    rows in the global owner lock order. Immutable projection identity is
+    rechecked here; only the v10 current projection pointer advances.
+    """
+    from sqlalchemy import select, update
+    from .collection_transaction import _owner_transaction_is_active
+    from .db import Base
+    from .work_projection import (
+        MAX_I64 as PROJECTION_MAX_I64,
+        projection_digest,
+        validate_payload,
+    )
+
+    if not _owner_transaction_is_active(session):
+        raise ValueError("owner transaction unavailable")
+    value = projection.to_payload() if hasattr(projection, "to_payload") else projection
+    checked = validate_payload(value)
+    if (checked.work_job_id != job_id or checked.subject_id != job_id
+            or checked.attempt_id != attempt_id or checked.purpose != "work"):
+        raise ValueError("Work projection owner binding unavailable")
+    state = (checked.intent_state, checked.reservation_state, checked.slot_state)
+    if state == ("known", "settled", "released"):
+        _inhibit_work_gate_for_uncertain_in_transaction(
+            database, session, checked.scope_id, checked.call_id,
+            job_id=job_id, attempt_id=attempt_id,
+        )
+        return None
+    if state not in {("committed", "reserved", "held"), ("unknown", "unknown", "unknown")}:
+        raise ValueError("Work projection state unavailable")
+
+    tables = Base.metadata.tables
+    _mark_unknown_in_transaction(
+        database, session, tables, scope_id=checked.scope_id, call_id=checked.call_id,
+        audit_detail={"work_job_id": job_id, "work_attempt_id": attempt_id},
+    )
+    intent_t = tables["program_call_intents"]
+    sequence = session.execute(select(intent_t.c.audit_sequence).where(
+        intent_t.c.scope_id == checked.scope_id,
+        intent_t.c.call_id == checked.call_id,
+    )).scalar_one_or_none()
+    if type(sequence) is not int:
+        raise ValueError("Work projection audit sequence unavailable")
+    if state == ("unknown", "unknown", "unknown") and sequence == int(checked.audit_sequence):
+        # An already unknown, inhibited row is an idempotent no-op. If its gate
+        # was still open, _mark_unknown_in_transaction appended an audit event
+        # and changed the sequence, so the projection pointer must advance.
+        return None
+    if int(checked.projection_revision) >= PROJECTION_MAX_I64:
+        raise ValueError("Work projection revision exhausted")
+
+    payload = checked.to_payload()
+    revision = int(checked.projection_revision) + 1
+    payload.update(
+        intent_state="unknown", reservation_state="unknown", slot_state="unknown",
+        projection_revision=str(revision), audit_sequence=str(sequence),
+    )
+    next_projection = validate_payload(payload)
+    digest_value = projection_digest(next_projection)
+    binding_t = tables["program_work_projection_bindings"]
+    updated = session.execute(update(binding_t).where(
+        binding_t.c.scope_id == checked.scope_id,
+        binding_t.c.call_id == checked.call_id,
+        binding_t.c.subject_id == checked.subject_id,
+        binding_t.c.purpose == checked.purpose,
+        binding_t.c.work_job_id == checked.work_job_id,
+        binding_t.c.attempt_id == checked.attempt_id,
+        binding_t.c.slot_id == checked.slot_id,
+        binding_t.c.policy_revision == int(checked.policy_revision),
+        binding_t.c.policy_digest == checked.policy_digest,
+        binding_t.c.projection_revision == int(checked.projection_revision),
+        binding_t.c.projection_digest == projection_digest(checked),
+        binding_t.c.audit_sequence == int(checked.audit_sequence),
+    ).values(
+        projection_revision=revision,
+        projection_digest=digest_value,
+        audit_sequence=sequence,
+    ))
+    if updated.rowcount != 1:
+        raise ValueError("Work projection pointer changed")
+    return payload
+
+
+def _inhibit_work_gate_for_uncertain_in_transaction(database, session, scope_id, call_id,
+                                                     *, job_id, attempt_id):
+    """Inhibit a scope for an uncertain attempt without rewriting known rows."""
+    from sqlalchemy import select, update
+    from .collection_transaction import _owner_transaction_is_active
+    from .db import Base
+
+    if not _owner_transaction_is_active(session):
+        raise ValueError("owner transaction unavailable")
+    tables = Base.metadata.tables
+    scope_t = tables["program_budget_scopes"]
+    gate_t = tables["program_gate_state"]
+    scope = session.execute(select(scope_t.c.id).where(
+        scope_t.c.id == scope_id).with_for_update()).scalar_one_or_none()
+    gate = session.execute(select(gate_t).where(
+        gate_t.c.scope_id == scope_id).with_for_update()).mappings().one_or_none()
+    if scope is None or gate is None:
+        raise ValueError("Work gate unavailable")
+    if gate["mode"] == "inhibited":
+        return
+    if (gate["mode"] not in {"disabled", "census", "active"}
+            or type(gate["revision"]) is not int or not 0 <= gate["revision"] < _MAX_I64):
+        raise ValueError("Work gate unavailable")
+    event = database.audit(session, "program-ledger", "inhibit-uncertain-work", call_id, {
+        "scope_id": scope_id, "work_job_id": job_id, "work_attempt_id": attempt_id,
+    })
+    session.flush()
+    result = session.execute(update(gate_t).where(
+        gate_t.c.scope_id == scope_id,
+        gate_t.c.revision == gate["revision"],
+        gate_t.c.audit_sequence == gate["audit_sequence"],
+        gate_t.c.mode == gate["mode"],
+    ).values(mode="inhibited", revision=gate["revision"] + 1,
+             audit_sequence=event.sequence))
+    if result.rowcount != 1:
+        raise ValueError("Work gate changed")
 
 
 def _validate_locked_legacy_binding(link, batch, registry, job, reservation, slot):

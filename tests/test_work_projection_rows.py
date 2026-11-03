@@ -2,14 +2,16 @@
 import hashlib
 import json
 import os
+import time
 import uuid
 
 import pytest
 from sqlalchemy import create_engine, insert, make_url, select, text, update
 
 from sovite.collection_transaction import owner_transaction
-from sovite.db import Base, Database, Job, digest
+from sovite.db import Base, Database, Job, MetadataRow, digest
 from sovite.lease_service import execution_owner_key
+from sovite.repository_runs import RUN_SCHEMA, RepositoryRunAttemptExecutor
 from sovite.work_projection import (
     _WorkProjectionUnavailable,
     _compare_actual_work_projection,
@@ -90,17 +92,18 @@ def work_rows(request, tmp_path):
         h, policy_hash, request_hash = "a" * 64, "c" * 64, "b" * 64
         price_hash, meter_hash, permit_hash = "d" * 64, "e" * 64, "f" * 64
         generation, fence = "sha256:" + "1" * 64, "2" * 32
+        lease_expiry = time.time() + 300
         fence_hash = hashlib.sha256(fence.encode()).hexdigest()
         identity_digest = digest({"source_code": "fixture", "issuer_code": "fixture"})
         lease_digest = digest({
-            "job_id": "job", "attempt_id": "attempt", "workload_id": "workload",
+            "job_id": "job", "attempt_id": "job-1", "workload_id": "workload",
             "instance_id": "instance", "generation": generation,
             "fence_sha256": fence_hash,
         })
         payload = {
             "schema_version": "sovite-work-projection/v1",
             "scope_id": "scope", "work_job_id": "job", "subject_id": "job",
-            "attempt_id": "attempt", "call_id": "call", "slot_id": "slot",
+            "attempt_id": "job-1", "call_id": "call", "slot_id": "slot",
             "effect_key": "effect", "receipt_id": None, "evidence_id": None,
             "purpose": "work", "lease_digest": lease_digest,
             "request_digest": request_hash, "policy_digest": policy_hash,
@@ -114,7 +117,8 @@ def work_rows(request, tmp_path):
         }
         job_resolved = {
             "repository_run": {
-                "attempts": [{"id": "attempt", "state": "running",
+                "schema_version": RUN_SCHEMA,
+                "attempts": [{"id": "job-1", "state": "running",
                               "fence_sha256": fence_hash}],
                 "program_ledger_projections_v1": [payload],
             },
@@ -132,7 +136,7 @@ def work_rows(request, tmp_path):
                 generation=generation, resolved={}, task="synthetic",
                 status="running", lease_owner=execution_owner_key(
                     workload_id="workload", instance_id="instance"),
-                lease_until=10.0,
+                lease_until=lease_expiry, attempts=1,
             ))
             session.flush()
             session.execute(_job_resolved_update(db), {"resolved": raw_resolved, "job_id": "job"})
@@ -178,17 +182,17 @@ def work_rows(request, tmp_path):
                 meter_digest=meter_hash, permit_digest=permit_hash, source_code="fixture",
                 issuer_code="fixture", source_identity_digest=identity_digest,
                 observed_ms=200, valid_until_ms=1500, state="committed",
-                work_job_id="job", work_attempt_id="attempt", work_lease_digest=lease_digest,
+                work_job_id="job", work_attempt_id="job-1", work_lease_digest=lease_digest,
                 audit_sequence=sequence,
             ))
             session.execute(insert(tables["worker_execution_leases"]), dict(
                 job_id="job", workload_id="workload", instance_id="instance",
-                fence=fence, generation=generation, phase="started", lease_until=10.0,
-                execution_deadline=10.0, created_at=0.0, updated_at=0.0,
+                fence=fence, generation=generation, phase="started", lease_until=lease_expiry,
+                execution_deadline=lease_expiry, created_at=0.0, updated_at=0.0,
             ))
             session.execute(insert(tables["program_work_projection_bindings"]), dict(
                 scope_id="scope", call_id="call", subject_id="job", work_job_id="job",
-                attempt_id="attempt", slot_id="slot", purpose="work",
+                attempt_id="job-1", slot_id="slot", purpose="work",
                 policy_revision=1, policy_digest=policy_hash,
                 projection_revision=1, projection_digest=projection_digest(payload),
                 audit_sequence=sequence,
@@ -280,7 +284,8 @@ def _settle_synthetic_call(work_rows):
         audit_sequence="2",
     )
     job_value = {"repository_run": {
-        "attempts": [{"id": "attempt", "state": "running",
+        "schema_version": RUN_SCHEMA,
+        "attempts": [{"id": "job-1", "state": "running",
                       "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()}],
         "program_ledger_projections_v1": [payload],
     }}
@@ -384,3 +389,354 @@ def test_absent_binding_relation_refuses_and_does_not_create_it(work_rows):
             _compare_actual_work_projection(session, scope_id="scope", call_id="call")
     assert "program_work_projection_bindings" not in set(
         __import__("sqlalchemy").inspect(db.engine).get_table_names(schema=db.schema))
+
+
+def test_explicit_uncertain_attempt_holds_projection_in_same_owner_transaction(work_rows, tmp_path):
+    db, original, _, binding = work_rows
+    fence = "2" * 32
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+
+    def uncertain(run):
+        run["attempts"][-1].update(state="uncertain", finished_at="2026-11-03T00:00:00+00:00")
+
+    executor._persist("job", fence, uncertain, uncertain_attempt_id="job-1")
+
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        reservation = session.execute(select(tables["program_reservations"])).mappings().one()
+        slot = session.execute(select(tables["program_slots"])).mappings().one()
+        intent = session.execute(select(tables["program_call_intents"])).mappings().one()
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        binding_row = session.execute(select(binding)).mappings().one()
+        job = session.get(Job, "job")
+        projection = job.resolved["repository_run"]["program_ledger_projections_v1"][0]
+
+    assert (reservation["state"], slot["state"], intent["state"]) == ("unknown", "unknown", "unknown")
+    assert (reservation["reserved_usd_micro"], reservation["reserved_allowance_micro"]) == (10, 20)
+    assert gate["mode"] == "inhibited"
+    assert projection["intent_state"] == projection["reservation_state"] == projection["slot_state"] == "unknown"
+    assert projection["projection_revision"] == "2"
+    assert binding_row["projection_revision"] == 2
+    for field in ("scope_id", "call_id", "subject_id", "work_job_id", "attempt_id",
+                  "slot_id", "purpose", "policy_revision", "policy_digest"):
+        assert binding_row[field] == (int(original[field]) if field == "policy_revision"
+                                      else original[field])
+    assert job.resolved["repository_run"]["attempts"][-1]["state"] == "uncertain"
+
+
+@pytest.mark.parametrize("change", ["attempt", "expired"])
+def test_uncertain_attempt_refuses_stale_job_or_expired_live_lease(work_rows, tmp_path, change):
+    db, _, _, _ = work_rows
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        if change == "attempt":
+            session.execute(update(Job).where(Job.id == "job").values(attempts=2))
+        else:
+            session.execute(update(Job).where(Job.id == "job").values(lease_until=1.0))
+            session.execute(update(tables["worker_execution_leases"]).where(
+                tables["worker_execution_leases"].c.job_id == "job").values(
+                    lease_until=1.0, execution_deadline=1.0))
+
+    with pytest.raises(Exception) as exc_info:
+        executor._persist("job", "2" * 32,
+                          lambda run: run["attempts"][-1].update(state="uncertain"),
+                          uncertain_attempt_id="job-1")
+    assert getattr(exc_info.value, "code", None) == "execution_fenced"
+    with db.sessions() as session:
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "reserved"
+        assert session.scalar(select(tables["program_call_intents"].c.state)) == "committed"
+        assert session.scalar(select(tables["program_gate_state"].c.mode)) == "disabled"
+
+
+def test_uncertain_no_projection_path_stays_job_only(tmp_path):
+    db = Database(f"sqlite:///{tmp_path / 'no-projection.db'}")
+    db.migrate()
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    now = time.time()
+    fence = "3" * 32
+    fence_hash = hashlib.sha256(fence.encode()).hexdigest()
+    resolved = {"repository_run": {
+        "schema_version": RUN_SCHEMA,
+        "attempts": [{"id": "job-1", "state": "running", "fence_sha256": fence_hash}],
+        "program_ledger_projections_v1": [],
+    }}
+    with db.sessions.begin() as session:
+        db.audit(session, "synthetic-test", "seed", "job")
+        session.add(Job(
+            id="job", receipt="job", idempotency_key="job", request_digest="b" * 64,
+            caller="fixture", grant_id="fixture", generation="sha256:" + "1" * 64,
+            resolved=resolved, task="synthetic", status="running",
+            lease_owner=execution_owner_key(workload_id="workload", instance_id="instance"),
+            lease_until=now + 300, attempts=1,
+        ))
+        session.execute(insert(Base.metadata.tables["worker_execution_leases"]).values(
+            job_id="job", workload_id="workload", instance_id="instance", fence=fence,
+            generation="sha256:" + "1" * 64, phase="started", lease_until=now + 300,
+            execution_deadline=now + 300, created_at=now, updated_at=now,
+        ))
+
+    executor._persist("job", fence,
+                      lambda run: run["attempts"][-1].update(state="uncertain"),
+                      uncertain_attempt_id="job-1")
+    with db.sessions() as session:
+        assert session.get(Job, "job").resolved[
+            "repository_run"]["attempts"][-1]["state"] == "uncertain"
+
+
+def test_uncertain_cancel_requested_still_records_unknown_hold(work_rows, tmp_path):
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        session.execute(update(Job).where(Job.id == "job").values(cancel_requested=True))
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    executor._persist("job", "2" * 32,
+                      lambda run: run["attempts"][-1].update(state="uncertain"),
+                      uncertain_attempt_id="job-1")
+    with db.sessions() as session:
+        assert session.scalar(select(Base.metadata.tables["program_reservations"].c.state)) == "unknown"
+        assert session.scalar(select(Job.cancel_requested).where(Job.id == "job")) is True
+
+
+def test_uncertain_known_settled_projection_and_receipt_remain_known(work_rows, tmp_path):
+    db, _, _, _ = work_rows
+    _settle_synthetic_call(work_rows)
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    executor._persist("job", "2" * 32,
+                      lambda run: run["attempts"][-1].update(state="uncertain"),
+                      uncertain_attempt_id="job-1")
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "settled"
+        assert session.scalar(select(tables["program_call_intents"].c.state)) == "known"
+        assert session.scalar(select(tables["program_slots"].c.state)) == "released"
+        assert session.scalar(select(tables["program_call_receipts"].c.receipt_id)) == "receipt"
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        assert (gate["mode"], gate["revision"]) == ("inhibited", 1)
+
+
+def test_uncertain_binding_mismatch_rolls_back_all_owner_writes(work_rows, tmp_path):
+    db, _, _, binding = work_rows
+    with db.sessions.begin() as session:
+        session.execute(update(binding).where(binding.c.scope_id == "scope", binding.c.call_id == "call")
+                        .values(projection_digest="0" * 64))
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    with pytest.raises(Exception) as exc_info:
+        executor._persist("job", "2" * 32,
+                          lambda run: run["attempts"][-1].update(state="uncertain"),
+                          uncertain_attempt_id="job-1")
+    assert getattr(exc_info.value, "code", None) == "execution_projection_unavailable"
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "reserved"
+        assert session.scalar(select(tables["program_gate_state"].c.mode)) == "disabled"
+        assert session.get(Job, "job").resolved["repository_run"]["attempts"][-1]["state"] == "running"
+
+
+def _add_second_projection_scope(work_rows, *, corrupt_binding=False):
+    db, original, _, binding = work_rows
+    tables = Base.metadata.tables
+    second = dict(original, scope_id="scope-z", call_id="call-z", slot_id="slot-z",
+                  effect_key="effect-z")
+    with db.sessions.begin() as session:
+        def copied(table_name, key_name, key_value, **changes):
+            table = tables[table_name]
+            row = dict(session.execute(select(table).where(getattr(table.c, key_name) == key_value))
+                       .mappings().one())
+            row.update(changes)
+            session.execute(insert(table), row)
+
+        second["scope_id"] = "scope"
+        copied("program_reservations", "scope_id", "scope", call_id="call-z", effect_key="effect-z")
+        copied("program_slots", "scope_id", "scope", slot_id="slot-z", call_id="call-z")
+        copied("program_call_intents", "scope_id", "scope", call_id="call-z",
+               effect_key="effect-z", idempotency_key="idempotency-z")
+        copied("program_work_projection_bindings", "scope_id", "scope", call_id="call-z",
+               slot_id="slot-z",
+               projection_digest="0" * 64 if corrupt_binding else projection_digest(second))
+
+        job = session.get(Job, "job")
+        job_value = dict(job.resolved)
+        run = dict(job_value["repository_run"])
+        run["program_ledger_projections_v1"] = [original, second]
+        job_value["repository_run"] = run
+        job.resolved = job_value
+    return db
+
+
+def test_uncertain_prelocks_multiple_calls_and_updates_all_projections(work_rows, tmp_path):
+    db, _, _, _ = work_rows
+    _add_second_projection_scope(work_rows)
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    executor._persist("job", "2" * 32,
+                      lambda run: run["attempts"][-1].update(state="uncertain"),
+                      uncertain_attempt_id="job-1")
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        states = session.execute(select(tables["program_reservations"].c.scope_id,
+                                        tables["program_reservations"].c.state)
+                                 .order_by(tables["program_reservations"].c.scope_id)).all()
+        job = session.get(Job, "job")
+    assert states == [("scope", "unknown"), ("scope", "unknown")]
+    assert [entry["reservation_state"] for entry in
+            job.resolved["repository_run"]["program_ledger_projections_v1"]] == ["unknown", "unknown"]
+
+
+def test_uncertain_second_call_mismatch_rolls_back_first_call(work_rows, tmp_path):
+    db, _, _, _ = work_rows
+    _add_second_projection_scope(work_rows, corrupt_binding=True)
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    with pytest.raises(Exception) as exc_info:
+        executor._persist("job", "2" * 32,
+                          lambda run: run["attempts"][-1].update(state="uncertain"),
+                          uncertain_attempt_id="job-1")
+    assert getattr(exc_info.value, "code", None) == "execution_projection_unavailable"
+    with db.sessions() as session:
+        states = session.scalars(select(Base.metadata.tables["program_reservations"].c.state)
+                                 .order_by(Base.metadata.tables["program_reservations"].c.scope_id)).all()
+        assert states == ["reserved", "reserved"]
+
+
+def test_already_unknown_inhibited_projection_is_idempotent(work_rows, tmp_path):
+    db, original, _, binding = work_rows
+    tables = Base.metadata.tables
+    payload = dict(original, intent_state="unknown", reservation_state="unknown",
+                   slot_state="unknown", projection_revision="2", audit_sequence="2")
+    with db.sessions.begin() as session:
+        event = db.audit(session, "synthetic-test", "mark-unknown", "call",
+                         {"scope_id": "scope"})
+        session.flush()
+        assert event.sequence == 2
+        session.execute(update(tables["program_reservations"]).where(
+            tables["program_reservations"].c.call_id == "call").values(
+                state="unknown", audit_sequence=event.sequence))
+        session.execute(update(tables["program_slots"]).where(
+            tables["program_slots"].c.call_id == "call").values(
+                state="unknown", audit_sequence=event.sequence))
+        session.execute(update(tables["program_call_intents"]).where(
+            tables["program_call_intents"].c.call_id == "call").values(
+                state="unknown", audit_sequence=event.sequence))
+        session.execute(update(tables["program_gate_state"]).where(
+            tables["program_gate_state"].c.scope_id == "scope").values(
+                mode="inhibited", revision=1, audit_sequence=event.sequence))
+        session.execute(update(binding).where(binding.c.call_id == "call").values(
+            projection_revision=2, projection_digest=projection_digest(payload),
+            audit_sequence=event.sequence))
+        session.execute(_job_resolved_update(db), {
+            "resolved": json.dumps({"repository_run": {
+                "schema_version": RUN_SCHEMA,
+                "attempts": [{"id": "job-1", "state": "running",
+                              "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()}],
+                "program_ledger_projections_v1": [payload],
+            }}, separators=(",", ":")),
+            "job_id": "job",
+        })
+
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    executor._persist("job", "2" * 32,
+                      lambda run: run["attempts"][-1].update(state="uncertain"),
+                      uncertain_attempt_id="job-1")
+    with db.sessions() as session:
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == 2
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "unknown"
+        assert session.get(Job, "job").resolved["repository_run"]["attempts"][-1]["state"] == "uncertain"
+
+
+def test_audit_verification_failure_rolls_back_uncertain_attempt(work_rows, tmp_path):
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        session.execute(update(MetadataRow).where(MetadataRow.key == "audit_head").values(
+            value={"sequence": 1, "hash": "0" * 64}))
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    with pytest.raises(Exception) as exc_info:
+        executor._persist("job", "2" * 32,
+                          lambda run: run["attempts"][-1].update(state="uncertain"),
+                          uncertain_attempt_id="job-1")
+    assert getattr(exc_info.value, "code", None) == "execution_projection_unavailable"
+    with db.sessions() as session:
+        assert session.scalar(select(Base.metadata.tables["program_reservations"].c.state)) == "reserved"
+        assert session.get(Job, "job").resolved["repository_run"]["attempts"][-1]["state"] == "running"
+
+
+def test_projection_revision_exhaustion_rolls_back_unknown_transition(work_rows, tmp_path):
+    db, original, _, binding = work_rows
+    tables = Base.metadata.tables
+    maximum = str((1 << 63) - 1)
+    payload = dict(original, projection_revision=maximum)
+    with db.sessions.begin() as session:
+        session.execute(update(binding).where(binding.c.call_id == "call").values(
+            projection_revision=int(maximum), projection_digest=projection_digest(payload)))
+        session.execute(_job_resolved_update(db), {
+            "resolved": json.dumps({"repository_run": {
+                "schema_version": RUN_SCHEMA,
+                "attempts": [{"id": "job-1", "state": "running",
+                              "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()}],
+                "program_ledger_projections_v1": [payload],
+            }}, separators=(",", ":")),
+            "job_id": "job",
+        })
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    with pytest.raises(Exception) as exc_info:
+        executor._persist("job", "2" * 32,
+                          lambda run: run["attempts"][-1].update(state="uncertain"),
+                          uncertain_attempt_id="job-1")
+    assert getattr(exc_info.value, "code", None) == "execution_projection_unavailable"
+    with db.sessions() as session:
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "reserved"
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == 1
+
+
+@pytest.mark.parametrize("mismatch", ["json", "binding", "intent"])
+def test_uncertain_refuses_asymmetric_projection_binding_intent_sets(work_rows, tmp_path, mismatch):
+    db, _, _, binding = work_rows
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        if mismatch == "json":
+            session.execute(_job_resolved_update(db), {
+                "resolved": json.dumps({"repository_run": {
+                    "schema_version": RUN_SCHEMA,
+                    "attempts": [{"id": "job-1", "state": "running",
+                                  "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()}],
+                    "program_ledger_projections_v1": [],
+                }}, separators=(",", ":")), "job_id": "job",
+            })
+        elif mismatch == "binding":
+            session.execute(binding.delete().where(binding.c.scope_id == "scope", binding.c.call_id == "call"))
+        else:
+            session.execute(update(tables["program_call_intents"]).where(
+                tables["program_call_intents"].c.scope_id == "scope",
+                tables["program_call_intents"].c.call_id == "call",
+            ).values(work_attempt_id="job-2"))
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+    with pytest.raises(Exception) as exc_info:
+        executor._persist("job", "2" * 32,
+                          lambda run: run["attempts"][-1].update(state="uncertain"),
+                          uncertain_attempt_id="job-1")
+    assert getattr(exc_info.value, "code", None) == "execution_projection_unavailable"
+    with db.sessions() as session:
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "reserved"
+        assert session.scalar(select(tables["program_gate_state"].c.mode)) == "disabled"
+        assert session.get(Job, "job").resolved["repository_run"]["attempts"][-1]["state"] == "running"

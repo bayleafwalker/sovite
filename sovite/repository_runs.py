@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .adapters import RuntimeFailure
-from .db import ExecutionAuthority, Job, WorkerExecutionLease
+from .db import Base, ExecutionAuthority, Job, MetadataRow, WorkerExecutionLease
 from .repository_sessions import RepositorySessionManager, RepositoryWorkspace
 from .service import Platform, PlatformError
 
@@ -620,7 +620,11 @@ class RepositoryRunAttemptExecutor:
         self.state_root, self.executor, self.timeout_seconds = Path(state_root), executor, timeout_seconds
         self.execution_profile = execution_profile
 
-    def _persist(self, job_id: str, fence: str, mutate, *, quota=None) -> None:
+    def _persist(self, job_id: str, fence: str, mutate, *, quota=None,
+                 uncertain_attempt_id: str | None = None) -> None:
+        if uncertain_attempt_id is not None:
+            return self._persist_uncertain(job_id, fence, mutate, uncertain_attempt_id,
+                                           quota=quota)
         with self.platform.db.sessions.begin() as session:
             if quota is not None:self.platform.db.authority_lock(session)
             job = session.get(Job, job_id, with_for_update=True)
@@ -636,6 +640,174 @@ class RepositoryRunAttemptExecutor:
             resolved["repository_run"] = run
             job.resolved = resolved
             job.updated_at = time.time()
+
+    def _persist_uncertain(self, job_id: str, fence: str, mutate,
+                           attempt_id: str, *, quota=None) -> None:
+        """Persist explicit possible-dispatch uncertainty with any Work projection."""
+        from sqlalchemy import Text, cast, select
+
+        from .collection_transaction import owner_transaction
+        from .work_projection import (
+            WorkProjectionError,
+            _WorkProjectionUnavailable,
+            _compare_actual_work_projection,
+            _raw_job_object,
+            lock_work_projection_set,
+            work_projections_from_job,
+        )
+
+        def unavailable():
+            return RepositoryRunError(
+                "execution_projection_unavailable",
+                "Repository attempt owner state is unavailable", 409,
+            )
+
+        try:
+            with owner_transaction(self.platform.db) as session:
+                version_row = session.get(MetadataRow, "schema_version")
+                version_value = version_row.value if version_row is not None else None
+                if (type(version_value) is not dict or set(version_value) != {"version"}
+                        or type(version_value["version"]) is not int):
+                    raise unavailable()
+                schema_version = version_value["version"]
+                raw = session.execute(select(cast(Job.resolved, Text)).where(
+                    Job.id == job_id)).scalar_one_or_none()
+                if type(raw) is not str:
+                    raise unavailable()
+                try:
+                    root = _raw_job_object(raw)
+                    run = root.get("repository_run")
+                    if type(run) is not dict or run.get("schema_version") != RUN_SCHEMA:
+                        raise ValueError
+                    all_projections = work_projections_from_job(raw, allow_absent=True)
+                except (WorkProjectionError, TypeError, ValueError):
+                    raise unavailable() from None
+                if any(item.work_job_id != job_id for item in all_projections):
+                    raise unavailable()
+                projections = tuple(item for item in all_projections
+                                    if item.work_job_id == job_id and item.attempt_id == attempt_id)
+                projection_pairs = {(item.scope_id, item.call_id) for item in projections}
+
+                binding_rows = []
+                if schema_version >= 10:
+                    table = Base.metadata.tables.get("program_work_projection_bindings")
+                    if table is None:
+                        raise unavailable()
+                    binding_rows = session.execute(select(table.c.scope_id, table.c.call_id).where(
+                        table.c.work_job_id == job_id,
+                        table.c.attempt_id == attempt_id,
+                    ).order_by(table.c.scope_id, table.c.call_id)).mappings().all()
+                elif projections:
+                    raise unavailable()
+
+                intent_rows = []
+                if schema_version >= 9:
+                    intent_t = Base.metadata.tables.get("program_call_intents")
+                    if intent_t is None:
+                        raise unavailable()
+                    intent_rows = session.execute(select(intent_t.c.scope_id, intent_t.c.call_id).where(
+                        intent_t.c.work_job_id == job_id,
+                        intent_t.c.work_attempt_id == attempt_id,
+                    ).order_by(intent_t.c.scope_id, intent_t.c.call_id)).mappings().all()
+
+                if schema_version >= 10:
+                    binding_pairs = {(row["scope_id"], row["call_id"]) for row in binding_rows}
+                    intent_pairs = {(row["scope_id"], row["call_id"]) for row in intent_rows}
+                    if binding_pairs != projection_pairs or intent_pairs != projection_pairs:
+                        raise unavailable()
+                elif projections or intent_rows:
+                    raise unavailable()
+
+                if projections:
+                    lock_work_projection_set(session, projections)
+
+                job = session.get(Job, job_id, with_for_update=True)
+                lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
+                locked_raw = session.execute(select(cast(Job.resolved, Text)).where(
+                    Job.id == job_id).with_for_update()).scalar_one_or_none()
+                if type(locked_raw) is not str:
+                    raise unavailable()
+                try:
+                    locked_root = _raw_job_object(locked_raw)
+                    locked_run = locked_root.get("repository_run")
+                    locked_projections = work_projections_from_job(locked_raw, allow_absent=True)
+                except (WorkProjectionError, TypeError, ValueError):
+                    raise unavailable() from None
+                if (job is None or lease is None or type(locked_run) is not dict
+                        or locked_run.get("schema_version") != RUN_SCHEMA):
+                    raise unavailable()
+                locked_matches = tuple(item for item in locked_projections
+                                       if item.work_job_id == job_id and item.attempt_id == attempt_id)
+                if (locked_matches != projections or any(item.work_job_id != job_id
+                                                          for item in locked_projections)):
+                    raise unavailable()
+                if (job.status != "running" or lease.phase != "started" or lease.fence != fence
+                        or job.lease_until != lease.lease_until or lease.generation != job.generation
+                        or type(job.attempts) is not int or attempt_id != f"{job.id}-{job.attempts}"
+                        or type(lease.lease_until) not in {int, float} or isinstance(lease.lease_until, bool)
+                        or not math.isfinite(lease.lease_until)
+                        or type(lease.execution_deadline) not in {int, float}
+                        or isinstance(lease.execution_deadline, bool)
+                        or not math.isfinite(lease.execution_deadline)
+                        or min(lease.lease_until, lease.execution_deadline) <= time.time()):
+                    raise RepositoryRunError("execution_fenced",
+                                              "Repository attempt is no longer current", 409)
+                attempts = locked_run.get("attempts")
+                fence_digest = hashlib.sha256(fence.encode("utf-8")).hexdigest()
+                if (type(attempts) is not list or not attempts or type(attempts[-1]) is not dict
+                        or attempts[-1].get("id") != attempt_id
+                        or attempts[-1].get("state") != "running"
+                        or attempts[-1].get("fence_sha256") != fence_digest):
+                    raise RepositoryRunError("execution_fenced",
+                                              "Repository attempt is no longer current", 409)
+
+                if quota is not None:
+                    self._root_quota(session, job, quota)
+                if projections:
+                    try:
+                        for projection in projections:
+                            _compare_actual_work_projection(
+                                session, scope_id=projection.scope_id,
+                                call_id=projection.call_id, allow_cancel_requested=True,
+                            )
+                    except Exception:
+                        raise unavailable() from None
+
+                    from . import program_ledger
+
+                    updated = {}
+                    for projection in projections:
+                        next_payload = program_ledger._mark_work_projection_unknown_in_transaction(
+                            self.platform.db, session, projection,
+                            job_id=job_id, attempt_id=attempt_id,
+                        )
+                        if next_payload is not None:
+                            updated[(projection.scope_id, projection.call_id)] = next_payload
+                    entries = locked_run.get("program_ledger_projections_v1")
+                    if type(entries) is not list:
+                        raise unavailable()
+                    if updated:
+                        locked_run["program_ledger_projections_v1"] = [
+                            updated.get((entry.get("scope_id"), entry.get("call_id")), entry)
+                            if type(entry) is dict else entry
+                            for entry in entries
+                        ]
+
+                mutate(locked_run)
+                current_attempts = locked_run.get("attempts")
+                if (type(current_attempts) is not list or not current_attempts
+                        or type(current_attempts[-1]) is not dict
+                        or current_attempts[-1].get("id") != attempt_id
+                        or current_attempts[-1].get("state") != "uncertain"):
+                    raise unavailable()
+                job.resolved = locked_root
+                job.updated_at = time.time()
+        except RepositoryRunError:
+            raise
+        except Exception:
+            # No SQL, raw JSON, receipt, or database error is exposed through
+            # this dormant owner boundary; the owner transaction rolls back.
+            raise unavailable() from None
 
     @staticmethod
     def _root_quota(session,job,incoming):
@@ -786,7 +958,8 @@ class RepositoryRunAttemptExecutor:
                 if error_code:
                     attempts[-1]["error_code"] = error_code
         try:
-            self._persist(job_id, fence, update_attempt)
+            self._persist(job_id, fence, update_attempt,
+                          uncertain_attempt_id=attempt_id if state == "uncertain" else None)
         except RepositoryRunError:
             # A revoked or expired fence must not mutate a later attempt's
             # durable observation. Recovery projects the old one as uncertain.
