@@ -1,0 +1,205 @@
+{
+  "oracle": "Sovite full v8 historical schema/data plus v9 ledger schema with synthetic rows",
+  "source_revision": "1960f93080805dbfcdec4966274b073674893348",
+  "source_files": {
+    "sovite/program_ledger_schema.py": "9f01683a5a3ab840f8d2f7e25bafe15c3f1896629bd5bd94d52de6e75f336883",
+    "sovite/db.py": "040c4a25bd58fcb4cf0fe72b11cb4f857d14b3abd1d7597fa671a214872f2fea"
+  },
+  "provenance": {
+    "schema": "DDL frozen from the v9 schema module at source_revision; fixture loading does not import or derive DDL from live SQLAlchemy metadata.",
+    "historical_base": "All 34 tables and synthetic rows in the existing tests/fixtures/program_ledger_v8_sqlite.sql and program_ledger_v8_postgresql.sql, including platform_metadata schema_version/audit_head and audit_events; both bytes are hash-pinned below.",
+    "rows": "Authored synthetic values with fixture-only identifiers/digests and synthetic:// custody references; no external source, identity, provider, or custody object.",
+    "expectations": "Per-backend schema/data SHA-256 values and all-table row counts are captured from the frozen v8 fixture plus frozen source-derived v9 SQL path only, never from migration output. Review actual SQL and row values before changing any expected digest."
+  },
+  "fixture_sha256": {
+    "program_ledger_v8_sqlite.sql": "5ad46615b2b78dd20c4c6d27be546c45afd6372382a0ee44e76d880206bf8c24",
+    "program_ledger_v8_postgresql.sql": "f83c2a3b4e1e6b056369780aabde2a96309e47b48875d5bf9c0f794838c61d01",
+    "program_ledger_v9_oracle_sqlite.sql": "fd970ba61cd0e1b26f7d95517ee9903027babd6a65c20943fc2f0c500f0220a0",
+    "program_ledger_v9_oracle_postgresql.sql": "e7fb816314917b1612a3d398cbe4cd8a3efcfc8434299c2c76311f3368ac4aba"
+  },
+  "tables": [
+    "audit_events",
+    "auth_sessions",
+    "binding_runtime_state",
+    "bundle_revisions",
+    "collection_acknowledgements",
+    "collection_checkpoints",
+    "collection_enrollments",
+    "collection_epoch_guards",
+    "collection_epochs",
+    "collection_observations",
+    "collection_operations",
+    "collection_retention_refs",
+    "collection_sessions",
+    "execution_authority",
+    "grant_runtime_state",
+    "helper_enrollments",
+    "helper_sessions",
+    "inference_requests",
+    "jobs",
+    "platform_metadata",
+    "program_budget_scopes",
+    "program_budget_subjects",
+    "program_reservations",
+    "program_slots",
+    "qualifications",
+    "resource_gateway_enrollments",
+    "resource_output_grants",
+    "resource_owner_requests",
+    "resource_workload_scopes",
+    "setup_drafts",
+    "setup_principals",
+    "worker_execution_leases",
+    "worker_execution_operations",
+    "worker_heartbeats",
+    "program_policy_revisions",
+    "program_census_batches",
+    "program_gate_state",
+    "program_subject_registry",
+    "program_call_intents",
+    "program_overflow_evidence",
+    "program_call_receipts",
+    "program_legacy_links"
+  ],
+  "historical_metadata": {
+    "sqlite": {
+      "schema_version": {
+        "version": 9
+      },
+      "audit_head": {
+        "sequence": 1,
+        "hash": "fd6cedbb4d53402fbdcc7b7912f445ad6356175304928cbd47c60095eeb89e87"
+      }
+    },
+    "postgresql": {
+      "schema_version": {
+        "version": 9
+      },
+      "audit_head": {
+        "sequence": 1,
+        "hash": "adae9b40b8165b2babe894600a736874be281e74e689e7fcccdc2828f0479a80"
+      }
+    }
+  },
+  "snapshots": {
+    "sqlite": {
+      "schema_sha256": "cf508a4bb3de2b4b6e350db58b5e532d1cb9a2fcd2a7263cd6546577f192c7fe",
+      "data_sha256": "01277cfa18fc3f051b7d9d81dbe50428688b96d9fc237e4e2fa2d1a5016294a3",
+      "row_counts": {
+        "audit_events": 1,
+        "auth_sessions": 0,
+        "binding_runtime_state": 0,
+        "bundle_revisions": 0,
+        "collection_acknowledgements": 0,
+        "collection_checkpoints": 0,
+        "collection_enrollments": 0,
+        "collection_epoch_guards": 1,
+        "collection_epochs": 1,
+        "collection_observations": 0,
+        "collection_operations": 0,
+        "collection_retention_refs": 0,
+        "collection_sessions": 1,
+        "execution_authority": 0,
+        "grant_runtime_state": 0,
+        "helper_enrollments": 0,
+        "helper_sessions": 0,
+        "inference_requests": 0,
+        "jobs": 1,
+        "platform_metadata": 2,
+        "program_budget_scopes": 1,
+        "program_budget_subjects": 2,
+        "program_reservations": 3,
+        "program_slots": 3,
+        "qualifications": 0,
+        "resource_gateway_enrollments": 0,
+        "resource_output_grants": 0,
+        "resource_owner_requests": 0,
+        "resource_workload_scopes": 0,
+        "setup_drafts": 0,
+        "setup_principals": 0,
+        "worker_execution_leases": 0,
+        "worker_execution_operations": 0,
+        "worker_heartbeats": 0,
+        "program_policy_revisions": 1,
+        "program_census_batches": 1,
+        "program_gate_state": 1,
+        "program_subject_registry": 2,
+        "program_call_intents": 3,
+        "program_overflow_evidence": 1,
+        "program_call_receipts": 3,
+        "program_legacy_links": 1
+      }
+    },
+    "postgresql": {
+      "schema_sha256": "25c863d75aa55890d825946571983688681daea4b2ab13517226682a7650e56b",
+      "data_sha256": "4ef35358dca87670c160ad850d5c3e765413ee9fb056918f777136457981b8e2",
+      "row_counts": {
+        "audit_events": 1,
+        "auth_sessions": 0,
+        "binding_runtime_state": 0,
+        "bundle_revisions": 0,
+        "collection_acknowledgements": 0,
+        "collection_checkpoints": 0,
+        "collection_enrollments": 0,
+        "collection_epoch_guards": 1,
+        "collection_epochs": 1,
+        "collection_observations": 0,
+        "collection_operations": 0,
+        "collection_retention_refs": 0,
+        "collection_sessions": 1,
+        "execution_authority": 0,
+        "grant_runtime_state": 0,
+        "helper_enrollments": 0,
+        "helper_sessions": 0,
+        "inference_requests": 0,
+        "jobs": 1,
+        "platform_metadata": 2,
+        "program_budget_scopes": 1,
+        "program_budget_subjects": 2,
+        "program_reservations": 3,
+        "program_slots": 3,
+        "qualifications": 0,
+        "resource_gateway_enrollments": 0,
+        "resource_output_grants": 0,
+        "resource_owner_requests": 0,
+        "resource_workload_scopes": 0,
+        "setup_drafts": 0,
+        "setup_principals": 0,
+        "worker_execution_leases": 0,
+        "worker_execution_operations": 0,
+        "worker_heartbeats": 0,
+        "program_policy_revisions": 1,
+        "program_census_batches": 1,
+        "program_gate_state": 1,
+        "program_subject_registry": 2,
+        "program_call_intents": 3,
+        "program_overflow_evidence": 1,
+        "program_call_receipts": 3,
+        "program_legacy_links": 1
+      }
+    }
+  },
+  "postgresql_execution_requirements": {
+    "opt_in": "SOVITE_TEST_POSTGRES_URL",
+    "host": "explicit Unix socket under /tmp; inherited libpq PG environment is rejected and server transport checked before DDL",
+    "database": "dedicated database name containing test, oracle, or fixture",
+    "role": "must be non-superuser; test role must own the generated UUID schema",
+    "namespace": "ledger_v9_oracle_<random UUID>; only this namespace is dropped by cleanup",
+    "claim": "The frozen PostgreSQL hashes here were captured by local Unix-socket execution against PostgreSQL 17.11 as oracle_fixture (NOSUPERUSER) in database fixture, using a UUID-owned schema. The frozen baseline path and separate migrated path both passed. This is not a broader compatibility matrix."
+  },
+  "validation_execution": {
+    "sqlite": {
+      "version": "3.53.1",
+      "database": "pytest tmp_path disposable file",
+      "result": "all SQLite frozen/migrated oracle tests passed; fixed schema/data snapshots, settled Work and collection-history assertions, extra/missing table inventory checks, and same-count historical drift checks passed"
+    },
+    "postgresql": {
+      "version": "17.11",
+      "network": "Unix socket only at /tmp/sovite-v9-oracle-socket-20261103; no network connection made",
+      "database": "fixture",
+      "role": "oracle_fixture; NOSUPERUSER",
+      "namespace": "ledger_v9_oracle_<random UUID>; created and dropped by the test",
+      "result": "all PostgreSQL frozen/migrated oracle tests passed; fixed schema/data snapshots, settled Work and collection-history assertions, extra/missing table inventory checks, same-count historical drift, and named-constraint drift checks passed"
+    }
+  }
+}
