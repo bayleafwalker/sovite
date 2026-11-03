@@ -316,9 +316,20 @@ def _raw_job_object(raw: Any) -> dict[str, Any]:
 
 
 def _projection_from_job(raw: Any, *, call_id: str) -> WorkProjectionV1:
+    selected = [item for item in work_projections_from_job(raw) if item.call_id == call_id]
+    if len(selected) != 1:
+        raise WorkProjectionError("stored Work projection call is absent or duplicated")
+    return selected[0]
+
+
+def work_projections_from_job(raw: Any, *, allow_absent: bool = False) -> tuple[WorkProjectionV1, ...]:
+    """Parse the complete bounded projection array from stored Job JSON."""
     root = _raw_job_object(raw)
     run = root.get("repository_run")
-    entries = run.get("program_ledger_projections_v1") if type(run) is dict else None
+    has_array = type(run) is dict and "program_ledger_projections_v1" in run
+    entries = run.get("program_ledger_projections_v1") if has_array else None
+    if not has_array and allow_absent:
+        return ()
     if type(entries) is not list:
         raise WorkProjectionError("stored Work projection array is absent")
     projections: list[WorkProjectionV1] = []
@@ -332,13 +343,149 @@ def _projection_from_job(raw: Any, *, call_id: str) -> WorkProjectionV1:
         seen.add(projection.call_id)
         previous = encoded_call
         projections.append(projection)
-    selected = [item for item in projections if item.call_id == call_id]
-    if len(selected) != 1:
-        raise WorkProjectionError("stored Work projection call is absent or duplicated")
-    return selected[0]
+    return tuple(projections)
 
 
-def _compare_actual_rows(session, *, scope_id: str, call_id: str) -> str:
+def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...]) -> None:
+    """Prelock a multi-call Work projection set by global row class order.
+
+    Per-call comparison below may repeat SELECT FOR UPDATE queries, but those
+    rows are already locked for the full set. This prevents acquiring a later
+    scope after an earlier call has reached Job, lease, or ledger lock classes.
+    """
+    from sqlalchemy import and_, or_, select
+
+    from .collection_transaction import _owner_transaction_is_active
+    from .db import Base
+
+    if not _owner_transaction_is_active(session):
+        raise _WorkProjectionUnavailable()
+    if not projections:
+        return
+
+    tables = Base.metadata.tables
+    scope_ids = sorted({item.scope_id for item in projections}, key=lambda value: value.encode("utf-8"))
+    calls = sorted({(item.scope_id, item.call_id) for item in projections},
+                   key=lambda key: (key[0].encode("utf-8"), key[1].encode("utf-8")))
+    policies = {(item.scope_id, int(item.policy_revision)) for item in projections}
+
+    # The existing comparator obtains policy and Job selectors from the
+    # canonical intent, not from the projection. Discover those candidate
+    # selectors before taking any class lock so even a malformed join cannot
+    # ask the comparator to acquire an earlier class after a later one.
+    intent_t = tables["program_call_intents"]
+    candidates = {}
+    for scope_id, call_id in calls:
+        candidates[(scope_id, call_id)] = session.execute(select(
+            intent_t.c.work_job_id, intent_t.c.purpose, intent_t.c.policy_revision,
+        ).where(intent_t.c.scope_id == scope_id,
+                intent_t.c.call_id == call_id)).mappings().all()
+    for (scope_id, _), rows in candidates.items():
+        for row in rows:
+            if type(row["policy_revision"]) is int:
+                policies.add((scope_id, row["policy_revision"]))
+
+    def key_order(key):
+        return tuple(value.encode("utf-8") if type(value) is str else value for value in key)
+
+    def lock_keys(table, columns, keys):
+        locked = {}
+        for key in sorted(set(keys), key=key_order):
+            predicate = and_(*(column == value for column, value in zip(columns, key)))
+            rows = session.execute(select(table).where(predicate).with_for_update()).mappings().all()
+            if len(rows) > 1:
+                raise _WorkProjectionUnavailable()
+            locked[key] = rows[0] if rows else None
+        return locked
+
+    scope_t = tables["program_budget_scopes"]
+    gate_t = tables["program_gate_state"]
+    policy_t = tables["program_policy_revisions"]
+    registry_t = tables["program_subject_registry"]
+    subject_t = tables["program_budget_subjects"]
+    job_t = tables["jobs"]
+    lease_t = tables["worker_execution_leases"]
+    reservation_t = tables["program_reservations"]
+    slot_t = tables["program_slots"]
+    receipt_t = tables["program_call_receipts"]
+    evidence_t = tables["program_overflow_evidence"]
+    binding_t = tables["program_work_projection_bindings"]
+
+    lock_keys(scope_t, (scope_t.c.id,), ((scope_id,) for scope_id in scope_ids))
+    gate_rows = lock_keys(gate_t, (gate_t.c.scope_id,),
+                          ((scope_id,) for scope_id in scope_ids))
+    policies.update((row["scope_id"], row["policy_revision"]) for row in gate_rows.values()
+                    if row is not None and type(row["policy_revision"]) is int)
+    lock_keys(policy_t, (policy_t.c.scope_id, policy_t.c.revision), policies)
+    registry_keys = {(item.scope_id, item.subject_id, item.purpose) for item in projections}
+    subject_keys = {(item.scope_id, item.subject_id) for item in projections}
+    job_ids = {item.work_job_id for item in projections}
+    for (scope_id, _), rows in candidates.items():
+        for row in rows:
+            canonical_job = row["work_job_id"]
+            if type(canonical_job) is str:
+                # The comparator reaches these rows only after validating a
+                # Work purpose and a bounded Job identifier. Prelocking an
+                # unexpected but valid selector preserves class order; its
+                # later identity comparison still rejects the mismatched join.
+                registry_keys.add((scope_id, canonical_job, "work"))
+                subject_keys.add((scope_id, canonical_job))
+                job_ids.add(canonical_job)
+    lock_keys(registry_t, (registry_t.c.scope_id, registry_t.c.subject_id, registry_t.c.purpose),
+              registry_keys)
+    lock_keys(subject_t, (subject_t.c.scope_id, subject_t.c.subject_id), subject_keys)
+
+    job_ids = sorted(job_ids, key=lambda value: value.encode("utf-8"))
+    lock_keys(job_t, (job_t.c.id,), ((job_id,) for job_id in job_ids))
+    lock_keys(lease_t, (lease_t.c.job_id,), ((job_id,) for job_id in job_ids))
+
+    lock_keys(reservation_t, (reservation_t.c.scope_id, reservation_t.c.call_id), calls)
+
+    # Slots can be selected by either call or slot identity. Discover their
+    # complete key set, lock exact rows in UTF-8 order, then detect predicate
+    # drift before proceeding to the next class.
+    slot_matches = {}
+    slot_keys = set()
+    for scope_id, call_id in calls:
+        slot_id = next(item.slot_id for item in projections
+                       if item.scope_id == scope_id and item.call_id == call_id)
+        matching = session.execute(select(slot_t.c.scope_id, slot_t.c.slot_id).where(
+            slot_t.c.scope_id == scope_id,
+            or_(slot_t.c.call_id == call_id, slot_t.c.slot_id == slot_id),
+        )).all()
+        keys = {(row.scope_id, row.slot_id) for row in matching}
+        slot_matches[(scope_id, call_id)] = (slot_id, keys)
+        slot_keys.update(keys)
+    lock_keys(slot_t, (slot_t.c.scope_id, slot_t.c.slot_id), slot_keys)
+    for (scope_id, call_id), (slot_id, keys) in slot_matches.items():
+        reread = session.execute(select(slot_t.c.scope_id, slot_t.c.slot_id).where(
+            slot_t.c.scope_id == scope_id,
+            or_(slot_t.c.call_id == call_id, slot_t.c.slot_id == slot_id),
+        )).all()
+        if {(row.scope_id, row.slot_id) for row in reread} != keys:
+            raise _WorkProjectionUnavailable()
+
+    lock_keys(intent_t, (intent_t.c.scope_id, intent_t.c.call_id), calls)
+
+    # Optional rows are keyed from the call predicate so all existing rows are
+    # locked in exact key order; their cardinality and contents are validated
+    # by the canonical comparator below.
+    receipt_keys = set()
+    evidence_keys = set()
+    for scope_id, call_id in calls:
+        receipt_keys.update((row.scope_id, row.call_id, row.receipt_id) for row in session.execute(
+            select(receipt_t.c.scope_id, receipt_t.c.call_id, receipt_t.c.receipt_id).where(
+                receipt_t.c.scope_id == scope_id, receipt_t.c.call_id == call_id)).all())
+        evidence_keys.update((row.scope_id, row.evidence_id) for row in session.execute(
+            select(evidence_t.c.scope_id, evidence_t.c.evidence_id).where(
+                evidence_t.c.scope_id == scope_id, evidence_t.c.call_id == call_id)).all())
+    lock_keys(receipt_t, (receipt_t.c.scope_id, receipt_t.c.call_id, receipt_t.c.receipt_id), receipt_keys)
+    lock_keys(evidence_t, (evidence_t.c.scope_id, evidence_t.c.evidence_id), evidence_keys)
+    lock_keys(binding_t, (binding_t.c.scope_id, binding_t.c.call_id), calls)
+
+
+def _compare_actual_rows(session, *, scope_id: str, call_id: str,
+                         allow_cancel_requested: bool = False) -> str:
     """Implementation for the private owner-transaction-only comparator."""
     from sqlalchemy import MetaData, Table, and_, cast, func, inspect, or_, select, Text, LargeBinary
 
@@ -523,7 +670,8 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str) -> str:
     lease_until = lease["lease_until"]
     deadline = lease["execution_deadline"]
     job_lease_until = job["lease_until"]
-    if (job["status"] != "running" or bool(job["cancel_requested"])
+    if (job["status"] != "running"
+            or bool(job["cancel_requested"]) and not allow_cancel_requested
             or lease["phase"] != "started" or lease["generation"] != job["generation"]
             or type(lease["workload_id"]) is not str or type(lease["instance_id"]) is not str
             or type(lease["generation"]) is not str or type(lease["fence"]) is not str
@@ -714,7 +862,8 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str) -> str:
     return _CANONICAL_ROWS_AGREE
 
 
-def _compare_actual_work_projection(session, *, scope_id: str, call_id: str) -> str:
+def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
+                                    allow_cancel_requested: bool = False) -> str:
     """Compare one actual Work call within an existing owner transaction.
 
     This private comparator accepts selectors, never caller-provided rows or
@@ -725,7 +874,8 @@ def _compare_actual_work_projection(session, *, scope_id: str, call_id: str) -> 
     started lease; it does not compare or authorize legacy display consumers.
     """
     try:
-        return _compare_actual_rows(session, scope_id=scope_id, call_id=call_id)
+        return _compare_actual_rows(session, scope_id=scope_id, call_id=call_id,
+                                    allow_cancel_requested=allow_cancel_requested)
     except _WorkProjectionUnavailable:
         raise
     except Exception:
