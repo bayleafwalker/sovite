@@ -16,6 +16,43 @@ class _ProjectionStateUnavailable(Exception):
     pass
 
 
+def _activation_metadata_matches(value, *, run, job, lease, attempt_id,
+                                 attempt, now: float) -> bool:
+    from .repository_native_activation import FIELDS, SCHEMA
+    from .repository_runs import _timestamp
+
+    if (lease is None or type(value) is not dict or set(value) != FIELDS
+            or value.get("schema_version") != SCHEMA):
+        return False
+    if type(lease.fence) is not str or not lease.fence:
+        return False
+    expected = {
+        "job_id": job.id,
+        "attempt_id": attempt_id,
+        "workspace_id": run.get("workspace_id"),
+        "repository_id": run.get("repository_id"),
+        "principal_id": run.get("principal_id"),
+        "generation": job.generation,
+        "fence_sha256": hashlib.sha256(lease.fence.encode("utf-8")).hexdigest(),
+        "packet_sha256": attempt.get("packet_sha256"),
+    }
+    if job.caller != run.get("principal_id") or any(value.get(key) != item
+                                                    for key, item in expected.items()):
+        return False
+    deadline = value.get("deadline")
+    if (type(deadline) not in {int, float} or isinstance(deadline, bool)
+            or not math.isfinite(deadline) or deadline <= now):
+        return False
+    try:
+        run_deadline = _timestamp(run.get("deadline"), "deadline").timestamp()
+    except Exception:
+        return False
+    return (type(lease.execution_deadline) in {int, float}
+            and not isinstance(lease.execution_deadline, bool)
+            and math.isfinite(lease.execution_deadline)
+            and deadline <= min(lease.execution_deadline, run_deadline))
+
+
 def cancel_repository_job(platform, job_id: str, *, actor: str,
                           require_owner: bool) -> Job:
     """Request cancellation and inhibit every canonical current Work call.
@@ -218,9 +255,47 @@ def _cancel_in_owner_transaction(platform, job_id: str, *, actor: str,
             raise _ProjectionStateUnavailable()
 
         locked_attempts = locked_run.get("attempts", []) if type(locked_run) is dict else []
-        if (locked_attempts != attempts or job.status != job_probe["status"]
+        if (job.status != job_probe["status"]
                 or job.attempts != job_probe["attempts"]):
             raise _ProjectionStateUnavailable()
+        if locked_attempts != attempts:
+            phase_advance = False
+            if (active_attempt and job.status == "running" and attempts and locked_attempts
+                    and len(locked_attempts) == len(attempts)
+                    and attempts[:-1] == locked_attempts[:-1]
+                    and type(attempts[-1]) is dict and type(locked_attempts[-1]) is dict):
+                before_attempt, after_attempt = attempts[-1], locked_attempts[-1]
+                before_state, after_state = before_attempt.get("state"), after_attempt.get("state")
+                allowed = {
+                    ("preparing", "awaiting_activation"),
+                    ("preparing", "running"),
+                    ("awaiting_activation", "running"),
+                }
+                before_identity = dict(before_attempt)
+                after_identity = dict(after_attempt)
+                before_identity.pop("state", None)
+                after_identity.pop("state", None)
+                if (before_state == "preparing" and "activation" not in before_attempt
+                        and "activation" in after_attempt):
+                    activation = after_identity.pop("activation")
+                    activation_ok = _activation_metadata_matches(
+                        activation, run=locked_run, job=job, lease=lease,
+                        attempt_id=attempt_id, attempt=after_attempt, now=time.time(),
+                    )
+                else:
+                    activation_ok = before_identity.get("activation") == after_identity.get("activation")
+                if before_state == "preparing" and after_state == "awaiting_activation" and "activation" not in after_attempt:
+                    activation_ok = False
+                phase_advance = (
+                    (before_state, after_state) in allowed
+                    and before_attempt.get("id") == after_attempt.get("id") == attempt_id
+                    and before_identity == after_identity
+                    and activation_ok
+                )
+                if phase_advance:
+                    attempt_state = after_state
+            if not phase_advance:
+                raise _ProjectionStateUnavailable()
         if active_attempt and job.status != "running":
             raise _ProjectionStateUnavailable()
 

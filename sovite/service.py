@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from . import policy
 from . import repository_currentness as currentness
-from .db import BundleRevision, Database, GrantState, Job, MetadataRow, canonical, digest
+from .db import Base, BundleRevision, Database, GrantState, Job, MetadataRow, canonical, digest
 from .hosting import compile_bundle, load_envelope
 from .qualification import is_qualified, validate_issuers
 from .settings import Settings
@@ -494,8 +494,12 @@ class Platform:
     def cancel(self, job_id: str, *, actor: str = "operator", require_owner: bool = False) -> Job:
         use_projection_owner = False
         with self.db.sessions() as session:
-            hint = self.get_job(job_id, session)
-            if require_owner and hint.caller != actor:
+            job_table = Base.metadata.tables["jobs"]
+            caller = session.execute(select(job_table.c.caller).where(
+                job_table.c.id == job_id)).scalar_one_or_none()
+            if caller is None:
+                raise PlatformError("not_found", "Task not found", 404)
+            if require_owner and caller != actor:
                 raise PlatformError("not_found", "Task not found", 404)
             schema = session.get(MetadataRow, "schema_version")
             schema_value = schema.value if schema is not None else None

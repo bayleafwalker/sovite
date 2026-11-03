@@ -911,6 +911,65 @@ def test_cancel_locked_job_snapshot_change_falls_back_without_inhibition(work_ro
         assert session.scalar(select(Base.metadata.tables["program_reservations"].c.state)) == "reserved"
 
 
+def test_cancel_after_worker_running_persist_inhibits_same_projection(work_rows, monkeypatch):
+    db, _, _, _ = work_rows
+    import sovite.work_projection as work_projection
+
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        attempts = [dict(item) for item in run["attempts"]]
+        attempts[-1]["state"] = "preparing"
+        run["attempts"] = attempts
+        value["repository_run"] = run
+        job.resolved = value
+
+    original = work_projection.lock_work_projection_set
+
+    def worker_wins_before_job_reread(session, projections):
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        attempts = [dict(item) for item in run["attempts"]]
+        attempts[-1]["state"] = "running"
+        run["attempts"] = attempts
+        value["repository_run"] = run
+        job.resolved = value
+        original(session, projections)
+
+    monkeypatch.setattr(work_projection, "lock_work_projection_set", worker_wins_before_job_reread)
+    cancelled = _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert cancelled.cancel_requested is True
+        assert job.cancel_requested is True and job.status == "running"
+        assert job.resolved["repository_run"]["attempts"][-1]["state"] == "running"
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "unknown"
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        assert gate["mode"] == "inhibited"
+
+
+def test_cancel_malformed_sqlite_job_json_is_explicitly_unavailable(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("PostgreSQL JSON columns reject syntactically invalid JSON")
+    with db.sessions.begin() as session:
+        session.execute(text("UPDATE jobs SET resolved = :raw WHERE id = :job_id"),
+                        {"raw": "{malformed", "job_id": "job"})
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_owner_state_unavailable"
+    with db.sessions() as session:
+        assert not session.execute(text(
+            "SELECT cancel_requested FROM jobs WHERE id = 'job'"
+        )).scalar_one()
+
+
 def test_cancel_repeat_does_not_duplicate_audit_or_projection_revision(work_rows):
     db, _, _, binding = work_rows
     tables = Base.metadata.tables
