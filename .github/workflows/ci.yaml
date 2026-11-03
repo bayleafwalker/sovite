@@ -43,6 +43,7 @@ jobs:
 
   work-projection-postgresql:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16.14
@@ -71,10 +72,11 @@ jobs:
               connection.execute("CREATE DATABASE sovite_resource_test OWNER sovite_resource_test")
               connection.execute("COMMENT ON DATABASE sovite_resource_test IS 'sovite:disposable-work-projection-test'")
           PYSETUP
-      - run: python -m pytest tests/test_work_projection_rows.py -q
+      - run: python -m pytest tests/test_work_projection_rows.py -vv -o faulthandler_timeout=60
 
   resource-targets:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16.14
@@ -120,4 +122,5 @@ jobs:
           tests/test_census_report.py
           tests/test_collection_identity.py tests/test_collection_transaction.py
           tests/test_collection_owner_cancel.py tests/test_collection_owner_lifecycle.py
-          tests/test_collection_owner_api.py tests/test_collection_owner_postgresql.py -q
+          tests/test_collection_owner_api.py tests/test_collection_owner_postgresql.py
+          -q -o faulthandler_timeout=60
