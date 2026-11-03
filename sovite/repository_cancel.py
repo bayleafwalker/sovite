@@ -261,6 +261,7 @@ def _cancel_in_owner_transaction(platform, job_id: str, *, actor: str,
         if locked_attempts != attempts:
             phase_advance = False
             if (active_attempt and job.status == "running" and attempts and locked_attempts
+                    and type(locked_attempts) is list
                     and len(locked_attempts) == len(attempts)
                     and attempts[:-1] == locked_attempts[:-1]
                     and type(attempts[-1]) is dict and type(locked_attempts[-1]) is dict):

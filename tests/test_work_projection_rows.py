@@ -877,7 +877,7 @@ def test_cancel_missing_attempt_id_checks_all_job_bindings(work_rows):
         assert session.scalar(select(Base.metadata.tables["program_reservations"].c.state)) == "reserved"
 
 
-@pytest.mark.parametrize("drift", ["status", "attempts"])
+@pytest.mark.parametrize("drift", ["status", "attempts", "malformed_attempts"])
 def test_cancel_locked_job_snapshot_change_falls_back_without_inhibition(work_rows, monkeypatch, drift):
     db, _, _, _ = work_rows
     import sovite.work_projection as work_projection
@@ -889,12 +889,18 @@ def test_cancel_locked_job_snapshot_change_falls_back_without_inhibition(work_ro
         job = session.get(Job, "job")
         if drift == "status":
             job.status = "queued"
-        else:
+        elif drift == "attempts":
             value = dict(job.resolved)
             run = dict(value["repository_run"])
             attempts = [dict(item) for item in run["attempts"]]
             attempts[-1]["state"] = "awaiting_activation"
             run["attempts"] = attempts
+            value["repository_run"] = run
+            job.resolved = value
+        else:
+            value = dict(job.resolved)
+            run = dict(value["repository_run"])
+            run["attempts"] = {"invalid": "not-a-list"}
             value["repository_run"] = run
             job.resolved = value
 
