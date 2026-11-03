@@ -470,7 +470,7 @@ def test_hand_back_holds_possible_dispatch_and_inhibits_gate_atomically(work_row
     tables = Base.metadata.tables
     with db.sessions() as session:
         job = session.get(Job, "job")
-        lease = session.get(tables["worker_execution_leases"], "job")
+        lease = session.execute(select(tables["worker_execution_leases"])).mappings().one()
         reservation = session.execute(select(tables["program_reservations"])).mappings().one()
         slot = session.execute(select(tables["program_slots"])).mappings().one()
         intent = session.execute(select(tables["program_call_intents"])).mappings().one()
@@ -521,7 +521,8 @@ def test_projected_hand_back_requires_explicit_captured_fence_without_mutation(w
         after_job = session.get(Job, "job")
         assert (after_job.status, after_job.attempts, after_job.lease_owner,
                 after_job.lease_until, after_job.resolved) == before_job_state
-        assert session.get(tables["worker_execution_leases"], "job").phase == "started"
+        assert session.scalar(select(tables["worker_execution_leases"].c.phase).where(
+            tables["worker_execution_leases"].c.job_id == "job")) == "started"
         assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == before_audits
         assert session.scalar(select(tables["program_gate_state"].c.mode)) == before_gate
 
@@ -552,7 +553,8 @@ def test_missing_projection_array_with_relational_rows_refuses_legacy_hand_back(
         after_job = session.get(Job, "job")
         assert (after_job.status, after_job.attempts, after_job.lease_owner,
                 after_job.lease_until, after_job.resolved) == before_job_state
-        assert session.get(tables["worker_execution_leases"], "job").phase == "started"
+        assert session.scalar(select(tables["worker_execution_leases"].c.phase).where(
+            tables["worker_execution_leases"].c.job_id == "job")) == "started"
         assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == before_audits
 
 
