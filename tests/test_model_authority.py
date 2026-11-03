@@ -132,12 +132,14 @@ def test_CURRENT_AUTHORITY_cancellation_authorization_transaction_race(authority
             loser = asyncio.create_task(asyncio.to_thread(second))
             assert await asyncio.to_thread(lock_attempted.wait, 3)
             try:
-                assert not lock_returned.is_set()  # It reached, and has not crossed, the shared lock.
+                # Give the cursor call time to run while the winner still holds the lock.
+                assert not await asyncio.to_thread(lock_returned.wait, .05)
             finally:
                 release.set()
             if first == 'authorize':
                 permit = await winner
                 await loser
+                assert lock_returned.is_set()  # Positive control after the winner releases.
                 monkeypatch.setattr(env.authority, '_checks', original)
                 with pytest.raises(PlatformError, match='Inference authority denied') as failure:
                     env.authority.renew_permit(**renewal(values, permit['permit']))
@@ -145,6 +147,7 @@ def test_CURRENT_AUTHORITY_cancellation_authorization_transaction_race(authority
             else:
                 await winner
                 with pytest.raises(PlatformError) as failure: await loser
+                assert lock_returned.is_set()  # Positive control after the winner releases.
                 assert failure.value.code == 'cancelled'
             assert env.engine.calls == []
     asyncio.run(scenario())
