@@ -9,6 +9,7 @@ import math
 
 from sqlalchemy import insert, select
 
+from .collection_transaction import _owner_transaction_is_active
 from .db import canonical, digest
 from .lease_service import _FENCE_RE, _GENERATION_RE, _INSTANCE_RE, _WORKLOAD_RE, execution_owner_key
 
@@ -24,6 +25,26 @@ def _locked(session, table, *where):
 def _bounded_id(value):
     return (type(value) is str and 1 <= len(value) <= 96
             and all("!" <= char <= "~" for char in value))
+
+
+def _locked_scope_rows(session, table, scope_id, key_names):
+    """Lock discovered scope rows by UTF-8 key bytes and recheck the scan.
+
+    This checks participating owners only; it does not fence external writers
+    or turn a PostgreSQL absent-row lookup into a predicate lock.
+    """
+    def scan():
+        rows = session.execute(select(table).where(table.c.scope_id == scope_id)).mappings().all()
+        if any(not _bounded_id(row[name]) for row in rows for name in key_names):
+            raise ValueError("scope row identity unavailable")
+        return sorted(rows, key=lambda row: tuple(row[name].encode("utf-8") for name in key_names))
+
+    discovered = scan()
+    locked = [_locked(session, table, table.c.scope_id == scope_id,
+                      *(table.c[name] == row[name] for name in key_names)) for row in discovered]
+    if locked != discovered or scan() != discovered:
+        raise ValueError("scope rows changed")
+    return locked
 
 
 _BASELINE_FIELDS = ("scope_id", "batch_id", "link_id", "job_id", "original_attempt_id", "original_call_id", "original_slot_id",
@@ -47,6 +68,8 @@ def _prepare_in_transaction(database, session, tables, *, scope_id, subject_id, 
                             price_digest, meter_digest, permit_digest, source_code, issuer_code,
                             source_identity_digest, context, aggregate_custody=None):
     """Atomically create synthetic accounting rows, without dispatch authority."""
+    if not _owner_transaction_is_active(session):
+        raise ValueError("owner transaction unavailable")
     identifiers = (scope_id, subject_id, call_id, slot_id, effect_key, idempotency_key, source_code, issuer_code)
     if not all(_bounded_id(value) for value in identifiers) or purpose not in {"work", "collection"}:
         raise ValueError("invalid storage identity")
@@ -65,8 +88,8 @@ def _prepare_in_transaction(database, session, tables, *, scope_id, subject_id, 
     gate = _locked(session, gate_t, gate_t.c.scope_id == scope_id)
     if scope is None or gate is None or gate.mode != "active" or gate.cutover_batch_id is None:
         raise ValueError("gate unavailable")
-    batch = _locked(session, batch_t, batch_t.c.scope_id == scope_id, batch_t.c.batch_id == gate.cutover_batch_id)
     policy = _locked(session, policy_t, policy_t.c.scope_id == scope_id, policy_t.c.revision == gate.policy_revision)
+    batch = _locked(session, batch_t, batch_t.c.scope_id == scope_id, batch_t.c.batch_id == gate.cutover_batch_id)
     if (batch is None or policy is None or batch.state != "complete" or batch.unmatched_count != 0
             or batch.source_count != batch.mapped_count or batch.policy_revision != gate.policy_revision
             or batch.policy_digest != gate.policy_digest or policy.policy_digest != gate.policy_digest
@@ -99,8 +122,12 @@ def _prepare_in_transaction(database, session, tables, *, scope_id, subject_id, 
             or valid_until_ms > policy.window_end_ms):
         raise ValueError("policy unavailable")
     link_t = tables["program_legacy_links"]
-    links = session.execute(select(link_t).where(link_t.c.scope_id == scope_id, link_t.c.batch_id == batch.batch_id)
-                            .order_by(link_t.c.link_id).with_for_update()).mappings().all()
+    # Discovery supplies candidate keys only; locked rows are rechecked below.
+    links = session.execute(select(link_t).where(link_t.c.scope_id == scope_id,
+                            link_t.c.batch_id == batch.batch_id)).mappings().all()
+    if any(not _bounded_id(link.link_id) for link in links):
+        raise ValueError("census source identity unavailable")
+    links.sort(key=lambda link: link.link_id.encode("utf-8"))
     if len(links) != batch.source_count or any(digest(_baseline_payload(link)) != link.original_digest for link in links):
         raise ValueError("census source binding mismatch")
     if digest([_baseline_payload(link) for link in links]) != batch.snapshot_digest:
@@ -110,6 +137,7 @@ def _prepare_in_transaction(database, session, tables, *, scope_id, subject_id, 
     for candidate in subject_ids:
         registry_rows[candidate] = _locked(session, registry_t, registry_t.c.scope_id == scope_id,
                                             registry_t.c.subject_id == candidate)
+    for candidate in subject_ids:
         subject_rows[candidate] = _locked(session, subject_t, subject_t.c.scope_id == scope_id,
                                           subject_t.c.subject_id == candidate)
     registry, subject = registry_rows[subject_id], subject_rows[subject_id]
@@ -168,14 +196,10 @@ def _prepare_in_transaction(database, session, tables, *, scope_id, subject_id, 
         if context_digest != expected_context:
             raise ValueError("collection context mismatch")
         fields = dict(collection_session_id=subject_id, collection_epoch=epoch_value, collection_context_digest=context_digest)
-    reservations = session.execute(select(reservation_t).where(reservation_t.c.scope_id == scope_id)
-                                   .order_by(reservation_t.c.call_id).with_for_update()).mappings().all()
-    slots = session.execute(select(slot_t).where(slot_t.c.scope_id == scope_id)
-                            .order_by(slot_t.c.slot_id).with_for_update()).mappings().all()
-    intents = session.execute(select(intent_t).where(intent_t.c.scope_id == scope_id)
-                              .order_by(intent_t.c.call_id).with_for_update()).mappings().all()
-    receipts = session.execute(select(receipt_t).where(receipt_t.c.scope_id == scope_id)
-                               .order_by(receipt_t.c.call_id, receipt_t.c.receipt_id).with_for_update()).mappings().all()
+    reservations = _locked_scope_rows(session, reservation_t, scope_id, ("call_id",))
+    slots = _locked_scope_rows(session, slot_t, scope_id, ("slot_id",))
+    intents = _locked_scope_rows(session, intent_t, scope_id, ("call_id",))
+    receipts = _locked_scope_rows(session, receipt_t, scope_id, ("call_id", "receipt_id"))
     policies = {row.revision: row for row in session.execute(select(policy_t).where(
         policy_t.c.scope_id == scope_id).order_by(policy_t.c.revision)).mappings()}
     for historical in intents:
@@ -193,6 +217,17 @@ def _prepare_in_transaction(database, session, tables, *, scope_id, subject_id, 
                                .with_for_update()).first()
     if evidence is not None:
         raise ValueError("overflow evidence requires reconciliation")
+    locked_links = [_locked(session, link_t, link_t.c.scope_id == scope_id,
+                            link_t.c.batch_id == batch.batch_id, link_t.c.link_id == link.link_id)
+                    for link in links]
+    current_links = session.execute(select(link_t).where(link_t.c.scope_id == scope_id,
+                                    link_t.c.batch_id == batch.batch_id)).mappings().all()
+    if any(not _bounded_id(link.link_id) for link in current_links):
+        raise ValueError("census source identity unavailable")
+    current_links.sort(key=lambda link: link.link_id.encode("utf-8"))
+    if locked_links != links or current_links != links:
+        raise ValueError("census source binding changed")
+    links = locked_links
     # Compare immutable baseline values with its retained mappings, then count
     # current obligations below exactly once. The fixture digest validates
     # binding only and is not authenticated source evidence.
@@ -433,6 +468,8 @@ def _record_known_in_transaction(database, session, tables, *, scope_id, call_id
     The caller supplies test-only already-validated fixture values. This does
     not authenticate a receipt, confirm custody, dispatch, or enable a gate.
     """
+    if not _owner_transaction_is_active(session):
+        raise ValueError("owner transaction unavailable")
     from sqlalchemy import update
     from .program_ledger import _parse_micro_units
     if (not all(_bounded_id(value) for value in (scope_id, call_id, receipt_id, source_code, issuer_code))
@@ -460,6 +497,16 @@ def _record_known_in_transaction(database, session, tables, *, scope_id, call_id
     gate = _locked(session, gate_t, gate_t.c.scope_id == scope_id)
     if scope is None:
         raise ValueError("scope unavailable")
+    # Resolve immutable policy identity before taking later lock classes; the
+    # locked intent must still match this discovery before it is used.
+    policy_t = tables["program_policy_revisions"]
+    policy_key = session.execute(select(intent_t.c.policy_revision, intent_t.c.policy_digest).where(
+        intent_t.c.scope_id == scope_id, intent_t.c.call_id == call_id)).one_or_none()
+    if policy_key is None:
+        raise ValueError("receipt policy unavailable")
+    policy = _locked(session, policy_t, policy_t.c.scope_id == scope_id,
+                     policy_t.c.revision == policy_key.policy_revision,
+                     policy_t.c.policy_digest == policy_key.policy_digest)
     candidate = session.execute(select(reservation_t.c.subject_id).where(
         reservation_t.c.scope_id == scope_id, reservation_t.c.call_id == call_id)).scalar_one_or_none()
     if candidate is None:
@@ -472,10 +519,8 @@ def _record_known_in_transaction(database, session, tables, *, scope_id, call_id
             or reservation.subject_id != candidate or slot.subject_id != candidate or intent.subject_id != candidate
             or reservation.purpose != subject.purpose or intent.purpose != subject.purpose):
         raise ValueError("obligation binding unavailable")
-    policy_t = tables["program_policy_revisions"]
-    policy = session.execute(select(policy_t).where(policy_t.c.scope_id == scope_id,
-        policy_t.c.revision == intent.policy_revision, policy_t.c.policy_digest == intent.policy_digest)).mappings().one_or_none()
-    if (policy is None or policy.currency != currency or policy.allowance_unit != allowance_unit
+    if (policy is None or (intent.policy_revision, intent.policy_digest) != tuple(policy_key)
+            or policy.currency != currency or policy.allowance_unit != allowance_unit
             or intent.source_code != source_code or intent.issuer_code != issuer_code
             or intent.source_identity_digest != source_identity_digest or policy.source_identity_digest != source_identity_digest
             or intent.price_digest != policy.price_policy_digest or intent.meter_digest != policy.meter_policy_digest
