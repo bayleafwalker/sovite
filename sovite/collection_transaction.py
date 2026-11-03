@@ -8,6 +8,17 @@ from sqlalchemy import select
 from .db import AuditEvent, MetadataRow, digest
 
 
+_OWNER_TRANSACTION_INFO_KEY = "sovite.collection_owner_transaction"
+
+
+def _owner_transaction_is_active(session):
+    """Return whether *session* is currently yielded by owner_transaction."""
+    transaction = session.get_transaction()
+    return (transaction is not None and transaction.is_active
+            and not session.in_nested_transaction()
+            and session.info.get(_OWNER_TRANSACTION_INFO_KEY) is transaction)
+
+
 def _verify_audit(session):
     previous, sequence = "0" * 64, 0
     rows = session.scalars(select(AuditEvent).order_by(AuditEvent.sequence)).all()
@@ -38,7 +49,13 @@ def owner_transaction(database):
                 raise ValueError("unsupported collection database")
             database.authority_lock(session)
             _verify_audit(session)
-            yield session
+            session.info[_OWNER_TRANSACTION_INFO_KEY] = session.get_transaction()
+            try:
+                yield session
+                if not _owner_transaction_is_active(session):
+                    raise RuntimeError("owner transaction was replaced or nested")
+            finally:
+                session.info.pop(_OWNER_TRANSACTION_INFO_KEY, None)
             session.commit()
         except BaseException:
             session.rollback()

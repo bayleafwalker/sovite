@@ -79,13 +79,15 @@ def test_v8_upgrade_preserves_history_and_starts_without_gate(v8_database):
         after = {name: [dict(row) for row in session.execute(select(Base.metadata.tables[name])).mappings()]
                  for name in historical_tables}
         assert after == before
-        assert session.get(MetadataRow, "schema_version").value == {"version": 9}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 10}
         job = session.get(Job, "historical")
         assert (job.task, job.resolved) == ("preserve", {"marker": ["a", 1]})
         subject = session.execute(select(Base.metadata.tables["program_budget_subjects"])).mappings().one()
         assert (subject.scope_id, subject.subject_id, subject.purpose, subject.binding_digest) == (
             "scope", "historical", "work", "b" * 64)
         assert all(session.execute(select(table)).first() is None for table in _PROGRAM_LEDGER_V9)
+        from sovite.db import _PROGRAM_RELATIONAL_V10
+        assert all(session.execute(select(table)).first() is None for table in _PROGRAM_RELATIONAL_V10)
     old_version = db.schema_version
     db.schema_version = 8
     try:
@@ -223,6 +225,6 @@ def test_concurrent_offline_upgrades_leave_one_valid_schema(v8_database):
     assert "ok" in results
     db.check()
     with db.sessions() as session:
-        assert session.get(MetadataRow, "schema_version").value == {"version": 9}
+        assert session.get(MetadataRow, "schema_version").value == {"version": 10}
         reservation = session.execute(select(Base.metadata.tables["program_reservations"])).mappings().one()
         assert (reservation.state, reservation.reserved_usd_micro, reservation.reserved_allowance_micro) == ("unknown", 3, 4)

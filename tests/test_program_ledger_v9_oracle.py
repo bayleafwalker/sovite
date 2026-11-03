@@ -44,7 +44,20 @@ def _local_test_url(value):
 
 
 @pytest.fixture(params=(("sqlite", "frozen"), ("sqlite", "migrated"), ("postgresql", "frozen"), ("postgresql", "migrated")), ids=lambda p: "-".join(p))
-def oracle_database(request, tmp_path):
+def oracle_database(request, tmp_path, monkeypatch):
+    # Explicit historical target: keep both frozen and migrated v9 paths and
+    # all v9 structure checks even though the application now registers v10.
+    # This is a test-scoped target simulation, not an actual old binary.
+    import sovite.db as db_module
+    v10_names = {table.name for table in db_module._PROGRAM_RELATIONAL_V10}
+    original_structure = Database._structure
+    def historical_structure(self, connection, tables):
+        return original_structure(self, connection, [table for table in tables if table.name not in v10_names])
+    monkeypatch.setattr(Database, "schema_version", 9)
+    monkeypatch.setattr(Database, "_structure", historical_structure)
+    monkeypatch.setattr(db_module, "MIGRATIONS", tuple((version, tables) for version, tables in db_module.MIGRATIONS if version <= 9))
+    monkeypatch.setattr(db_module, "_PROGRAM_RELATIONAL_V10", ())
+
     backend, origin = request.param
     admin = None
     database = None
@@ -341,7 +354,7 @@ def test_postgresql_namespace_collision_preserves_existing_schema(monkeypatch, t
             connection.exec_driver_sql(f'CREATE SCHEMA "{name}"')
             created = True
         monkeypatch.setattr(uuid, "uuid4", lambda: SimpleNamespace(hex=token))
-        generator = oracle_database.__wrapped__(SimpleNamespace(param=("postgresql", "frozen")), tmp_path)
+        generator = oracle_database.__wrapped__(SimpleNamespace(param=("postgresql", "frozen")), tmp_path, monkeypatch)
         with pytest.raises(ProgrammingError):
             next(generator)
         with engine.connect() as connection:

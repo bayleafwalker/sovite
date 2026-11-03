@@ -319,8 +319,12 @@ from .program_ledger_schema import define_program_ledger_schema
 _PROGRAM_LEDGER_V9 = define_program_ledger_schema(Base.metadata)
 _PROGRAM_LEDGER_NAMES = {table.name for table in _PROGRAM_LEDGER_V9}
 
+from .program_relational_schema import define_program_relational_schema
+_PROGRAM_RELATIONAL_V10 = define_program_relational_schema(Base.metadata)
+_PROGRAM_RELATIONAL_NAMES = {table.name for table in _PROGRAM_RELATIONAL_V10}
+
 MIGRATIONS = (
-    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in _COLLECTION_NAMES and table.name not in _PROGRAM_LEDGER_NAMES and table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations", "resource_gateway_enrollments", "resource_workload_scopes", "resource_output_grants", "resource_owner_requests"})),
+    (1, tuple(table for table in Base.metadata.sorted_tables if table.name not in _COLLECTION_NAMES and table.name not in _PROGRAM_LEDGER_NAMES and table.name not in _PROGRAM_RELATIONAL_NAMES and table.name not in {"binding_runtime_state", "execution_authority", "helper_enrollments", "helper_sessions", "inference_requests", "setup_principals", "setup_drafts", "worker_execution_leases", "worker_execution_operations", "resource_gateway_enrollments", "resource_workload_scopes", "resource_output_grants", "resource_owner_requests"})),
     (2, (BindingState.__table__,)),
     (3, (ExecutionAuthority.__table__, HelperEnrollment.__table__, HelperSession.__table__, RequestLedger.__table__)),
     (4, (SetupPrincipal.__table__, SetupDraft.__table__)),
@@ -329,6 +333,7 @@ MIGRATIONS = (
     (7, (ResourceWorkloadScope.__table__, ResourceOwnerRequest.__table__)),
     (8, _COLLECTION_V8),
     (9, _PROGRAM_LEDGER_V9),
+    (10, _PROGRAM_RELATIONAL_V10),
 )
 
 
@@ -370,6 +375,23 @@ def _check_expression_tree(expression: str, *, text_columns=frozenset()):
             return f"{name} IN ({values})"
         return name
     expression = reflected_fragment.sub(normalize, expression)
+    # Normalize the two deliberately different, equivalent lowercase SHA-256
+    # predicates before tokenizing. The schema owns their DDL; this accepts no
+    # other regular expressions or SQLite glob patterns.
+    expression = re.sub(
+        r"(?i:length)\((?P<column>[A-Za-z_][A-Za-z0-9_]*)\)\s*=\s*64\s+(?i:AND)\s+"
+        r"(?P=column)\s+(?i:NOT\s+GLOB)\s+'\*\[\^0-9a-f\]\*'",
+        lambda match: f"digest64_{match.group('column')}", expression,
+    )
+    expression = re.sub(
+        r"length\((?P<column>[A-Za-z_][A-Za-z0-9_]*)\)\s*=\s*64\s+AND\s+"
+        r"(?P=column)\s*~\s*'\^\[0-9a-f\]\{64\}\$'(?:::text)?",
+        lambda match: f"digest64_{match.group('column')}", expression,
+    )
+    expression = re.sub(
+        r"length\(([A-Za-z_][A-Za-z0-9_]*)\)", r"length_\1", expression,
+        flags=re.IGNORECASE,
+    )
     tokens = []
     offset = 0
     while offset < len(expression):
@@ -429,6 +451,8 @@ def _check_expression_tree(expression: str, *, text_columns=frozenset()):
             take(")")
             return value
         kind, column = take()
+        if kind == "word" and column.startswith("digest64_"):
+            return ("lower-hex-digest", column[len("digest64_"):])
         if kind != "word" or column in {"and", "or", "is", "not", "null", "in"}:
             raise ValueError("expected check column")
         if peek("is"):
@@ -641,6 +665,10 @@ class Database:
                 inspector = inspect(connection)
                 if any(inspector.has_table(table.name, schema=self.schema) for table in _PROGRAM_LEDGER_V9):
                     raise DatabaseSchemaError("database_schema_incomplete", "Unexpected partial ledger migration")
+            if version < 10:
+                inspector = inspect(connection)
+                if any(inspector.has_table(table.name, schema=self.schema) for table in _PROGRAM_RELATIONAL_V10):
+                    raise DatabaseSchemaError("database_schema_incomplete", "Unexpected partial relational migration")
             for number, tables in MIGRATIONS:
                 if number <= version:
                     continue
