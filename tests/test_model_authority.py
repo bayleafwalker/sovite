@@ -8,7 +8,7 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from connector_support import BODY
 from model_support import authority_env, connected, consume, database, infer, v2_bundle
@@ -83,7 +83,21 @@ def test_CURRENT_AUTHORITY_cancellation_authorization_transaction_race(authority
     async def scenario():
         async with connected(authority_env) as env:
             values = request_values(env)
-            entered, release, contender = threading.Event(), threading.Event(), threading.Event()
+            entered, release = threading.Event(), threading.Event()
+            lock_attempted, lock_returned = threading.Event(), threading.Event()
+            contender_state = threading.local()
+            def is_serialization_lock(statement):
+                sql = statement.strip().upper()
+                return sql.startswith('BEGIN IMMEDIATE') or (
+                    sql.startswith('UPDATE') and 'PLATFORM_METADATA' in sql)
+            def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+                if getattr(contender_state, 'active', False) and is_serialization_lock(statement):
+                    lock_attempted.set()
+            def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+                if getattr(contender_state, 'active', False) and is_serialization_lock(statement):
+                    lock_returned.set()
+            event.listen(env.platform.db.engine, 'before_cursor_execute', before_cursor_execute)
+            event.listen(env.platform.db.engine, 'after_cursor_execute', after_cursor_execute)
             if first == 'authorize':
                 original = env.authority._checks
                 def pause(*args, **kwargs):
@@ -94,8 +108,11 @@ def test_CURRENT_AUTHORITY_cancellation_authorization_transaction_race(authority
                 monkeypatch.setattr(env.authority, '_checks', pause)
                 winner = asyncio.create_task(asyncio.to_thread(env.authority.authorize_request, **values))
                 def second():
-                    contender.set()
-                    return env.platform.cancel(env.job.id)
+                    contender_state.active = True
+                    try:
+                        return env.platform.cancel(env.job.id)
+                    finally:
+                        contender_state.active = False
             else:
                 import sovite.repository_cancel as repository_cancel
                 original = repository_cancel._cancel_fields
@@ -106,14 +123,16 @@ def test_CURRENT_AUTHORITY_cancellation_authorization_transaction_race(authority
                 monkeypatch.setattr(repository_cancel, '_cancel_fields', pause)
                 winner = asyncio.create_task(asyncio.to_thread(env.platform.cancel, env.job.id))
                 def second():
-                    contender.set()
-                    return env.authority.authorize_request(**values)
+                    contender_state.active = True
+                    try:
+                        return env.authority.authorize_request(**values)
+                    finally:
+                        contender_state.active = False
             assert await asyncio.to_thread(entered.wait, 3)
             loser = asyncio.create_task(asyncio.to_thread(second))
-            assert await asyncio.to_thread(contender.wait, 3)
+            assert await asyncio.to_thread(lock_attempted.wait, 3)
             try:
-                await asyncio.sleep(.05)
-                assert not loser.done()  # Both databases serialize at the same authority lock.
+                assert not lock_returned.is_set()  # It reached, and has not crossed, the shared lock.
             finally:
                 release.set()
             if first == 'authorize':
