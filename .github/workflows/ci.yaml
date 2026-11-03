@@ -85,6 +85,7 @@ jobs:
           tests/test_schema_verification.py tests/test_collection_schema.py
           tests/test_program_ledger_migration.py tests/test_program_ledger_v8_oracle.py
           tests/test_program_ledger_transactions.py tests/test_program_ledger_unavailable.py
+          tests/test_work_projection_rows.py
           tests/test_census_report.py
           tests/test_collection_identity.py tests/test_collection_transaction.py
           tests/test_collection_owner_cancel.py tests/test_collection_owner_lifecycle.py
