@@ -621,7 +621,8 @@ class RepositoryRunAttemptExecutor:
         self.execution_profile = execution_profile
 
     def _persist(self, job_id: str, fence: str, mutate, *, quota=None,
-                 uncertain_attempt_id: str | None = None) -> None:
+                 uncertain_attempt_id: str | None = None,
+                 reject_cancel_requested: bool = False) -> None:
         if uncertain_attempt_id is not None:
             return self._persist_uncertain(job_id, fence, mutate, uncertain_attempt_id,
                                            quota=quota)
@@ -633,6 +634,11 @@ class RepositoryRunAttemptExecutor:
                     or lease.phase != "started" or lease.fence != fence
                     or job.lease_until != lease.lease_until):
                 raise RepositoryRunError("execution_fenced", "Repository attempt is no longer current", 409)
+            if reject_cancel_requested and job.cancel_requested:
+                raise RepositoryRunError(
+                    "execution_cancel_requested",
+                    "Repository execution was cancelled before executor entry", 409,
+                )
             if quota is not None:self._root_quota(session,job,quota)
             resolved = copy.deepcopy(job.resolved)
             run = resolved.get("repository_run", {})
@@ -1002,6 +1008,7 @@ class RepositoryRunAttemptExecutor:
                    "packet_sha256": digest, "base_sha": packet.base_sha, "started_at": datetime.now(timezone.utc).isoformat()}
         self._persist(job.id, fence, lambda run: run["attempts"].append(dict(attempt)))
         executor_started = False
+        activation_descriptor = None
         try:
             manager = RepositorySessionManager(self.state_root, _AttemptBindingResolver(raw))
             workspace = manager.prepare(packet.as_dict())
@@ -1044,6 +1051,7 @@ class RepositoryRunAttemptExecutor:
                             raise RuntimeFailure("repository_execution_context_unavailable")
                         from .repository_native_activation import metadata
                         activation=metadata(context,digest)
+                        activation_descriptor = activation
                         self._persist(job.id,fence,lambda run:run["attempts"][-1].update(
                             state="awaiting_activation",activation=activation))
                         await asyncio.wait_for(prepare_attempt(context,authorization_check),
@@ -1055,7 +1063,18 @@ class RepositoryRunAttemptExecutor:
                     deadline = context.deadline
                     remaining = deadline - time.time()
                 authorization_check()
-                self._persist(job.id,fence,lambda run:run["attempts"][-1].update(state="running"))
+                try:
+                    self._persist(
+                        job.id, fence,
+                        lambda run: run["attempts"][-1].update(state="running"),
+                        reject_cancel_requested=True,
+                    )
+                except RepositoryRunError as exc:
+                    if exc.code != "execution_cancel_requested":
+                        raise
+                    cancelled_state = "activation_cancelled" if activation_descriptor is not None else "cancelled"
+                    self._mark_attempt(job.id, fence, attempt_id, cancelled_state, "cancelled")
+                    raise RuntimeFailure("execution_cancelled") from None
                 executor_started = True
                 await asyncio.wait_for(
                     attempt_executor(workspace.worktree, goal, deadline, budget, authorization_check, **kwargs),
@@ -1083,8 +1102,14 @@ class RepositoryRunAttemptExecutor:
                     "tip_sha": evidence["tip_sha"], "patch_sha256": evidence["patch_sha256"],
                     "changed_paths": evidence["changed_paths"], "evidence_sha256": evidence_projection["sha256"]}
         except asyncio.CancelledError:
-            self._mark_attempt(job.id, fence, attempt_id,
-                               "interrupted" if executor_started else "activation_cancelled")
+            if executor_started:
+                cancelled_state = "interrupted"
+            elif self._cancel_requested(job.id):
+                cancelled_state = "activation_cancelled" if activation_descriptor is not None else "cancelled"
+            else:
+                cancelled_state = "activation_cancelled"
+            self._mark_attempt(job.id, fence, attempt_id, cancelled_state,
+                               "cancelled" if cancelled_state == "cancelled" else None)
             raise
         except asyncio.TimeoutError:
             if executor_started:
@@ -1093,6 +1118,13 @@ class RepositoryRunAttemptExecutor:
             self._mark_attempt(job.id, fence, attempt_id, "failed", "repository_run_timeout")
             raise RuntimeFailure("repository_run_timeout") from None
         except RuntimeFailure as exc:
+            if exc.code == "execution_cancelled" and not executor_started:
+                raise
+            if (not executor_started and exc.code == "authorization_revoked"
+                    and self._cancel_requested(job.id)):
+                cancelled_state = "activation_cancelled" if activation_descriptor is not None else "cancelled"
+                self._mark_attempt(job.id, fence, attempt_id, cancelled_state, "cancelled")
+                raise RuntimeFailure("execution_cancelled") from None
             if exc.code != "repository_candidate_ineligible":
                 if executor_started:
                     self._mark_attempt(job.id, fence, attempt_id, "uncertain", "execution_uncertain")
@@ -1106,3 +1138,11 @@ class RepositoryRunAttemptExecutor:
                 raise RuntimeFailure("external_execution_uncertain") from None
             self._mark_attempt(job.id, fence, attempt_id, "failed", code)
             raise RuntimeFailure(code) from None
+
+    def _cancel_requested(self, job_id: str) -> bool:
+        try:
+            with self.platform.db.sessions() as session:
+                row = session.get(Job, job_id)
+                return bool(row is not None and row.cancel_requested)
+        except Exception:
+            return False

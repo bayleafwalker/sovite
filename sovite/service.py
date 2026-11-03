@@ -492,6 +492,27 @@ class Platform:
             return {"id": binding_id, "inhibited": inhibit, "reason": reason, "updated_at": state.updated_at}
 
     def cancel(self, job_id: str, *, actor: str = "operator", require_owner: bool = False) -> Job:
+        use_projection_owner = False
+        with self.db.sessions() as session:
+            hint = self.get_job(job_id, session)
+            if require_owner and hint.caller != actor:
+                raise PlatformError("not_found", "Task not found", 404)
+            schema = session.get(MetadataRow, "schema_version")
+            schema_value = schema.value if schema is not None else None
+            schema_version = (schema_value.get("version")
+                              if type(schema_value) is dict else None)
+            if type(schema_version) is not int:
+                raise PlatformError(
+                    "cancel_owner_state_unavailable",
+                    "Cancellation owner state is unavailable; retry the request",
+                    503,
+                )
+            use_projection_owner = schema_version >= 10
+        if use_projection_owner:
+            from .repository_cancel import cancel_repository_job
+            return cancel_repository_job(
+                self, job_id, actor=actor, require_owner=require_owner,
+            )
         with self.db.sessions.begin() as session:
             self.db.authority_lock(session)
             row = self.get_job(job_id, session)
