@@ -9,6 +9,23 @@ from sqlalchemy.exc import IntegrityError
 from sovite.db import Base, Database, Job
 
 
+def test_private_writers_reject_unowned_transaction(schema):
+    from sovite.collection_owner import CollectionOwnerError, _locked_session
+    from sovite.program_ledger import _mark_unknown_in_transaction
+    from sovite.program_ledger_core import _prepare_in_transaction, _record_known_in_transaction
+
+    db, tables, _ = schema
+    with db.sessions.begin() as session:
+        with pytest.raises(CollectionOwnerError):
+            _locked_session(session, "absent")
+        with pytest.raises(ValueError, match="owner transaction unavailable"):
+            _mark_unknown_in_transaction(db, session, tables, scope_id="scope", call_id="call")
+        with pytest.raises(ValueError, match="owner transaction unavailable"):
+            _prepare_in_transaction(db, session, tables, **_prepare_args("a"))
+        with pytest.raises(ValueError, match="owner transaction unavailable"):
+            _record_known_in_transaction(db, session, tables, **_receipt_args("1", "1"))
+
+
 @pytest.fixture(params=["sqlite", "postgresql"])
 def schema(request, tmp_path):
     admin = None
@@ -510,6 +527,45 @@ def _receipt_args(actual_usd, actual_allowance):
         source_code="fixture", issuer_code="fixture", source_digest="b" * 64, source_identity_digest=_source_identity_digest("fixture", "fixture"),
         custody_ref="fixture-object", custody_bytes=10, observed_ms=30)
     return {**value, "receipt_digest": digest(value)}
+
+
+def test_unknown_and_settlement_serialize_without_mixed_rows(schema):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from sovite.collection_transaction import owner_transaction
+    from sovite.program_ledger import _mark_unknown_in_transaction
+    from sovite.program_ledger_core import _record_known_in_transaction
+
+    db, tables, audit = schema
+    with db.sessions.begin() as session:
+        session.execute(insert(tables["program_gate_state"]), dict(scope_id="scope", policy_revision=1,
+            policy_digest="a" * 64, mode="disabled", revision=0, audit_sequence=audit))
+    barrier = Barrier(2)
+
+    def unknown():
+        barrier.wait(timeout=10)
+        try:
+            with owner_transaction(db) as session:
+                return _mark_unknown_in_transaction(db, session, tables, scope_id="scope", call_id="call")
+        except ValueError as error:
+            assert str(error) == "incoherent obligation state"
+            return "already settled"
+
+    def settle():
+        barrier.wait(timeout=10)
+        with owner_transaction(db) as session:
+            return _record_known_in_transaction(db, session, tables, **_receipt_args("0", "0"))[0]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_unknown, future_settle = pool.submit(unknown), pool.submit(settle)
+        unknown_result, settle_result = future_unknown.result(timeout=20), future_settle.result(timeout=20)
+    assert settle_result == "known_settled_unverified"
+    assert unknown_result in {"already settled", "unknown_gate_row_inhibited_unverified"}
+    with db.sessions() as session:
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "settled"
+        assert session.scalar(select(tables["program_slots"].c.state)) == "released"
+        assert session.scalar(select(tables["program_call_intents"].c.state)) == "known"
+        assert len(session.execute(select(tables["program_call_receipts"])).all()) == 1
 
 
 @pytest.mark.parametrize("actual_usd,actual_allowance,unresolved,overflow", [

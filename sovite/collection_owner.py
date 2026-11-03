@@ -11,7 +11,7 @@ from sqlalchemy import select, update
 
 from .collection_identity import (CAPABILITIES, IDENTIFIER, MAX_INTEGER,
                                   InvalidCollectionInput, create_request_identity)
-from .collection_transaction import owner_transaction
+from .collection_transaction import _owner_transaction_is_active, owner_transaction
 from .db import Base
 
 
@@ -112,6 +112,8 @@ def _binding(row):
 
 def _locked_session(session, session_id):
     """Resolve under audit lock, then lock scope, subject and session in order."""
+    if not _owner_transaction_is_active(session):
+        _deny()
     sessions, scope, subjects = (_table("collection_sessions"), _table("program_budget_scopes"),
                                 _table("program_budget_subjects"))
     candidate = session.execute(select(sessions.c.scope_id).where(sessions.c.id == session_id)).scalar_one_or_none()

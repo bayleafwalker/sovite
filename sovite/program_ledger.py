@@ -90,6 +90,10 @@ def _mark_unknown_in_transaction(database, session, tables, *, scope_id, call_id
     commit, authority, validated cutover, or durable inhibition.
     """
     from sqlalchemy import select, update
+    from .collection_transaction import _owner_transaction_is_active
+
+    if not _owner_transaction_is_active(session):
+        raise ValueError("owner transaction unavailable")
 
     scope = tables["program_budget_scopes"]
     gate = tables["program_gate_state"]
