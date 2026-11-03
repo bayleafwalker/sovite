@@ -30,8 +30,15 @@ def _local_test_url(value):
     query_hosts = url.query.get("host", ())
     if isinstance(query_hosts, str):
         query_hosts = (query_hosts,)
-    if url.host or len(query_hosts) != 1 or not query_hosts[0].startswith("/tmp/"):
-        pytest.fail("Work projection tests require an explicit Unix socket under /tmp")
+    socket_target = not url.host and len(query_hosts) == 1 and query_hosts[0].startswith("/tmp/")
+    ci_service_target = (
+        os.environ.get("SOVITE_TEST_POSTGRES_CI") == "1"
+        and url.host == "127.0.0.1" and url.port == 5432
+        and url.username == "sovite_resource_test"
+        and url.database == "sovite_resource_test"
+    )
+    if not (socket_target or ci_service_target):
+        pytest.fail("Work projection tests require a /tmp Unix socket or the opted-in local PG16 fixture")
     database_name = (url.database or "").lower()
     if not any(token in database_name for token in ("test", "oracle", "fixture")):
         pytest.fail("Work projection tests require a dedicated test/oracle/fixture database")
