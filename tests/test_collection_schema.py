@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import create_engine, event, insert, select
 from sqlalchemy.exc import IntegrityError
 
-from sovite.db import Base, Database, DatabaseSchemaError, Job, MetadataRow, _COLLECTION_V8, _PROGRAM_LEDGER_V9
+from sovite.db import Base, Database, DatabaseSchemaError, Job, MetadataRow, _COLLECTION_V8, _PROGRAM_LEDGER_V9, _PROGRAM_RELATIONAL_V10
 
 
 @pytest.fixture(params=["sqlite", "postgresql"])
@@ -76,7 +76,7 @@ def operation(a, **changes):
 
 
 def test_offline_upgrade_preserves_v7_and_refuses_old_reader(db):
-    old_tables = [table for table in Base.metadata.sorted_tables if table not in _COLLECTION_V8 and table not in _PROGRAM_LEDGER_V9]
+    old_tables = [table for table in Base.metadata.sorted_tables if table not in _COLLECTION_V8 and table not in _PROGRAM_LEDGER_V9 and table not in _PROGRAM_RELATIONAL_V10]
     Base.metadata.create_all(db.engine, tables=old_tables)
     with db.sessions.begin() as session:
         session.add(MetadataRow(key="schema_version", value={"version": 7}))
