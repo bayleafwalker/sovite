@@ -1,14 +1,14 @@
 """Pure validation and canonical encoding for dormant Work projection v1.
 
-This module validates representation and integrity only. A valid digest is not
-source authentication, authorization, or evidence that any ledger row exists.
-It has no database, provider, network, credential, or dispatch dependencies.
+The pure validator provides representation checks only. The private comparator
+reads synthetic owner rows; it supplies no authorization or source verification.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
 import json
+import math
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
@@ -18,6 +18,9 @@ SCHEMA_VERSION = "sovite-work-projection/v1"
 DIGEST_DOMAIN = b"SOVITE:WORK-PROJECTION:v1\x00"
 MAX_I64 = (1 << 63) - 1
 MAX_AUDIT_SEQUENCE = (1 << 31) - 1
+MAX_JOB_JSON_BYTES = 1048576
+MAX_JOB_JSON_DEPTH = 32
+MAX_JOB_JSON_NODES = 20000
 
 _FIELDS = frozenset({
     "schema_version", "scope_id", "work_job_id", "subject_id", "attempt_id",
@@ -237,3 +240,495 @@ def verify_digest(payload: WorkProjectionV1 | Mapping[str, Any], expected: str) 
     if not hmac.compare_digest(projection_digest(projection), expected):
         raise WorkProjectionError("projection digest mismatch")
     return projection
+
+
+class _WorkProjectionUnavailable(RuntimeError):
+    """A private, redacted refusal to compare incomplete or untrusted source rows."""
+
+    def __init__(self):
+        super().__init__("Work projection is unavailable for canonical-row comparison")
+
+
+_CANONICAL_ROWS_AGREE = "canonical_rows_agree"
+_BINDING_TABLE = "program_work_projection_bindings"
+_BINDING_COLUMNS = frozenset({
+    "scope_id", "call_id", "subject_id", "work_job_id", "attempt_id", "slot_id",
+    "purpose", "policy_revision", "policy_digest", "projection_revision",
+    "projection_digest", "audit_sequence",
+})
+
+
+def _projection_id(value: Any) -> bool:
+    return type(value) is str and _IDENTIFIER_RE.fullmatch(value) is not None
+
+
+def _db_int(value: Any, *, positive: bool = False, maximum: int = MAX_I64) -> bool:
+    return (type(value) is int and 0 <= value <= maximum
+            and (not positive or value > 0))
+
+
+def _raw_job_object(raw: Any) -> dict[str, Any]:
+    if type(raw) is not str:
+        raise WorkProjectionError("stored Job JSON is not raw text")
+    if len(raw.encode("utf-8")) > MAX_JOB_JSON_BYTES:
+        raise WorkProjectionError("stored Job JSON exceeds byte bound")
+    depth = 0
+    in_string = escaped = False
+    for char in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JOB_JSON_DEPTH:
+                raise WorkProjectionError("stored Job JSON exceeds depth bound")
+        elif char in "]}":
+            depth -= 1
+            if depth < 0:
+                raise WorkProjectionError("stored Job JSON is invalid")
+    try:
+        value = json.loads(raw, object_pairs_hook=_duplicate_rejecting_object,
+                           parse_constant=_reject_json_constant)
+    except WorkProjectionError:
+        raise
+    except (json.JSONDecodeError, UnicodeError, TypeError, ValueError, RecursionError) as error:
+        raise WorkProjectionError("stored Job JSON is invalid") from error
+    if type(value) is not dict:
+        raise WorkProjectionError("stored Job JSON is not an object")
+    pending = [value]
+    count = 0
+    while pending:
+        item = pending.pop()
+        count += 1
+        if count > MAX_JOB_JSON_NODES:
+            raise WorkProjectionError("stored Job JSON exceeds node bound")
+        if type(item) is dict:
+            pending.extend(item.values())
+        elif type(item) is list:
+            pending.extend(item)
+    return value
+
+
+def _projection_from_job(raw: Any, *, call_id: str) -> WorkProjectionV1:
+    root = _raw_job_object(raw)
+    run = root.get("repository_run")
+    entries = run.get("program_ledger_projections_v1") if type(run) is dict else None
+    if type(entries) is not list:
+        raise WorkProjectionError("stored Work projection array is absent")
+    projections: list[WorkProjectionV1] = []
+    previous: bytes | None = None
+    seen: set[str] = set()
+    for entry in entries:
+        projection = validate_payload(entry)
+        encoded_call = projection.call_id.encode("utf-8")
+        if projection.call_id in seen or (previous is not None and encoded_call <= previous):
+            raise WorkProjectionError("stored Work projection calls are not sorted and unique")
+        seen.add(projection.call_id)
+        previous = encoded_call
+        projections.append(projection)
+    selected = [item for item in projections if item.call_id == call_id]
+    if len(selected) != 1:
+        raise WorkProjectionError("stored Work projection call is absent or duplicated")
+    return selected[0]
+
+
+def _compare_actual_rows(session, *, scope_id: str, call_id: str) -> str:
+    """Implementation for the private owner-transaction-only comparator."""
+    from sqlalchemy import MetaData, Table, and_, cast, func, inspect, or_, select, Text, LargeBinary
+
+    from .collection_transaction import _owner_transaction_is_active
+    from .db import Base, digest
+    from .lease_service import execution_owner_key
+
+    if not _owner_transaction_is_active(session):
+        raise _WorkProjectionUnavailable()
+    if (not _projection_id(scope_id) or not _projection_id(call_id)
+            or session.get_bind().dialect.name not in {"sqlite", "postgresql"}):
+        raise _WorkProjectionUnavailable()
+
+    connection = session.connection()
+    tables = Base.metadata.tables
+
+    def known(name: str):
+        table = tables.get(name)
+        if table is None:
+            raise _WorkProjectionUnavailable()
+        return table
+
+    scope_t = known("program_budget_scopes")
+    gate_t = known("program_gate_state")
+    policy_t = known("program_policy_revisions")
+    registry_t = known("program_subject_registry")
+    subject_t = known("program_budget_subjects")
+    job_t = known("jobs")
+    lease_t = known("worker_execution_leases")
+    reservation_t = known("program_reservations")
+    slot_t = known("program_slots")
+    intent_t = known("program_call_intents")
+    receipt_t = known("program_call_receipts")
+    evidence_t = known("program_overflow_evidence")
+    audit_t = known("audit_events")
+
+    def locked_rows(table, *predicates, order=()):
+        statement = select(table).where(*predicates)
+        if order:
+            statement = statement.order_by(*order)
+        return session.execute(statement.with_for_update()).mappings().all()
+
+    def one_locked(table, *predicates):
+        rows = locked_rows(table, *predicates)
+        if len(rows) != 1:
+            raise _WorkProjectionUnavailable()
+        return rows[0]
+
+    def check_audit_sequences(*values):
+        sequences = set(values)
+        if any(not _db_int(value, positive=True, maximum=MAX_AUDIT_SEQUENCE) for value in sequences):
+            raise _WorkProjectionUnavailable()
+        found = set(session.execute(select(audit_t.c.sequence).where(
+            audit_t.c.sequence.in_(sequences))).scalars())
+        if found != sequences:
+            raise _WorkProjectionUnavailable()
+
+    # Owner lock order: scope, gate, immutable policy revisions, registry,
+    # subject, all Job rows, all lease rows, reservation, slot, intent,
+    # receipts, evidence, then the proposed projection binding. The owner
+    # transaction already holds the audit-head serialization boundary.
+    scope = one_locked(scope_t, scope_t.c.id == scope_id)
+    gate = one_locked(gate_t, gate_t.c.scope_id == scope_id)
+    if gate["mode"] not in {"disabled", "census", "active", "inhibited"}:
+        raise _WorkProjectionUnavailable()
+
+    # This is discovery only. The full intent is re-read after every earlier
+    # lock class has been acquired.
+    candidate_rows = session.execute(select(
+        intent_t.c.scope_id, intent_t.c.call_id, intent_t.c.subject_id,
+        intent_t.c.purpose, intent_t.c.work_job_id, intent_t.c.work_attempt_id,
+        intent_t.c.work_lease_digest, intent_t.c.policy_revision,
+        intent_t.c.policy_digest,
+    ).where(intent_t.c.scope_id == scope_id, intent_t.c.call_id == call_id)).mappings().all()
+    if len(candidate_rows) != 1:
+        raise _WorkProjectionUnavailable()
+    candidate = candidate_rows[0]
+    job_id = candidate["work_job_id"]
+    if (candidate["purpose"] != "work" or candidate["subject_id"] != job_id
+            or not _projection_id(job_id) or not _projection_id(candidate["work_attempt_id"])
+            or not _db_int(candidate["policy_revision"], positive=True)
+            or type(candidate["policy_digest"]) is not str
+            or _HEX256_RE.fullmatch(candidate["policy_digest"]) is None):
+        raise _WorkProjectionUnavailable()
+    gate_revision = gate["policy_revision"]
+    gate_digest = gate["policy_digest"]
+    if (not _db_int(gate_revision, positive=True) or type(gate_digest) is not str
+            or _HEX256_RE.fullmatch(gate_digest) is None):
+        raise _WorkProjectionUnavailable()
+    policy_revisions = sorted({candidate["policy_revision"], gate_revision})
+    policy_rows = session.execute(select(policy_t).where(
+        policy_t.c.scope_id == scope_id,
+        policy_t.c.revision.in_(policy_revisions),
+    ).order_by(policy_t.c.revision).with_for_update()).mappings().all()
+    policies = {row["revision"]: row for row in policy_rows}
+    if (set(policies) != set(policy_revisions)
+            or policies[gate_revision]["policy_digest"] != gate_digest
+            or policies[candidate["policy_revision"]]["policy_digest"] != candidate["policy_digest"]):
+        raise _WorkProjectionUnavailable()
+    policy = policies[candidate["policy_revision"]]
+
+    registry = one_locked(registry_t, registry_t.c.scope_id == scope_id,
+                          registry_t.c.subject_id == job_id, registry_t.c.purpose == "work")
+    subject = one_locked(subject_t, subject_t.c.scope_id == scope_id,
+                         subject_t.c.subject_id == job_id)
+    if (registry["scope_id"] != scope_id or registry["subject_id"] != job_id
+            or registry["purpose"] != "work" or subject["purpose"] != "work"
+            or registry["binding_digest"] != subject["binding_digest"]):
+        raise _WorkProjectionUnavailable()
+
+    # Lock and fetch only fixed internal tables. resolved is cast to raw text;
+    # ORM JSON decoding would erase duplicate-key evidence. JSONB and unknown
+    # storage types are intentionally unsupported.
+    schema_map = session.get_bind().get_execution_options().get("schema_translate_map", {})
+    binding_schema = schema_map.get(None) if isinstance(schema_map, Mapping) else None
+    inspector = inspect(connection)
+    job_columns = inspector.get_columns("jobs", schema=binding_schema)
+    resolved_column = next((item for item in job_columns if item["name"] == "resolved"), None)
+    storage_type = str(resolved_column["type"]).lower() if resolved_column else ""
+    dialect = session.get_bind().dialect.name
+    if ((dialect == "sqlite" and storage_type != "json")
+            or (dialect == "postgresql" and storage_type != "json")):
+        raise _WorkProjectionUnavailable()
+    if dialect == "postgresql":
+        encoding = session.execute(select(func.current_setting("client_encoding"))).scalar_one()
+        if encoding.upper().replace("-", "") != "UTF8":
+            raise _WorkProjectionUnavailable()
+        size_expr = func.octet_length(cast(job_t.c.resolved, Text))
+    else:
+        if connection.exec_driver_sql("PRAGMA encoding").scalar_one().upper().replace("-", "") != "UTF8":
+            raise _WorkProjectionUnavailable()
+        size_expr = func.length(cast(job_t.c.resolved, LargeBinary))
+    size = session.execute(select(size_expr).where(job_t.c.id == job_id).with_for_update()).scalar_one_or_none()
+    if type(size) is not int or not 0 < size <= MAX_JOB_JSON_BYTES:
+        raise _WorkProjectionUnavailable()
+    job_columns_to_read = [job_t.c[name] for name in
+                           ("id", "status", "cancel_requested", "generation", "lease_owner", "lease_until")]
+    job_statement = select(*job_columns_to_read,
+                            cast(job_t.c.resolved, Text).label("_resolved_raw")).where(
+        job_t.c.id == job_id).with_for_update()
+    job_rows = session.execute(job_statement).mappings().all()
+    if len(job_rows) != 1:
+        raise _WorkProjectionUnavailable()
+    job = job_rows[0]
+    lease = one_locked(lease_t, lease_t.c.job_id == job_id)
+
+    try:
+        projection = _projection_from_job(job["_resolved_raw"], call_id=call_id)
+    except (WorkProjectionError, TypeError, ValueError):
+        raise _WorkProjectionUnavailable() from None
+    if projection.work_job_id != job_id or projection.scope_id != scope_id:
+        raise _WorkProjectionUnavailable()
+
+    reservation = one_locked(reservation_t, reservation_t.c.scope_id == scope_id,
+                             reservation_t.c.call_id == call_id)
+    slot_rows = locked_rows(slot_t, slot_t.c.scope_id == scope_id,
+                            or_(slot_t.c.call_id == call_id,
+                                slot_t.c.slot_id == projection.slot_id),
+                            order=(slot_t.c.slot_id,))
+    if len(slot_rows) != 1:
+        raise _WorkProjectionUnavailable()
+    slot = slot_rows[0]
+    intent = one_locked(intent_t, intent_t.c.scope_id == scope_id,
+                        intent_t.c.call_id == call_id)
+
+    if (intent["scope_id"] != scope_id or intent["call_id"] != call_id
+            or intent["purpose"] != "work" or intent["subject_id"] != job_id
+            or intent["work_job_id"] != job_id
+            or intent["work_attempt_id"] != projection.attempt_id
+            or intent["work_lease_digest"] != projection.lease_digest
+            or intent["effect_key"] != projection.effect_key
+            or intent["request_digest"] != projection.request_digest
+            or intent["policy_revision"] != int(projection.policy_revision)
+            or intent["policy_digest"] != projection.policy_digest
+            or intent["policy_revision"] != candidate["policy_revision"]
+            or intent["policy_digest"] != candidate["policy_digest"]):
+        raise _WorkProjectionUnavailable()
+
+    # Check the Work attempt and currently stored lease fields as canonical
+    # row agreement only. This is not a fence, authority, or source-freshness
+    # assertion.
+    lease_until = lease["lease_until"]
+    deadline = lease["execution_deadline"]
+    job_lease_until = job["lease_until"]
+    if (job["status"] != "running" or bool(job["cancel_requested"])
+            or lease["phase"] != "started" or lease["generation"] != job["generation"]
+            or type(lease["workload_id"]) is not str or type(lease["instance_id"]) is not str
+            or type(lease["generation"]) is not str or type(lease["fence"]) is not str
+            or type(job_lease_until) not in (int, float) or not math.isfinite(job_lease_until)
+            or type(lease_until) not in (int, float) or not math.isfinite(lease_until)
+            or type(deadline) not in (int, float) or not math.isfinite(deadline)
+            or job_lease_until != lease_until
+            or job["lease_owner"] != execution_owner_key(
+                workload_id=lease["workload_id"], instance_id=lease["instance_id"])
+            or min(lease_until, deadline) * 1000 < int(intent["valid_until_ms"])):
+        raise _WorkProjectionUnavailable()
+    fence_digest = hashlib.sha256(lease["fence"].encode("utf-8")).hexdigest()
+    run = _raw_job_object(job["_resolved_raw"]).get("repository_run")
+    attempts = run.get("attempts") if type(run) is dict else None
+    if type(attempts) is not list or not attempts:
+        raise _WorkProjectionUnavailable()
+    matching = [entry for entry in attempts
+                if type(entry) is dict and entry.get("id") == projection.attempt_id]
+    expected_lease_digest = digest({
+        "job_id": job_id, "attempt_id": projection.attempt_id,
+        "workload_id": lease["workload_id"], "instance_id": lease["instance_id"],
+        "generation": lease["generation"], "fence_sha256": fence_digest,
+    })
+    if (len(matching) != 1 or attempts[-1] is not matching[0]
+            or matching[0].get("state") not in {"preparing", "running", "awaiting_activation"}
+            or matching[0].get("fence_sha256") != fence_digest
+            or expected_lease_digest != projection.lease_digest
+            or intent["work_lease_digest"] != expected_lease_digest):
+        raise _WorkProjectionUnavailable()
+
+    if (projection.subject_id != job_id or reservation["scope_id"] != scope_id
+            or reservation["call_id"] != call_id or reservation["subject_id"] != job_id
+            or reservation["purpose"] != "work" or reservation["effect_key"] != projection.effect_key
+            or slot["scope_id"] != scope_id or slot["slot_id"] != projection.slot_id
+            or slot["call_id"] != call_id or slot["subject_id"] != job_id
+            or intent["subject_id"] != job_id):
+        raise _WorkProjectionUnavailable()
+    if (scope["policy_revision"] != gate_revision or scope["policy_digest"] != gate_digest
+            or policy["scope_id"] != scope_id or policy["revision"] != int(projection.policy_revision)
+            or policy["policy_digest"] != projection.policy_digest or policy["currency"] != "USD"
+            or policy["allowance_unit"] != projection.allowance_unit
+            or policy["window_start_ms"] != int(projection.period_start_ms)
+            or policy["window_end_ms"] != int(projection.period_end_ms)
+            or scope["id"] != scope_id):
+        raise _WorkProjectionUnavailable()
+    if (intent["price_digest"] != policy["price_policy_digest"]
+            or intent["meter_digest"] != policy["meter_policy_digest"]
+            or intent["permit_digest"] != policy["permit_policy_digest"]
+            or intent["source_identity_digest"] != policy["source_identity_digest"]
+            or intent["source_identity_digest"] != digest({
+                "source_code": intent["source_code"], "issuer_code": intent["issuer_code"]})
+            or reservation["price_digest"] != intent["price_digest"]
+            or reservation["meter_digest"] != intent["meter_digest"]
+            or reservation["permit_digest"] != intent["permit_digest"]
+            or reservation["permit_expires_ms"] != intent["valid_until_ms"]
+            or type(intent["observed_ms"]) is not int or type(intent["valid_until_ms"]) is not int
+            or not policy["window_start_ms"] <= intent["observed_ms"] < policy["window_end_ms"]
+            or intent["valid_until_ms"] > policy["window_end_ms"]):
+        raise _WorkProjectionUnavailable()
+
+    expected_digest = projection_digest(projection)
+    try:
+        receipts = locked_rows(receipt_t, receipt_t.c.scope_id == scope_id,
+                               receipt_t.c.call_id == call_id,
+                               order=(receipt_t.c.receipt_id,))
+    except Exception:
+        raise _WorkProjectionUnavailable() from None
+    if len(receipts) > 1:
+        raise _WorkProjectionUnavailable()
+    receipt = receipts[0] if receipts else None
+    if projection.receipt_id is None:
+        if receipt is not None:
+            raise _WorkProjectionUnavailable()
+    else:
+        if (receipt is None or receipt["receipt_id"] != projection.receipt_id
+                or receipt["receipt_digest"] != projection.receipt_digest
+                or receipt["allowance_unit"] != projection.allowance_unit
+                or receipt["currency"] != "USD"
+                or receipt["source_code"] != intent["source_code"]
+                or receipt["issuer_code"] != intent["issuer_code"]
+                or receipt["source_identity_digest"] != intent["source_identity_digest"]
+                or receipt["outcome"] not in {"known", "unknown"}
+                or receipt["evidence_id"] is not None
+                or not _db_int(receipt["observed_ms"])
+                or not _db_int(receipt["custody_bytes"], positive=True, maximum=1048576)
+                or type(receipt["custody_ref"]) is not str
+                or not 1 <= len(receipt["custody_ref"].encode("utf-8")) <= 512
+                or type(receipt["source_digest"]) is not str
+                or _HEX256_RE.fullmatch(receipt["source_digest"]) is None
+                or type(receipt["source_identity_digest"]) is not str
+                or _HEX256_RE.fullmatch(receipt["source_identity_digest"]) is None):
+            raise _WorkProjectionUnavailable()
+        if receipt["outcome"] == "known":
+            if (not _db_int(receipt["actual_usd_micro"])
+                    or not _db_int(receipt["actual_allowance_micro"])
+                    or projection.actual_usd_micro != str(receipt["actual_usd_micro"])
+                    or projection.actual_allowance_micro != str(receipt["actual_allowance_micro"])):
+                raise _WorkProjectionUnavailable()
+            receipt_actuals = (str(receipt["actual_usd_micro"]), str(receipt["actual_allowance_micro"]))
+        else:
+            if (receipt["actual_usd_micro"] is not None or receipt["actual_allowance_micro"] is not None
+                    or projection.actual_usd_micro is not None):
+                raise _WorkProjectionUnavailable()
+            receipt_actuals = (None, None)
+        stored_receipt_digest = digest(dict(
+            scope_id=scope_id, call_id=call_id, receipt_id=receipt["receipt_id"],
+            actual_usd=receipt_actuals[0], actual_allowance=receipt_actuals[1],
+            currency=receipt["currency"], allowance_unit=receipt["allowance_unit"],
+            source_code=receipt["source_code"], issuer_code=receipt["issuer_code"],
+            source_digest=receipt["source_digest"],
+            source_identity_digest=receipt["source_identity_digest"],
+            custody_ref=receipt["custody_ref"], custody_bytes=receipt["custody_bytes"],
+            observed_ms=receipt["observed_ms"],
+        ))
+        if stored_receipt_digest != receipt["receipt_digest"]:
+            raise _WorkProjectionUnavailable()
+
+    evidence_call_predicates = [evidence_t.c.call_id == call_id]
+    if projection.evidence_id is not None:
+        evidence_call_predicates.append(evidence_t.c.evidence_id == projection.evidence_id)
+    evidence_rows = locked_rows(evidence_t, and_(
+        evidence_t.c.scope_id == scope_id, or_(*evidence_call_predicates)),
+                                order=(evidence_t.c.evidence_id,))
+    if evidence_rows:
+        # v1 deliberately cannot represent overflow/custody evidence.
+        raise _WorkProjectionUnavailable()
+
+    try:
+        binding_t = Table(_BINDING_TABLE, MetaData(), schema=binding_schema,
+                          autoload_with=connection)
+    except Exception:
+        raise _WorkProjectionUnavailable() from None
+    if (set(binding_t.c.keys()) != _BINDING_COLUMNS
+            or [column.name for column in binding_t.primary_key.columns] != ["scope_id", "call_id"]):
+        raise _WorkProjectionUnavailable()
+    binding_rows = locked_rows(binding_t, binding_t.c.scope_id == scope_id,
+                               binding_t.c.call_id == call_id)
+    if len(binding_rows) != 1:
+        raise _WorkProjectionUnavailable()
+    binding = binding_rows[0]
+    if (binding["scope_id"] != projection.scope_id or binding["call_id"] != projection.call_id
+            or binding["subject_id"] != projection.subject_id
+            or binding["work_job_id"] != projection.work_job_id
+            or binding["attempt_id"] != projection.attempt_id
+            or binding["slot_id"] != projection.slot_id or binding["purpose"] != "work"
+            or binding["policy_revision"] != int(projection.policy_revision)
+            or binding["policy_digest"] != projection.policy_digest
+            or binding["projection_revision"] != int(projection.projection_revision)
+            or binding["projection_digest"] != expected_digest
+            or binding["audit_sequence"] != int(projection.audit_sequence)):
+        raise _WorkProjectionUnavailable()
+
+    if (reservation["state"] != projection.reservation_state
+            or slot["state"] != projection.slot_state
+            or intent["state"] != projection.intent_state
+            or not _db_int(reservation["reserved_usd_micro"])
+            or not _db_int(reservation["reserved_allowance_micro"])
+            or str(reservation["reserved_usd_micro"]) != projection.reserved_usd_micro
+            or str(reservation["reserved_allowance_micro"]) != projection.reserved_allowance_micro
+            or (reservation["actual_usd_micro"] is None) != (reservation["actual_allowance_micro"] is None)
+            or any(value is not None and not _db_int(value) for value in
+                   (reservation["actual_usd_micro"], reservation["actual_allowance_micro"]))
+            or (None if reservation["actual_usd_micro"] is None else str(reservation["actual_usd_micro"]))
+                != projection.actual_usd_micro
+            or (None if reservation["actual_allowance_micro"] is None else str(reservation["actual_allowance_micro"]))
+                != projection.actual_allowance_micro
+            or not _db_int(intent["audit_sequence"], positive=True, maximum=MAX_AUDIT_SEQUENCE)
+            or not _db_int(reservation["audit_sequence"], positive=True, maximum=MAX_AUDIT_SEQUENCE)
+            or not _db_int(slot["audit_sequence"], positive=True, maximum=MAX_AUDIT_SEQUENCE)
+            or intent["audit_sequence"] != int(projection.audit_sequence)
+            or reservation["audit_sequence"] != int(projection.audit_sequence)
+            or slot["audit_sequence"] != int(projection.audit_sequence)
+            or not _db_int(binding["audit_sequence"], positive=True, maximum=MAX_AUDIT_SEQUENCE)):
+        raise _WorkProjectionUnavailable()
+    if receipt is not None and (not _db_int(receipt["audit_sequence"], positive=True,
+                                            maximum=MAX_AUDIT_SEQUENCE)
+                                or receipt["audit_sequence"] != int(projection.audit_sequence)):
+        raise _WorkProjectionUnavailable()
+
+    check_audit_sequences(
+        gate["audit_sequence"], policy["audit_sequence"], registry["audit_sequence"],
+        reservation["audit_sequence"], slot["audit_sequence"], intent["audit_sequence"],
+        binding["audit_sequence"], *( () if receipt is None else (receipt["audit_sequence"],) ),
+        *(row["audit_sequence"] for row in policies.values() if row is not policy),
+    )
+    if not hmac.compare_digest(expected_digest, binding["projection_digest"]):
+        raise _WorkProjectionUnavailable()
+    return _CANONICAL_ROWS_AGREE
+
+
+def _compare_actual_work_projection(session, *, scope_id: str, call_id: str) -> str:
+    """Compare one actual Work call within an existing owner transaction.
+
+    This private comparator accepts selectors, never caller-provided rows or
+    mappings. It is read-only and returns only a bounded agreement label. A
+    matching digest/row set is not source freshness, fence, authority, or proof
+    that a receipt is genuine. In particular, this does not establish that all
+    database writers use the owner lock boundary. It requires a running Job and
+    started lease; it does not compare or authorize legacy display consumers.
+    """
+    try:
+        return _compare_actual_rows(session, scope_id=scope_id, call_id=call_id)
+    except _WorkProjectionUnavailable:
+        raise
+    except Exception:
+        # Do not expose raw Job JSON, provider/custody data, SQL details, or
+        # database errors through this dormant comparison boundary.
+        raise _WorkProjectionUnavailable() from None

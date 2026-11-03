@@ -669,12 +669,19 @@ def _read_only_sql(statements):
 def test_schema5_migration_ledger_preserves_historical_meanings():
     import sovite.db as owner
     _assert_historical_migrations()
-    assert len(owner.MIGRATIONS) == 9, "schema-9 append migration is missing"
-    assert [number for number, _ in owner.MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert len(owner.MIGRATIONS) == 10, "append-only schema migration is missing"
+    assert [number for number, _ in owner.MIGRATIONS] == list(range(1, 11))
     schema9_tables = {"program_policy_revisions", "program_census_batches", "program_gate_state",
         "program_subject_registry", "program_call_intents", "program_overflow_evidence",
         "program_call_receipts", "program_legacy_links"}
     assert {table.name for table in owner.MIGRATIONS[8][1]} == schema9_tables
+    schema10_tables = {
+        "program_work_projection_bindings", "program_census_manifests",
+        "program_census_perimeter_members", "program_census_manifest_states",
+        "program_census_streams", "program_census_stream_states", "program_census_pages",
+        "program_census_confirmations", "program_census_gate_bindings",
+    }
+    assert {table.name for table in owner.MIGRATIONS[9][1]} == schema10_tables
     assert {table.name for table in owner.MIGRATIONS[7][1]} == _SCHEMA8_TABLES
     assert {table.name for table in owner.MIGRATIONS[4][1]} == set(_SCHEMA5_FIELDS)
     assert {table.name for table in owner.MIGRATIONS[5][1]} == {
@@ -682,7 +689,7 @@ def test_schema5_migration_ledger_preserves_historical_meanings():
         "resource_output_grants", "resource_owner_requests"}
     assert set(Base.metadata.tables) == _historical_layout(4) | set(_SCHEMA5_FIELDS) | {
         "resource_gateway_enrollments", "resource_workload_scopes",
-        "resource_output_grants", "resource_owner_requests"} | _SCHEMA8_TABLES | schema9_tables
+        "resource_output_grants", "resource_owner_requests"} | _SCHEMA8_TABLES | schema9_tables | schema10_tables
     for model_name, table_name in (("WorkerExecutionLease", "worker_execution_leases"),
                                    ("WorkerExecutionOperation", "worker_execution_operations")):
         model = getattr(owner, model_name, None)
