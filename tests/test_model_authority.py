@@ -97,13 +97,13 @@ def test_CURRENT_AUTHORITY_cancellation_authorization_transaction_race(authority
                     contender.set()
                     return env.platform.cancel(env.job.id)
             else:
-                original = env.platform.get_job
-                def pause(*args, **kwargs):
-                    result = original(*args, **kwargs)
+                import sovite.repository_cancel as repository_cancel
+                original = repository_cancel._cancel_fields
+                def pause(platform, session, job, actor):
                     entered.set()
                     assert release.wait(5)
-                    return result
-                monkeypatch.setattr(env.platform, 'get_job', pause)
+                    return original(platform, session, job, actor)
+                monkeypatch.setattr(repository_cancel, '_cancel_fields', pause)
                 winner = asyncio.create_task(asyncio.to_thread(env.platform.cancel, env.job.id))
                 def second():
                     contender.set()
