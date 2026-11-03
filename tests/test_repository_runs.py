@@ -11,6 +11,7 @@ import pytest
 import yaml
 from jsonschema import Draft202012Validator, ValidationError
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from sovite import policy
 from sovite.api import create_app
@@ -536,6 +537,43 @@ def test_default_worker_never_routes_repository_run_into_answer_only_runner(setu
     run = submit(owner, packet(base), principal_id="cloud-codex", idempotency_key="leave-queued-00000000")
     assert not asyncio.run(Worker(platform).run_once())
     assert owner.get(run["id"], principal_id="cloud-codex")["state"] == "queued"
+
+
+def test_cancel_winning_running_persist_stops_executor_entry(setup, tmp_path):
+    _, platform = setup
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, platform.active()[1])
+    invoked = []
+
+    async def stub(*_args):
+        invoked.append(True)
+
+    lifecycle = RepositoryRunAttemptExecutor(platform, resolver, tmp_path / "cancel-race", stub)
+    owner = make_owner(platform, resolver, executor=lifecycle)
+    created = submit(owner, packet(base), principal_id="cloud-codex",
+                     idempotency_key="cancel-race-before-executor")
+    persist = lifecycle._persist
+
+    def cancel_before_running_persist(job_id, fence, mutate, **kwargs):
+        if kwargs.get("reject_cancel_requested"):
+            with platform.db.sessions.begin() as session:
+                row = session.execute(
+                    select(Job).where(Job.id == job_id).with_for_update()
+                ).scalar_one()
+                row.cancel_requested = True
+                platform.db.audit(session, "operator", "task.cancel_requested", row.id)
+        return persist(job_id, fence, mutate, **kwargs)
+
+    lifecycle._persist = cancel_before_running_persist
+    assert asyncio.run(Worker(platform, repository_run_executor=lifecycle).run_once())
+
+    observed = owner.get(created["id"], principal_id="cloud-codex")
+    with platform.db.sessions() as session:
+        saved = session.get(Job, created["id"])
+    assert invoked == []
+    assert observed["state"] == "cancelled"
+    assert observed["attempts"][-1]["state"] == "cancelled"
+    assert saved.cancel_requested is True
 
 
 @pytest.mark.parametrize("overrun", ["cost", "concurrency"])

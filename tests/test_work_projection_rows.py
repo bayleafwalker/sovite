@@ -12,6 +12,7 @@ from sovite.collection_transaction import owner_transaction
 from sovite.db import Base, Database, Job, MetadataRow, digest
 from sovite.lease_service import execution_owner_key
 from sovite.repository_runs import RUN_SCHEMA, RepositoryRunAttemptExecutor
+from sovite.service import Platform, PlatformError
 from sovite.work_projection import (
     _WorkProjectionUnavailable,
     _compare_actual_work_projection,
@@ -764,4 +765,409 @@ def test_uncertain_refuses_asymmetric_projection_binding_intent_sets(work_rows, 
     with db.sessions() as session:
         assert session.scalar(select(tables["program_reservations"].c.state)) == "reserved"
         assert session.scalar(select(tables["program_gate_state"].c.mode)) == "disabled"
+        assert session.get(Job, "job").resolved["repository_run"]["attempts"][-1]["state"] == "running"
+
+
+def _platform_for_projection_test(db):
+    platform = object.__new__(Platform)
+    platform.db = db
+    return platform
+
+
+@pytest.mark.parametrize("attempt_state", ["preparing", "awaiting_activation", "running"])
+def test_cancel_possible_dispatch_inhibits_current_projection(work_rows, attempt_state):
+    db, _, _, binding = work_rows
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        attempts = [dict(item) for item in run["attempts"]]
+        attempts[-1]["state"] = attempt_state
+        run["attempts"] = attempts
+        value["repository_run"] = run
+        job.resolved = value
+
+    cancelled = _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert job.cancel_requested is True
+        assert job.status == "running"
+        assert job.resolved["repository_run"]["attempts"][-1]["state"] == attempt_state
+        projection = job.resolved["repository_run"]["program_ledger_projections_v1"][0]
+        assert (projection["intent_state"], projection["reservation_state"],
+                projection["slot_state"]) == ("unknown", "unknown", "unknown")
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "unknown"
+        assert session.scalar(select(tables["program_call_intents"].c.state)) == "unknown"
+        assert session.scalar(select(tables["program_slots"].c.state)) == "unknown"
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        assert (gate["mode"], gate["revision"]) == ("inhibited", 1)
+        binding_row = session.execute(select(binding)).mappings().one()
+        assert binding_row["projection_revision"] == 2
+        assert binding_row["attempt_id"] == "job-1"
+    assert cancelled.cancel_requested is True
+
+
+def test_cancel_with_no_projection_preserves_running_job_behavior(work_rows):
+    db, _, _, binding = work_rows
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.execute(binding.delete().where(binding.c.scope_id == "scope", binding.c.call_id == "call"))
+        session.execute(tables["program_call_intents"].delete().where(
+            tables["program_call_intents"].c.scope_id == "scope",
+            tables["program_call_intents"].c.call_id == "call"))
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        run["program_ledger_projections_v1"] = []
+        value["repository_run"] = run
+        job.resolved = value
+
+    cancelled = _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert cancelled.cancel_requested is True
+        assert job.cancel_requested is True and job.status == "running"
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "reserved"
+        assert session.scalar(select(tables["program_slots"].c.state)) == "held"
+        assert job.resolved["repository_run"]["attempts"][-1]["state"] == "running"
+
+
+def test_cancel_legacy_json_marker_text_is_not_an_orphan_projection(work_rows):
+    db, _, _, binding = work_rows
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.execute(binding.delete().where(binding.c.work_job_id == "job"))
+        session.execute(tables["program_call_intents"].delete().where(
+            tables["program_call_intents"].c.work_job_id == "job"))
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        value.pop("repository_run")
+        value["note"] = "program_ledger_projections_v1 appears here as ordinary text"
+        job.resolved = value
+
+    cancelled = _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert cancelled.cancel_requested is True
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert job.status == "running" and job.cancel_requested is True
+
+
+def test_cancel_missing_attempt_id_checks_all_job_bindings(work_rows):
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        run["attempts"] = []
+        run["program_ledger_projections_v1"] = []
+        value["repository_run"] = run
+        job.resolved = value
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_projection_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert job.status == "running" and job.cancel_requested is True
+        assert session.scalar(select(Base.metadata.tables["program_reservations"].c.state)) == "reserved"
+
+
+@pytest.mark.parametrize("drift", ["status", "attempts", "malformed_attempts"])
+def test_cancel_locked_job_snapshot_change_falls_back_without_inhibition(work_rows, monkeypatch, drift):
+    db, _, _, _ = work_rows
+    import sovite.work_projection as work_projection
+
+    original = work_projection.lock_work_projection_set
+
+    def change_status_after_projection_locks(session, projections):
+        original(session, projections)
+        job = session.get(Job, "job")
+        if drift == "status":
+            job.status = "queued"
+        elif drift == "attempts":
+            value = dict(job.resolved)
+            run = dict(value["repository_run"])
+            attempts = [dict(item) for item in run["attempts"]]
+            attempts[-1]["state"] = "awaiting_activation"
+            run["attempts"] = attempts
+            value["repository_run"] = run
+            job.resolved = value
+        else:
+            value = dict(job.resolved)
+            run = dict(value["repository_run"])
+            run["attempts"] = {"invalid": "not-a-list"}
+            value["repository_run"] = run
+            job.resolved = value
+
+    monkeypatch.setattr(work_projection, "lock_work_projection_set", change_status_after_projection_locks)
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_projection_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        # The injected drift shares the failed owner transaction and is rolled
+        # back; the durable fallback records only the cancel request.
+        assert job.status == "running" and job.cancel_requested is True
+        assert session.scalar(select(Base.metadata.tables["program_reservations"].c.state)) == "reserved"
+
+
+def test_cancel_after_worker_running_persist_inhibits_same_projection(work_rows, monkeypatch):
+    db, _, _, _ = work_rows
+    import sovite.work_projection as work_projection
+
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        attempts = [dict(item) for item in run["attempts"]]
+        attempts[-1]["state"] = "preparing"
+        run["attempts"] = attempts
+        value["repository_run"] = run
+        job.resolved = value
+
+    original = work_projection.lock_work_projection_set
+
+    def worker_wins_before_job_reread(session, projections):
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        attempts = [dict(item) for item in run["attempts"]]
+        attempts[-1]["state"] = "running"
+        run["attempts"] = attempts
+        value["repository_run"] = run
+        job.resolved = value
+        original(session, projections)
+
+    monkeypatch.setattr(work_projection, "lock_work_projection_set", worker_wins_before_job_reread)
+    cancelled = _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert cancelled.cancel_requested is True
+        assert job.cancel_requested is True and job.status == "running"
+        assert job.resolved["repository_run"]["attempts"][-1]["state"] == "running"
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "unknown"
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        assert gate["mode"] == "inhibited"
+
+
+def test_cancel_malformed_sqlite_job_json_is_explicitly_unavailable(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("PostgreSQL JSON columns reject syntactically invalid JSON")
+    with db.sessions.begin() as session:
+        session.execute(text("UPDATE jobs SET resolved = :raw WHERE id = :job_id"),
+                        {"raw": "{malformed", "job_id": "job"})
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_owner_state_unavailable"
+    with db.sessions() as session:
+        assert not session.execute(text(
+            "SELECT cancel_requested FROM jobs WHERE id = 'job'"
+        )).scalar_one()
+
+
+def test_cancel_repeat_does_not_duplicate_audit_or_projection_revision(work_rows):
+    db, _, _, binding = work_rows
+    tables = Base.metadata.tables
+    platform = _platform_for_projection_test(db)
+    platform.cancel("job", actor="operator")
+    with db.sessions() as session:
+        audit_before = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+        projection_before = session.execute(select(binding.c.projection_revision)).scalar_one()
+        gate_before = session.execute(select(tables["program_gate_state"].c.revision)).scalar_one()
+    platform.cancel("job", actor="operator")
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audit_before
+        assert session.execute(select(binding.c.projection_revision)).scalar_one() == projection_before
+        assert session.execute(select(tables["program_gate_state"].c.revision)).scalar_one() == gate_before
+        assert job.cancel_requested is True and job.status == "running"
+
+
+def test_cancel_projection_mismatch_commits_request_but_not_inhibition(work_rows):
+    db, _, _, _ = work_rows
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        run["program_ledger_projections_v1"] = []
+        value["repository_run"] = run
+        job.resolved = value
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_projection_unavailable"
+    assert exc_info.value.status == 503
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert job.cancel_requested is True and job.status == "running"
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "reserved"
+        assert session.scalar(select(tables["program_slots"].c.state)) == "held"
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == 2
+
+
+def test_cancel_queued_malformed_active_join_only_records_request(work_rows):
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        session.execute(update(Job).where(Job.id == "job").values(status="queued"))
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_projection_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert job.status == "queued" and job.cancel_requested is True
+        assert session.scalar(select(Base.metadata.tables["program_reservations"].c.state)) == "reserved"
+
+
+def test_cancel_invalid_schema_metadata_fails_closed(work_rows):
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        session.execute(update(MetadataRow).where(MetadataRow.key == "schema_version").values(
+            value={"version": "10"}))
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_owner_state_unavailable"
+    with db.sessions() as session:
+        assert session.get(Job, "job").cancel_requested is False
+
+
+def test_cancel_known_settled_rows_only_inhibits_gate(work_rows):
+    db, _, _, binding = work_rows
+    payload = _settle_synthetic_call(work_rows)
+    tables = Base.metadata.tables
+
+    _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert job.cancel_requested is True
+        current = job.resolved["repository_run"]["program_ledger_projections_v1"][0]
+        assert current == payload
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "settled"
+        assert session.scalar(select(tables["program_call_intents"].c.state)) == "known"
+        assert session.scalar(select(tables["program_slots"].c.state)) == "released"
+        assert session.scalar(select(tables["program_call_receipts"].c.receipt_id)) == "receipt"
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        assert (gate["mode"], gate["revision"]) == ("inhibited", 1)
+        binding_row = session.execute(select(binding)).mappings().one()
+        assert binding_row["projection_revision"] == 1
+
+
+def test_cancel_updates_all_current_projection_calls_atomically(work_rows):
+    db, _, _, _ = work_rows
+    _add_second_projection_scope(work_rows)
+    tables = Base.metadata.tables
+
+    _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    with db.sessions() as session:
+        reservations = session.scalars(select(tables["program_reservations"].c.state).order_by(
+            tables["program_reservations"].c.call_id)).all()
+        job = session.get(Job, "job")
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+    assert reservations == ["unknown", "unknown"]
+    assert [item["reservation_state"] for item in
+            job.resolved["repository_run"]["program_ledger_projections_v1"]] == ["unknown", "unknown"]
+    assert gate["mode"] == "inhibited"
+
+
+def test_cancel_late_revision_failure_rolls_back_every_projection_call(work_rows):
+    db, _, _, binding = work_rows
+    _add_second_projection_scope(work_rows)
+    tables = Base.metadata.tables
+    maximum = str((1 << 63) - 1)
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        value = dict(job.resolved)
+        run = dict(value["repository_run"])
+        entries = [dict(entry) for entry in run["program_ledger_projections_v1"]]
+        second = dict(entries[1], projection_revision=maximum)
+        entries[1] = second
+        run["program_ledger_projections_v1"] = entries
+        value["repository_run"] = run
+        job.resolved = value
+        session.execute(update(binding).where(binding.c.call_id == "call-z").values(
+            projection_revision=int(maximum), projection_digest=projection_digest(second)))
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_projection_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        states = session.scalars(select(tables["program_reservations"].c.state).order_by(
+            tables["program_reservations"].c.call_id)).all()
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        assert job.cancel_requested is True
+        assert states == ["reserved", "reserved"]
+        assert gate["mode"] == "disabled"
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == 2
+
+
+def test_cancel_stale_lease_records_request_without_projection_mutation(work_rows):
+    db, _, _, _ = work_rows
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.execute(update(tables["worker_execution_leases"]).where(
+            tables["worker_execution_leases"].c.job_id == "job").values(lease_until=0))
+        session.execute(update(Job).where(Job.id == "job").values(lease_until=0))
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_projection_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert job.cancel_requested is True
+        assert session.scalar(select(tables["program_reservations"].c.state)) == "reserved"
+        assert job.resolved["repository_run"]["attempts"][-1]["state"] == "running"
+
+
+def test_cancel_audit_verification_failure_does_not_persist_request(work_rows):
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        session.execute(update(MetadataRow).where(MetadataRow.key == "audit_head").values(
+            value={"sequence": 1, "hash": "0" * 64}))
+
+    with pytest.raises(PlatformError) as exc_info:
+        _platform_for_projection_test(db).cancel("job", actor="operator")
+
+    assert exc_info.value.code == "cancel_owner_state_unavailable"
+    with db.sessions() as session:
+        assert session.get(Job, "job").cancel_requested is False
+
+
+def test_repository_running_persist_rejects_prior_cancel_request(work_rows, tmp_path):
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        session.execute(update(Job).where(Job.id == "job").values(cancel_requested=True))
+    executor = RepositoryRunAttemptExecutor(
+        type("Platform", (), {"db": db})(), object(), tmp_path, lambda *args, **kwargs: None
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        executor._persist(
+            "job", "2" * 32,
+            lambda run: run["attempts"][-1].update(state="running"),
+            reject_cancel_requested=True,
+        )
+
+    assert getattr(exc_info.value, "code", None) == "execution_cancel_requested"
+    with db.sessions() as session:
         assert session.get(Job, "job").resolved["repository_run"]["attempts"][-1]["state"] == "running"
