@@ -134,9 +134,21 @@ def _prepare_in_transaction(database, session, tables, *, scope_id, subject_id, 
         raise ValueError("census snapshot mismatch")
     subject_ids = sorted({subject_id, *(link.subject_id for link in links)})
     registry_rows, subject_rows = {}, {}
+    discovered_registry = {}
     for candidate in subject_ids:
+        row = session.execute(select(registry_t).where(registry_t.c.scope_id == scope_id,
+                              registry_t.c.subject_id == candidate)).mappings().one_or_none()
+        if row is None or not _bounded_id(row.purpose):
+            raise ValueError("subject registry unavailable")
+        discovered_registry[candidate] = row
+    registry_order = sorted(subject_ids, key=lambda candidate:
+                            (discovered_registry[candidate].purpose.encode("utf-8"), candidate.encode("utf-8")))
+    for candidate in registry_order:
+        discovered = discovered_registry[candidate]
         registry_rows[candidate] = _locked(session, registry_t, registry_t.c.scope_id == scope_id,
-                                            registry_t.c.subject_id == candidate)
+            registry_t.c.purpose == discovered.purpose, registry_t.c.subject_id == candidate)
+        if registry_rows[candidate] != discovered:
+            raise ValueError("subject registry changed")
     for candidate in subject_ids:
         subject_rows[candidate] = _locked(session, subject_t, subject_t.c.scope_id == scope_id,
                                           subject_t.c.subject_id == candidate)
