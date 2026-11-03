@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import cast, inspect, select, text, Text
+from sqlalchemy import Text, cast, inspect, select, text
 
 from .adapters import RuntimeFailure
 from .authority import check_execution_binding, issue_execution, refresh_execution, revoke_execution, sweep_terminal_authority
@@ -23,6 +23,7 @@ from .service import Platform, PlatformError, TERMINAL
 
 class _HandBackOwnerUnavailable(RuntimeError):
     """A complete Job/Work owner snapshot could not be established."""
+
 
 # Arbitrary constant naming the PostgreSQL advisory lock that serializes claims.
 CLAIM_LOCK = 0x50617669746531
@@ -712,13 +713,15 @@ class LeaseService:
                     version = database._version(connection)
                     if type(version) is not int or not 1 <= version <= database.schema_version:
                         raise _HandBackOwnerUnavailable()
-                    expected_tables = [
-                        table for migration, tables in MIGRATIONS
-                        if migration <= version for table in tables
-                    ]
+                    expected_by_name = {
+                        table.name: table for migration, migrated_tables in MIGRATIONS
+                        if migration <= version for table in migrated_tables
+                    }
+                    expected_tables = list(expected_by_name.values())
                     later_table_names = {
-                        table.name for migration, tables in MIGRATIONS
-                        if migration > version for table in tables
+                        table.name for migration, migrated_tables in MIGRATIONS
+                        if migration > version for table in migrated_tables
+                        if table.name not in expected_by_name
                     }
                     physical_names = set(inspect(connection).get_table_names(schema=database.schema))
                     if (any(table.name not in physical_names for table in expected_tables)
