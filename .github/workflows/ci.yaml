@@ -41,6 +41,38 @@ jobs:
       - run: pip install -r requirements.lock && pip install -e '.[test,retention]'
       - run: python -m pytest tests/test_repository_candidate_retention.py tests/test_repository_repairs.py tests/test_repository_repair_feedback_context.py tests/test_repository_currentness_retention.py tests/test_repository_recovery_retention.py tests/test_repository_go_quota.py tests/test_repository_recovery_release.py tests/test_repository_recovery_release_retention.py tests/test_repository_native_activation.py tests/test_repository_worker_only.py -q
 
+  work-projection-postgresql:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_PASSWORD: projection-fixture-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 12
+    env:
+      SOVITE_TEST_POSTGRES_URL: postgresql+psycopg://sovite_resource_test:projection-fixture-only@127.0.0.1:5432/sovite_resource_test
+      SOVITE_TEST_POSTGRES_CI: '1'
+      SOVITE_WORK_PROJECTION_REQUIRE_PG: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.lock && pip install -e '.[test]'
+      - name: Create unprivileged disposable Work projection owner
+        run: |
+          python - <<'PYSETUP'
+          import psycopg
+          with psycopg.connect('host=127.0.0.1 port=5432 dbname=postgres user=postgres password=projection-fixture-only',autocommit=True) as connection:
+              connection.execute("CREATE ROLE sovite_resource_test LOGIN PASSWORD 'projection-fixture-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
+              connection.execute("CREATE DATABASE sovite_resource_test OWNER sovite_resource_test")
+              connection.execute("COMMENT ON DATABASE sovite_resource_test IS 'sovite:disposable-work-projection-test'")
+          PYSETUP
+      - run: python -m pytest tests/test_work_projection_rows.py -q
+
   resource-targets:
     runs-on: ubuntu-latest
     services:
@@ -58,7 +90,6 @@ jobs:
       SOVITE_SCHEMA_REQUIRE_PG: '1'
       SOVITE_COLLECTION_SCHEMA_REQUIRE_PG: '1'
       SOVITE_LEDGER_SCHEMA_REQUIRE_PG: '1'
-      SOVITE_TEST_POSTGRES_CI: '1'
       SOVITE_CENSUS_REQUIRE_PG: '1'
       SOVITE_COLLECTION_OWNER_REQUIRE_PG: '1'
       SOVITE_TEST_POSTGRES_ROLE_ADMIN_URL: postgresql+psycopg://postgres:resource-fixture-only@127.0.0.1:5432/sovite_resource_test
@@ -86,7 +117,6 @@ jobs:
           tests/test_schema_verification.py tests/test_collection_schema.py
           tests/test_program_ledger_migration.py tests/test_program_ledger_v8_oracle.py
           tests/test_program_ledger_transactions.py tests/test_program_ledger_unavailable.py
-          tests/test_work_projection_rows.py
           tests/test_census_report.py
           tests/test_collection_identity.py tests/test_collection_transaction.py
           tests/test_collection_owner_cancel.py tests/test_collection_owner_lifecycle.py

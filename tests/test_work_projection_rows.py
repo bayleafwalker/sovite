@@ -66,6 +66,8 @@ def work_rows(request, tmp_path):
                 pytest.fail("Work projection tests refuse inherited libpq PG environment variables")
             value = os.environ.get("SOVITE_TEST_POSTGRES_URL")
             if not value:
+                if os.environ.get("SOVITE_WORK_PROJECTION_REQUIRE_PG") == "1":
+                    pytest.fail("SOVITE_TEST_POSTGRES_URL is required for Work projection PostgreSQL tests")
                 pytest.skip("local isolated PostgreSQL test database not supplied")
             url = _local_test_url(value)
             admin = create_engine(url)
@@ -77,8 +79,24 @@ def work_rows(request, tmp_path):
                 ).scalar_one()
                 if is_superuser:
                     pytest.fail("Work projection tests refuse PostgreSQL superuser roles")
-                if connection.exec_driver_sql("SELECT inet_server_addr() IS NULL").scalar_one() is not True:
-                    pytest.fail("Work projection tests require a Unix socket connection")
+                server_uses_socket = connection.exec_driver_sql(
+                    "SELECT inet_server_addr() IS NULL"
+                ).scalar_one()
+                ci_service_target = (
+                    os.environ.get("SOVITE_TEST_POSTGRES_CI") == "1"
+                    and url.host == "127.0.0.1" and url.port == 5432
+                    and url.username == "sovite_resource_test"
+                    and url.database == "sovite_resource_test"
+                )
+                query_hosts = url.query.get("host", ())
+                if isinstance(query_hosts, str):
+                    query_hosts = (query_hosts,)
+                socket_target = (not url.host and len(query_hosts) == 1
+                                 and query_hosts[0].startswith("/tmp/"))
+                if (not socket_target and not ci_service_target
+                        or socket_target and server_uses_socket is not True
+                        or ci_service_target and server_uses_socket is not False):
+                    pytest.fail("Work projection PostgreSQL transport does not match the approved local fixture")
                 if connection.exec_driver_sql("SELECT current_database()").scalar_one() != url.database:
                     pytest.fail("Work projection tests require the explicitly supplied database")
                 connection.exec_driver_sql(f'CREATE SCHEMA "{namespace}"')
