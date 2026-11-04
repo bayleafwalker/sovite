@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Text, and_, cast, func, inspect, or_, select, text
+from sqlalchemy import JSON, Text, and_, case, cast, func, inspect, literal, or_, select, text
 
 from .adapters import RuntimeFailure
 from .authority import check_execution_binding, issue_execution, refresh_execution, revoke_execution, sweep_terminal_authority
@@ -339,15 +339,37 @@ class LeaseService:
         value = Job.resolved["compute"]["id"]
         dialect = session.get_bind().dialect.name
         if dialect == "sqlite":
+            root_members = func.json_each(Job.resolved).table_valued("key", "value")
+            compute_members = func.json_each(Job.resolved, "$.compute").table_valued("key", "value")
+            root_count = select(func.count()).select_from(root_members).where(
+                root_members.c.key == "compute").correlate(Job).scalar_subquery()
+            id_count = select(func.count()).select_from(compute_members).where(
+                compute_members.c.key == "id").correlate(Job).scalar_subquery()
             kind = func.json_type(Job.resolved, "$.compute.id")
-            string_kind = "text"
-        elif dialect == "postgresql":
+            in_scope = or_(root_count != 1, id_count != 1, kind.is_(None),
+                           kind != "text", value.as_string() == compute_id)
+            if self.repository_worker_only:
+                from .repository_runs import RUN_SCHEMA
+                in_scope = and_(Job.resolved["repository_run"]["schema_version"].as_string() == RUN_SCHEMA,
+                                in_scope)
+            # SQLite CASE is lazy; malformed JSON reaches candidate validation.
+            return query.where(case((func.json_valid(Job.resolved) == 0, True), else_=in_scope))
+        if dialect == "postgresql":
+            empty_object = cast(literal("{}"), JSON)
+            root_object = case((func.json_typeof(Job.resolved) == "object", Job.resolved), else_=empty_object)
+            compute_object = case((func.json_typeof(Job.resolved["compute"]) == "object",
+                                   Job.resolved["compute"]), else_=empty_object)
+            root_members = func.json_each(root_object).table_valued("key", "value")
+            compute_members = func.json_each(compute_object).table_valued("key", "value")
+            root_count = select(func.count()).select_from(root_members).where(
+                root_members.c.key == "compute").correlate(Job).scalar_subquery()
+            id_count = select(func.count()).select_from(compute_members).where(
+                compute_members.c.key == "id").correlate(Job).scalar_subquery()
             kind = func.json_typeof(value)
-            string_kind = "string"
-        else:
-            raise RuntimeError("unsupported recovery database")
-        return self._eligible_query(query).where(or_(
-            kind.is_(None), kind != string_kind, value.as_string() == compute_id))
+            return self._eligible_query(query).where(or_(
+                root_count != 1, id_count != 1, kind.is_(None),
+                kind != "string", value.as_string() == compute_id))
+        raise RuntimeError("unsupported recovery database")
 
     def _guard_fresh_reservation(self, session, compute_id, *, request_recovery=False):
         from .recovery_cursor import peek_cursor
@@ -457,9 +479,17 @@ class LeaseService:
             # Candidate row locks can wait too; base each new reservation on
             # owner time observed after those locks have been acquired.
             now = time.time()
+            from .work_projection import WorkProjectionError, _raw_job_object
             running = Counter()
-            for active_job in session.scalars(select(Job).where(Job.status == "running")):
-                running[active_job.resolved.get("model", {}).get("id")] += 1
+            for active_raw in session.scalars(select(cast(Job.resolved, Text)).where(Job.status == "running")):
+                try:
+                    active_root = _raw_job_object(active_raw)
+                except (WorkProjectionError, TypeError, ValueError, RecursionError):
+                    continue
+                active_model = active_root.get("model")
+                model_id = active_model.get("id") if type(active_model) is dict else None
+                if type(model_id) is str:
+                    running[model_id] += 1
             incompatible_profile_job = False
             for job in candidates:
                 if job.resolved.get("compute", {}).get("id") != principal.compute_id:
@@ -1594,7 +1624,8 @@ class LeaseService:
                         if error.code != "owner_unavailable":
                             raise
                         raise _HandBackOwnerUnavailable() from None
-                    if (row.resolved.get("compute", {}).get("id") != self.platform.settings.compute_id
+                    compute = row.resolved.get("compute") if type(row.resolved) is dict else None
+                    if (type(compute) is not dict or compute.get("id") != self.platform.settings.compute_id
                             or type(row.lease_until) not in (int, float)
                             or not math.isfinite(row.lease_until)
                             or row.lease_until != lease.lease_until or row.lease_until >= now
@@ -1657,12 +1688,19 @@ class LeaseService:
                         row.status, row.error_code = "cancelled", "cancelled"
                     elif lease.phase == "reserved":
                         row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
-                    elif projected_history or not replay_safe(row.resolved):
-                        row.status, row.error_code = "blocked", "execution_uncertain"
-                    elif row.attempts >= int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts)):
-                        row.status, row.error_code = "failed", "lease_recovery_exhausted"
                     else:
-                        row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
+                        try:
+                            safe = False if projected_history else replay_safe(row.resolved)
+                            max_attempts = (int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts))
+                                            if safe else None)
+                        except (KeyError, TypeError, AttributeError, ValueError, OverflowError):
+                            raise _HandBackOwnerUnavailable() from None
+                        if not safe:
+                            row.status, row.error_code = "blocked", "execution_uncertain"
+                        elif row.attempts >= max_attempts:
+                            row.status, row.error_code = "failed", "lease_recovery_exhausted"
+                        else:
+                            row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
                     row.lease_owner, row.lease_until, row.updated_at = None, None, now
                     lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
                     revoke_execution(session, row.id)

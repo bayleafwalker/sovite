@@ -118,7 +118,13 @@ def test_cancelled_expired_work_still_holds_obligation(work_rows, monkeypatch):
         assert reservation.state == "unknown"
 
 
-def test_sweep_invalid_candidate_does_not_hide_later_valid_work(work_rows, monkeypatch):
+@pytest.mark.parametrize("compute_container", [
+    None, "malformed-scalar", 7, False, [], {"id": 17}, {},
+], ids=["null", "string", "number", "boolean", "array", "object-id-number", "object-empty"])
+def test_sweep_malformed_compute_container_does_not_hide_later_valid_work(
+    work_rows, monkeypatch, compute_container,
+):
+    """An unusable stored compute value is candidate-local; the later owner still closes."""
     import sovite.lease_service as lease_module
     db, _, _, _ = work_rows
     with db.sessions.begin() as session:
@@ -127,7 +133,8 @@ def test_sweep_invalid_candidate_does_not_hide_later_valid_work(work_rows, monke
         expiry = session.get(WorkerExecutionLease, "job").lease_until
         session.add(Job(id="aaa", receipt="other", idempotency_key="other",
                         request_digest="x", caller="fixture", grant_id="fixture",
-                        generation=job.generation, resolved={"repository_run": "malformed"},
+                        generation=job.generation,
+                        resolved={"compute": compute_container, "repository_run": "malformed"},
                         task="synthetic", status="running", attempts=1,
                         lease_owner=job.lease_owner, lease_until=expiry))
         session.flush()
@@ -139,9 +146,65 @@ def test_sweep_invalid_candidate_does_not_hide_later_valid_work(work_rows, monke
     service = LeaseService(SimpleNamespace(db=db, settings=SimpleNamespace(compute_id="fixture", max_attempts=3)),
                            execution_owner_key(workload_id="workload", instance_id="instance"), {})
     counts = service.recover_expired()
-    assert counts["invalid"] == 1 and counts["retired"] == 1
+    assert counts == {"examined": 2, "retired": 1, "changed": 0, "busy": 0, "invalid": 1}
     with db.sessions() as session:
         assert session.get(Job, "aaa").status == "running"
+        assert session.get(Job, "job").status == "blocked"
+
+
+@pytest.mark.parametrize(("field", "shape"), [
+    ("harness", "missing"), ("harness", "null"), ("harness", "scalar"),
+    ("grant", "missing"), ("grant", "null"), ("grant", "scalar"),
+], ids=["harness-missing", "harness-null", "harness-scalar",
+       "grant-missing", "grant-null", "grant-scalar"])
+def test_sweep_malformed_replay_fields_with_valid_lease_does_not_hide_later_work(
+    work_rows, monkeypatch, field, shape,
+):
+    """Malformed stored harness/grant values are local refusals after lease validation."""
+    import sovite.lease_service as lease_module
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        later = session.get(Job, "job")
+        later.resolved = {**later.resolved, "compute": {"id": "fixture"}}
+        expiry = session.get(WorkerExecutionLease, "job").lease_until
+
+        resolved = {
+            "compute": {"id": "fixture"},
+            "model": {"id": "synthetic-model"},
+            "harness": {"kind": "tool-agent", "idempotent": True},
+            "grant": {"max_attempts": 3},
+            "tools": [],
+        }
+        if shape == "missing":
+            resolved.pop(field)
+        elif shape == "null":
+            resolved[field] = None
+        else:
+            resolved[field] = "malformed-scalar"
+        session.add(Job(id="aaa", receipt="malformed-replay-fields",
+                        idempotency_key=f"malformed-{field}-{shape}",
+                        request_digest="x", caller=later.caller, grant_id=later.grant_id,
+                        generation=later.generation, resolved=resolved,
+                        task="synthetic malformed replay field", status="running", attempts=1,
+                        lease_owner=later.lease_owner, lease_until=expiry))
+        session.flush()
+        session.add(WorkerExecutionLease(
+            job_id="aaa", workload_id="workload", instance_id="instance",
+            fence="2" * 32, generation=later.generation, phase="started",
+            lease_until=expiry, execution_deadline=expiry, created_at=1, updated_at=1,
+        ))
+
+    monkeypatch.setattr(lease_module.time, "time", lambda: expiry + 1)
+    monkeypatch.setattr(lease_module, "sweep_terminal_authority", lambda *_: None)
+    service = LeaseService(SimpleNamespace(db=db, settings=SimpleNamespace(
+        compute_id="fixture", max_attempts=3)),
+        execution_owner_key(workload_id="workload", instance_id="instance"), {})
+    counts = service.recover_expired()
+    assert counts == {"examined": 2, "retired": 1, "changed": 0, "busy": 0, "invalid": 1}
+    with db.sessions() as session:
+        malformed = session.get(Job, "aaa")
+        assert malformed.status == "running" and malformed.lease_owner is not None
+        assert session.get(WorkerExecutionLease, "aaa").phase == "started"
         assert session.get(Job, "job").status == "blocked"
 
 

@@ -849,3 +849,218 @@ def test_duplicate_raw_cursor_keys_fail_closed_in_peek_cas_reaper_and_reserve(
         ), {"key": key}).scalar_one()
         assert still_raw.count(duplicate_key) == 2
     assert queued.status == "queued"
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+def test_duplicate_compute_keys_are_scanned_but_explicit_foreign_compute_is_not(owner):
+    """Duplicate root/nested keys cannot make a local candidate disappear."""
+    local_id = owner.principal.compute_id
+    duplicate_rows = [
+        ("root-foreign-local", f'{{"compute":{{"id":"foreign"}},"compute":{{"id":"{local_id}"}},"model":{{"id":"m"}}}}'),
+        ("root-local-foreign", f'{{"compute":{{"id":"{local_id}"}},"compute":{{"id":"foreign"}},"model":{{"id":"m"}}}}'),
+        ("nested-foreign-local", f'{{"compute":{{"id":"foreign","id":"{local_id}"}},"model":{{"id":"m"}}}}'),
+        ("nested-local-foreign", f'{{"compute":{{"id":"{local_id}","id":"foreign"}},"model":{{"id":"m"}}}}'),
+    ]
+    now = owner.clock[0]
+    stored = {}
+    for label, raw in duplicate_rows:
+        job = submit(owner, key=f"duplicate-compute-{label}")
+        with owner.platform.db.sessions.begin() as session:
+            session.execute(update(Job).where(Job.id == job.id).values(
+                status="running", lease_owner="expired-owner", lease_until=now - 1,
+                created_at=now - 100, updated_at=now - 1,
+                resolved={"compute": {"id": local_id}, "model": {"id": "m"}},
+            ))
+        stored[job.id] = raw
+
+    foreign = submit(owner, key="duplicate-compute-foreign-valid")
+    with owner.platform.db.sessions.begin() as session:
+        session.execute(update(Job).where(Job.id == foreign.id).values(
+            status="running", lease_owner="foreign-owner", lease_until=now - 1,
+            created_at=now - 100, updated_at=now - 1,
+            resolved={"compute": {"id": "another-valid-compute"},
+                      "model": {"id": "foreign-model"}},
+        ))
+
+    db = owner.platform.db
+    jobs_table = '"jobs"' if db.schema is None else f'"{db.schema}"."jobs"'
+    for job_id, raw in stored.items():
+        with db.sessions.begin() as session:
+            if db.engine.dialect.name == "postgresql":
+                session.execute(text(
+                    f"UPDATE {jobs_table} SET resolved = CAST(:raw AS JSON) WHERE id = :job_id"
+                ), {"raw": raw, "job_id": job_id})
+            else:
+                session.execute(text(
+                    f"UPDATE {jobs_table} SET resolved = :raw WHERE id = :job_id"
+                ), {"raw": raw, "job_id": job_id})
+
+    counts = owner.service.recover_expired()
+    assert counts == {"examined": 4, "retired": 0, "changed": 0, "busy": 0, "invalid": 4}
+    with db.sessions() as session:
+        cursor = peek_cursor(session, local_id, False)
+        assert cursor.phase == "idle"
+        for job_id, expected_raw in stored.items():
+            assert session.get(Job, job_id).status == "running"
+            raw_stored = session.execute(text(
+                f"SELECT CAST(resolved AS TEXT) FROM {jobs_table} WHERE id = :job_id"
+            ), {"job_id": job_id}).scalar_one()
+            assert raw_stored == expected_raw
+        assert session.get(Job, foreign.id).status == "running"
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+def test_fresh_pull_retries_after_capped_expired_owner_cycle_and_ignores_bad_running_model(
+    owner, monkeypatch,
+):
+    """A new pull resumes cap progress and reserves after ignoring an unknown model."""
+    import time as wall_time
+    from dataclasses import replace
+    from test_worker_remote_boundary import admit_agent_http_owner, TOKEN
+    from sovite.api import create_app
+    from sovite.execution_api import Pull
+
+    admit_agent_http_owner(owner)
+    owner.clock[0] = max(owner.clock[0], wall_time.time() + 1)
+    queued = owner.platform.submit(
+        "native-code-review", "fresh pull after bounded recovery", "operations",
+        "submit-fresh-pull-after-recovery", input_class="C2",
+    )
+    now = owner.clock[0]
+    expired_ids = [f"a-expired-pull-{index:04d}" for index in range(1001)]
+    with owner.platform.db.sessions.begin() as session:
+        for index, job_id in enumerate(expired_ids):
+            session.add(Job(
+                id=job_id, receipt=f"pull-expired-receipt-{index:04d}",
+                idempotency_key=f"pull-expired-key-{index:04d}",
+                request_digest="d" * 80, caller=queued.caller, grant_id=queued.grant_id,
+                generation=queued.generation,
+                resolved={"compute": {"id": owner.principal.compute_id},
+                          "model": None if index == 0 else {"id": "old-model"}},
+                task="synthetic expired row for fresh pull", status="running",
+                lease_owner="expired-owner", lease_until=now - 1,
+                created_at=now - 100, updated_at=now - 1, attempts=1,
+            ))
+
+    # The cap and persisted cursor are exercised through the real reserve and
+    # pull paths; closure is held at candidate scope so this case focuses on
+    # public denial/retry, fair cursor progress, and malformed-model capacity.
+    closed = []
+    monkeypatch.setattr(LeaseService, "claim",
+                        lambda *_args, **_kwargs: pytest.fail("local claim must not be used"))
+    monkeypatch.setattr(LeaseService, "_close_owner",
+                        lambda _service, job_id, *, recovery_session: closed.append(job_id) or False)
+    settings = replace(owner.platform.settings, execution_tokens={"actual-workload": TOKEN})
+    app = create_app(settings=settings, platform=owner.platform)
+    pull = next(route.endpoint for route in app.routes
+                if getattr(route, "path", None) == "/internal/execution/v1/pull")
+    first_body = {"instance_id": owner.instance, "operation_id": "fresh-pull-first-pass"}
+    with pytest.raises(PlatformError) as first_error:
+        pull(Pull(**first_body), principal=owner.principal)
+    assert first_error.value.code == "owner_unavailable"
+    assert len(closed) == 1000
+    with owner_transaction(owner.platform.db) as session:
+        cursor = read_cursor(session, owner.principal.compute_id, False)
+        assert cursor.phase == "forward" and cursor.last_job_id == expired_ids[999]
+        assert session.get(Job, queued.id).status == "queued"
+        assert session.scalar(select(WorkerExecutionOperation).where(
+            WorkerExecutionOperation.operation_id == first_body["operation_id"])) is None
+
+    retry_body = {"instance_id": owner.instance, "operation_id": "fresh-pull-retry-pass"}
+    reservation = pull(Pull(**retry_body), principal=owner.principal)
+    assert reservation["state"] == "reserved"
+    assert reservation["job"]["job_id"] == queued.id
+    assert len(closed) == 1001
+    with owner.platform.db.sessions() as session:
+        cursor = peek_cursor(session, owner.principal.compute_id, False)
+        assert cursor.phase == "idle" and cursor.last_job_id is None
+        assert session.get(Job, queued.id).status == "running"
+        assert session.get(Job, expired_ids[0]).status == "running"
+        operation = session.scalar(select(WorkerExecutionOperation).where(
+            WorkerExecutionOperation.operation_id == retry_body["operation_id"]))
+        assert operation is not None and operation.result["state"] == "reserved"
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+@pytest.mark.parametrize("model_value", [None, "malformed-model", 7, [], {}],
+                         ids=["null", "string", "number", "array", "object-empty"])
+def test_direct_reserve_counts_malformed_running_model_as_unknown_and_reserves_later_job(
+    owner, model_value,
+):
+    import time as wall_time
+    owner.clock[0] = max(owner.clock[0], wall_time.time() + 1)
+    expired = submit(owner, key=f"bad-running-model-{type(model_value).__name__}-{model_value!r}")
+    now = owner.clock[0]
+    with owner.platform.db.sessions.begin() as session:
+        session.execute(update(Job).where(Job.id == expired.id).values(
+            status="running", lease_owner="expired-owner", lease_until=now - 1,
+            created_at=now - 100, updated_at=now - 1,
+            resolved={"compute": {"id": owner.principal.compute_id}, "model": model_value},
+        ))
+    queued = submit(owner, key=f"queued-after-bad-model-{type(model_value).__name__}")
+    counts = []
+    original_recover = owner.service.recover_expired
+
+    def observe_recovery():
+        result = original_recover()
+        counts.append(result)
+        return result
+
+    owner.service.recover_expired = observe_recovery
+    result = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                   operation_id=f"direct-bad-model-{type(model_value).__name__}")
+    assert result["state"] == "reserved" and result["job"]["job_id"] == queued.id
+    assert counts and counts[0]["examined"] == 1 and counts[0]["invalid"] == 1
+    with owner.platform.db.sessions() as session:
+        assert session.get(Job, expired.id).status == "running"
+        assert session.get(Job, queued.id).status == "running"
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+@pytest.mark.parametrize("database", ["sqlite"], indirect=True)
+def test_invalid_raw_running_job_json_is_candidate_local_and_does_not_block_reserve(
+    owner, database, monkeypatch,
+):
+    """Malformed raw SQLite JSON is isolated while a later queued job reserves."""
+    import time as wall_time
+    assert owner.platform.db is database
+    owner.clock[0] = max(owner.clock[0], wall_time.time() + 1)
+    now = owner.clock[0]
+    expired = submit(owner, key="invalid-raw-running-json")
+    queued = submit(owner, key="queue-after-invalid-raw-json")
+    db = owner.platform.db
+    jobs_table = '"jobs"' if db.schema is None else f'"{db.schema}"."jobs"'
+    with db.sessions.begin() as session:
+        session.execute(update(Job).where(Job.id == expired.id).values(
+            status="running", lease_owner="expired-owner", lease_until=now - 1,
+            created_at=now - 100, updated_at=now - 1,
+            resolved={"compute": {"id": owner.principal.compute_id}, "model": None},
+        ))
+    raw_invalid = '{"compute":{"id":"local"},"model":'
+    with db.sessions.begin() as session:
+        session.execute(text(
+            f"UPDATE {jobs_table} SET resolved = :raw WHERE id = :job_id"
+        ), {"raw": raw_invalid, "job_id": expired.id})
+
+    recovery_results = []
+    original_recover = owner.service.recover_expired
+
+    def observe_recovery():
+        result = original_recover()
+        recovery_results.append(result)
+        return result
+
+    monkeypatch.setattr(owner.service, "recover_expired", observe_recovery)
+    result = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                   operation_id="pull-after-invalid-raw-json")
+    assert result["state"] == "reserved" and result["job"]["job_id"] == queued.id
+    assert recovery_results == [{"examined": 1, "retired": 0, "changed": 0,
+                                 "busy": 0, "invalid": 1}]
+    with db.sessions() as session:
+        cursor = peek_cursor(session, owner.principal.compute_id, False)
+        assert cursor.phase == "idle"
+        assert session.get(Job, queued.id).status == "running"
+        raw_stored, status = session.execute(text(
+            f"SELECT CAST(resolved AS TEXT), status FROM {jobs_table} WHERE id = :job_id"
+        ), {"job_id": expired.id}).one()
+        assert raw_stored == raw_invalid and status == "running"
