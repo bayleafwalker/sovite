@@ -17,6 +17,71 @@ from sovite.connector.helper import PilotHelper
 from sovite.connector.identity import sign
 
 
+async def _wait_for_bounded_engine_start(env, request, consumer, request_deadline, startup_budget):
+    engine_started = asyncio.create_task(env.engine.started.wait())
+    try:
+        done, _ = await asyncio.wait({engine_started, consumer}, timeout=startup_budget,
+                                     return_when=asyncio.FIRST_COMPLETED)
+        if engine_started not in done or consumer in done:
+            error = None
+            if consumer.done() and not consumer.cancelled():
+                error = consumer.exception()
+            safe_codes = {
+                'authority_unavailable', 'gateway_fenced', 'model_host_unavailable',
+                'model_host_preempted', 'model_identity_mismatch', 'model_protocol_error',
+                'permit_expired', 'deadline_exceeded', 'inference_request_denied',
+            }
+            diagnostic = {
+                'engine_started': env.engine.started.is_set(),
+                'consumer_done': consumer.done(),
+                'startup_budget_seconds': round(startup_budget, 3),
+                'consumer_error_class': type(error).__name__ if error is not None else None,
+                'consumer_error_code': error.code if isinstance(error, GatewayError)
+                    and type(error.code) is str and error.code in safe_codes else None,
+                'engine_calls': len(env.engine.calls),
+            }
+            helper_session = getattr(env.helper, 'session', None)
+            helper_phase = getattr(helper_session, 'phase', None)
+            helper_task = getattr(env.helper, 'task', None)
+            diagnostic.update({
+                'helper_closed': helper_phase == 'closed' if helper_session is not None else None,
+                'helper_active': getattr(helper_session, 'active', None) is not None
+                    if helper_session is not None else None,
+                'helper_phase': helper_phase,
+                'helper_task_done': helper_task.done() if helper_task is not None else None,
+            })
+            try:
+                with env.platform.db.sessions() as session:
+                    ledger = session.get(RequestLedger, request.id)
+                    job = session.get(Job, env.job.id)
+                    lease = session.get(WorkerExecutionLease, env.job.id)
+                now = time.time()
+                diagnostic.update({
+                    'ledger_status': ledger.status if ledger is not None else None,
+                    'ledger_outcome': ledger.outcome if ledger is not None else None,
+                    'request_seconds_left': round(request_deadline - now, 3),
+                    'job_status': job.status if job is not None else None,
+                    'cancel_requested': job.cancel_requested if job is not None else None,
+                    'lease_phase': lease.phase if lease is not None else None,
+                    'lease_fence_matches': lease.fence == env.job.execution_fence if lease is not None else None,
+                    'lease_seconds_left': round(lease.lease_until - now, 3) if lease is not None else None,
+                    'execution_seconds_left': round(lease.execution_deadline - now, 3)
+                        if lease is not None and lease.execution_deadline is not None else None,
+                })
+            except Exception as exc:
+                diagnostic['snapshot_error_class'] = type(exc).__name__
+            raise AssertionError(f'bounded pre-partition start barrier failed: {diagnostic!r}')
+    except BaseException:
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        raise
+    finally:
+        if not engine_started.done():
+            engine_started.cancel()
+        await asyncio.gather(engine_started, return_exceptions=True)
+
+
 @pytest.mark.parametrize('denial,code', [
     ('capability', 'execution_capability_invalid'), ('expired_capability', 'execution_capability_invalid'),
     ('workload', 'workload_denied'), ('fence', 'execution_fenced'), ('lease', 'execution_fenced'),
@@ -104,89 +169,53 @@ def test_LEASE_FENCED_BOUNDED_STOP_mid_stream_withdrawal_cancels_no_completion(a
             request_deadline = int(time.time()) + 25
             request = await infer(env, deadline=request_deadline)
             consumer = asyncio.create_task(consume(request))
-            startup_budget = min(10.0, request_deadline - time.time(),
-                                 env.job.lease_until - time.time(),
-                                 env.job.execution_deadline - time.time())
-            assert startup_budget > 5.0
-            engine_started = asyncio.create_task(env.engine.started.wait())
-            done, _ = await asyncio.wait({engine_started, consumer}, timeout=startup_budget,
-                                         return_when=asyncio.FIRST_COMPLETED)
-            if engine_started not in done or consumer in done:
-                error = None
-                if consumer.done() and not consumer.cancelled():
-                    error = consumer.exception()
-                safe_codes = {
-                    'authority_unavailable', 'gateway_fenced', 'model_host_unavailable',
-                    'model_host_preempted', 'model_identity_mismatch', 'model_protocol_error',
-                    'permit_expired', 'deadline_exceeded', 'inference_request_denied',
-                }
+            try:
+                startup_budget = min(10.0, request_deadline - time.time(),
+                                     env.job.lease_until - time.time(),
+                                     env.job.execution_deadline - time.time())
+                assert startup_budget > 5.0
+                await _wait_for_bounded_engine_start(env, request, consumer, request_deadline, startup_budget)
+                remaining = min(request_deadline - time.time(),
+                                env.job.lease_until - time.time(),
+                                env.job.execution_deadline - time.time())
+                assert remaining > 5.0
+                start = time.monotonic()
+                with env.platform.db.sessions.begin() as session:
+                    if withdrawal == 'lease': session.get(Job, env.job.id).lease_until = time.time() - 1
+                    elif withdrawal == 'fence': session.get(ExecutionAuthority, env.job.id).fence = 'replacement-fence'
+                    elif withdrawal == 'cancel': session.get(Job, env.job.id).cancel_requested = True
+                    elif withdrawal == 'binding': session.add(BindingState(id=env.model['id'], inhibited=True))
+                    elif withdrawal == 'generation': session.get(MetadataRow, 'active_generation').value = {'generation': 'superseded'}
+                    elif withdrawal == 'enrollment': session.get(HelperEnrollment, 'enrollment-a').revoked = True
+                if withdrawal == 'control_partition':
+                    with env.platform.db.sessions() as session:
+                        job = session.get(Job, env.job.id)
+                        lease = session.get(WorkerExecutionLease, env.job.id)
+                        assert job is not None and lease is not None
+                        now = time.time()
+                        remaining = min(request_deadline - now, lease.lease_until - now,
+                                        lease.execution_deadline - now)
+                        assert lease.fence == env.job.execution_fence
+                        assert job.lease_until == lease.lease_until
+                        assert job.status == 'running' and not job.cancel_requested
+                        assert remaining > 5.0
+                    original = env.gateway.authority.call
+                    async def partition(action, **kwargs):
+                        if action in {'renew', 'touch'}: raise GatewayError('authority_unavailable')
+                        return await original(action, **kwargs)
+                    env.gateway.authority.call = partition
+                with pytest.raises(GatewayError):
+                    await asyncio.wait_for(consumer, 5)
+                await asyncio.wait_for(env.engine.stopped.wait(), 2)
+                assert time.monotonic() - start < 5
                 with env.platform.db.sessions() as session:
                     ledger = session.get(RequestLedger, request.id)
-                    ledger_status = ledger.status if ledger is not None else None
-                    ledger_outcome = ledger.outcome if ledger is not None else None
-                    job = session.get(Job, env.job.id)
-                    lease = session.get(WorkerExecutionLease, env.job.id)
-                now = time.time()
-                diagnostic = {
-                    'consumer_done': consumer.done(),
-                    'consumer_error_class': type(error).__name__ if error is not None else None,
-                    'consumer_error_code': error.code if isinstance(error, GatewayError) and error.code in safe_codes else None,
-                    'ledger_status': ledger_status,
-                    'ledger_outcome': ledger_outcome,
-                    'engine_calls': len(env.engine.calls),
-                    'helper_closed': env.helper.closed.is_set(),
-                    'helper_busy': env.helper.busy,
-                    'helper_phase': env.helper.session.phase,
-                    'request_seconds_left': round(request_deadline - now, 3),
-                    'job_status': job.status if job is not None else None,
-                    'cancel_requested': job.cancel_requested if job is not None else None,
-                    'lease_phase': lease.phase if lease is not None else None,
-                    'lease_fence_matches': lease.fence == env.job.execution_fence if lease is not None else None,
-                    'lease_seconds_left': round(lease.lease_until - now, 3) if lease is not None else None,
-                    'execution_seconds_left': round(lease.execution_deadline - now, 3)
-                        if lease is not None and lease.execution_deadline is not None else None,
-                }
-                engine_started.cancel()
-                consumer.cancel()
-                await asyncio.gather(engine_started, consumer, return_exceptions=True)
-                raise AssertionError(f'bounded pre-partition start barrier failed: {diagnostic!r}')
-            remaining = min(request_deadline - time.time(),
-                            env.job.lease_until - time.time(),
-                            env.job.execution_deadline - time.time())
-            assert remaining > 5.0
-            start = time.monotonic()
-            with env.platform.db.sessions.begin() as session:
-                if withdrawal == 'lease': session.get(Job, env.job.id).lease_until = time.time() - 1
-                elif withdrawal == 'fence': session.get(ExecutionAuthority, env.job.id).fence = 'replacement-fence'
-                elif withdrawal == 'cancel': session.get(Job, env.job.id).cancel_requested = True
-                elif withdrawal == 'binding': session.add(BindingState(id=env.model['id'], inhibited=True))
-                elif withdrawal == 'generation': session.get(MetadataRow, 'active_generation').value = {'generation': 'superseded'}
-                elif withdrawal == 'enrollment': session.get(HelperEnrollment, 'enrollment-a').revoked = True
-            if withdrawal == 'control_partition':
-                with env.platform.db.sessions() as session:
-                    job = session.get(Job, env.job.id)
-                    lease = session.get(WorkerExecutionLease, env.job.id)
-                    assert job is not None and lease is not None
-                    now = time.time()
-                    remaining = min(request_deadline - now, lease.lease_until - now,
-                                    lease.execution_deadline - now)
-                    assert lease.fence == env.job.execution_fence
-                    assert job.lease_until == lease.lease_until
-                    assert job.status == 'running' and not job.cancel_requested
-                    assert remaining > 5.0
-                original = env.gateway.authority.call
-                async def partition(action, **kwargs):
-                    if action in {'renew', 'touch'}: raise GatewayError('authority_unavailable')
-                    return await original(action, **kwargs)
-                env.gateway.authority.call = partition
-            with pytest.raises(GatewayError):
-                await asyncio.wait_for(consumer, 5)
-            await asyncio.wait_for(env.engine.stopped.wait(), 2)
-            assert time.monotonic() - start < 5
-            with env.platform.db.sessions() as session:
-                ledger = session.get(RequestLedger, request.id)
-                assert ledger.outcome != 'completed'
-                assert ledger.status != 'active'
+                    assert ledger.outcome != 'completed'
+                    assert ledger.status != 'active'
+            finally:
+                if not consumer.done():
+                    consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
     asyncio.run(scenario())
 
 
