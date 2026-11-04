@@ -654,7 +654,7 @@ def test_account_only_work_subject_does_not_disable_legacy_empty_hand_back(work_
 
 def _seed_retained_legacy_history(db, *, target_call="legacy-target", target_slot="legacy-target-slot",
                                   include_current_projection=True, include_target_intent=False,
-                                  link_job_id="job"):
+                                  link_job_id="job", gate_cutover=False):
     tables = Base.metadata.tables
     baseline = dict(
         scope_id="scope", batch_id="history-batch", link_id="history-link",
@@ -709,6 +709,13 @@ def _seed_retained_legacy_history(db, *, target_call="legacy-target", target_slo
             reserved_allowance_micro=5, settled_allowance_micro=0,
             unknown_allowance_micro=0, held_slots=1, unknown_slots=0, audit_sequence=1,
         ))
+        if gate_cutover:
+            session.execute(update(tables["program_gate_state"]).where(
+                tables["program_gate_state"].c.scope_id == "scope").values(
+                    mode="active", cutover_batch_id="history-batch", cutover_digest=snapshot,
+                    cutover_generation="a" * 32, cutover_fence_digest="a" * 64,
+                    cutover_owner_epoch=1,
+                ))
         if target_call != "call":
             session.execute(insert(tables["program_reservations"]), dict(
                 scope_id="scope", call_id=target_call, subject_id="job", purpose="work",
@@ -735,7 +742,7 @@ def _seed_retained_legacy_history(db, *, target_call="legacy-target", target_slo
 
 def test_hand_back_preserves_valid_prior_legacy_link_and_target(work_rows):
     db, _, _, _ = work_rows
-    baseline = _seed_retained_legacy_history(db, include_target_intent=True)
+    baseline = _seed_retained_legacy_history(db, include_target_intent=True, gate_cutover=True)
     tables = Base.metadata.tables
     with db.sessions() as session:
         before_link = session.execute(select(tables["program_legacy_links"])).mappings().one()
@@ -838,6 +845,35 @@ def test_hand_back_refuses_active_gate_without_cutover_in_history_only_branch(wo
         cursor.execute("UPDATE program_gate_state SET mode = 'active' WHERE scope_id = 'scope'")
         connection.commit()
         cursor.execute("PRAGMA ignore_check_constraints=OFF")
+        connection.commit()
+    finally:
+        connection.close()
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
+
+
+def test_hand_back_refuses_gate_policy_digest_drift_in_history_only_branch(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("the PostgreSQL ledger_gate_policy_fk forbids this stored row")
+    _seed_retained_legacy_history(db, include_current_projection=False)
+    connection = db.engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("UPDATE program_gate_state SET policy_digest = ? WHERE scope_id = 'scope'", ("b" * 64,))
+        connection.commit()
+        cursor.execute("PRAGMA foreign_keys=ON")
         connection.commit()
     finally:
         connection.close()

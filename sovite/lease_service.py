@@ -1116,6 +1116,24 @@ class LeaseService:
                                 or type(gate["policy_revision"]) is not int or gate["policy_revision"] <= 0
                                 or not _is_lower_hex(gate["policy_digest"], 64)):
                             raise _HandBackOwnerUnavailable()
+                        gate_policy = session.execute(select(policy_t).where(
+                            policy_t.c.scope_id == batch_key[0],
+                            policy_t.c.revision == gate["policy_revision"])).mappings().one_or_none()
+                        if gate_policy is None or gate_policy["policy_digest"] != gate["policy_digest"]:
+                            raise _HandBackOwnerUnavailable()
+                        scope = session.execute(select(tables["program_budget_scopes"]).where(
+                            tables["program_budget_scopes"].c.id == batch_key[0])).mappings().one_or_none()
+                        if (scope is None or type(scope["policy_revision"]) is not int
+                                or scope["policy_revision"] != gate["policy_revision"]
+                                or scope["policy_digest"] != gate["policy_digest"]):
+                            raise _HandBackOwnerUnavailable()
+                        audit_t = tables["audit_events"]
+                        if (type(gate["revision"]) is not int or not 0 <= gate["revision"] <= (1 << 63) - 1
+                                or type(gate["audit_sequence"]) is not int or gate["audit_sequence"] <= 0
+                                or session.execute(select(audit_t.c.sequence).where(
+                                    audit_t.c.sequence == gate["audit_sequence"])).scalar_one_or_none()
+                                != gate["audit_sequence"]):
+                            raise _HandBackOwnerUnavailable()
                         cutover = (gate["cutover_batch_id"], gate["cutover_digest"], gate["cutover_generation"],
                                    gate["cutover_fence_digest"], gate["cutover_owner_epoch"])
                         if any(value is None for value in cutover) and any(value is not None for value in cutover):
@@ -1124,6 +1142,8 @@ class LeaseService:
                             raise _HandBackOwnerUnavailable()
                         if cutover[0] is not None and (not _is_lower_hex(cutover[1], 64)
                                 or not _is_lower_hex(cutover[2], 32) or not _is_lower_hex(cutover[3], 64)
+                                or type(cutover[0]) is not str or not 1 <= len(cutover[0]) <= 96
+                                or any(not "!" <= char <= "~" for char in cutover[0])
                                 or type(cutover[4]) is not int or cutover[4] < 0):
                             raise _HandBackOwnerUnavailable()
                         if cutover[0] == batch_key[1] and (
