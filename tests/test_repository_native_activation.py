@@ -12,10 +12,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sovite import policy
 from sovite.adapters import RuntimeFailure
 from sovite.api import create_app
-from sovite.db import Job, WorkerExecutionLease
+from sovite.db import Base, Job, WorkerExecutionLease
+from sovite.lease_service import FinishRefused
 from sovite.repository_native_vm import NativeVMDriver
 from sovite.repository_runs import RepositoryRunAttemptExecutor, RepositoryRunError
 from sovite.repository_repair_contract.runtime import load_bundle, NATIVE_ACTIVATION_OPERATION
@@ -243,6 +245,7 @@ def test_activation_not_started_malformed_is_unknown(native_owner):
 
 def test_running_persist_failure_stays_known_nonexecuted(native_owner,monkeypatch):
     f=native_owner;worker,job=queued(f)
+    prior_next_attempt_at=job.next_attempt_at
     original=f.lifecycle._persist
     def persist(*args,**kwargs):
         if f.driver.calls>=2:
@@ -256,8 +259,10 @@ def test_running_persist_failure_stays_known_nonexecuted(native_owner,monkeypatc
     asyncio.run(run())
     observed=f.platform.get_job(job.id)
     assert f.driver.effects==0 and not f.lifecycle.effect_started(job.id)
-    assert observed.status=='failed' and observed.error_code=='fixture_persist_refused'
-    assert observed.artifact_key is None and observed.public_projection is None and observed.released_at is None
+    assert observed.status=='blocked' and observed.error_code=='fixture_persist_refused'
+    assert observed.next_attempt_at==prior_next_attempt_at and observed.attempts==1
+    assert observed.artifact_key is None and observed.artifact_sha256 is None
+    assert observed.public_projection is None and observed.released_at is None
     with f.platform.db.sessions() as session:
         assert session.get(WorkerExecutionLease,job.id).phase=='finished'
         persisted=session.get(Job,job.id).resolved['repository_run']['attempts'][-1]
@@ -316,11 +321,41 @@ def test_wait_never_extends_started_execution_deadline(native_owner):
 def test_expired_started_execution_deadline_refuses_cleanup(native_owner):
     f=native_owner;f.platform.settings=replace(f.platform.settings,job_timeout_seconds=2)
     worker,job=queued(f)
+    initial_resolved=[]
+    finish_calls=[]
+    finish_boundary=[]
+    real_finish=worker.finish
+
+    def snapshot():
+        with f.platform.db.engine.connect()as connection:
+            return {table.name:[dict(row)for row in connection.execute(
+                select(table).order_by(*table.primary_key.columns)).mappings()]
+                for table in Base.metadata.sorted_tables}
+
+    def capture_finish(job_id, **kwargs):
+        finish_calls.append((job_id,dict(kwargs)))
+        before=snapshot()
+        with f.platform.db.sessions()as session:
+            row=session.get(Job,job_id);lease=session.get(WorkerExecutionLease,job_id)
+            assert lease.fence==kwargs.get('fence')==job.execution_fence
+            assert lease.execution_deadline<=time.time()
+            assert lease.phase=='started' and row.status=='running'
+            assert row.resolved['repository_run']['attempts'][-1]['state']=='activation_cancelled'
+        try:
+            real_finish(job_id,**kwargs)
+        except FinishRefused as exc:
+            assert type(exc) is FinishRefused
+            finish_boundary.append(before)
+            assert snapshot()==before
+            raise
+        raise AssertionError('expired execution owner was not refused')
+
+    worker.finish=capture_finish
     async def run():
         task=await waiting(f,worker,job)
         with f.platform.db.sessions()as session:
             before=session.get(Job,job.id)
-            resolved=copy.deepcopy(before.resolved)
+            initial_resolved.append(copy.deepcopy(before.resolved))
             lease=session.get(WorkerExecutionLease,job.id)
             original=(before.status,before.error_code,before.lease_owner,before.lease_until,
                       lease.phase,lease.lease_until,lease.execution_deadline)
@@ -329,7 +364,19 @@ def test_expired_started_execution_deadline_refuses_cleanup(native_owner):
             after=session.get(Job,job.id);lease=session.get(WorkerExecutionLease,job.id)
             assert (after.status,after.error_code,after.lease_owner,after.lease_until,
                     lease.phase,lease.lease_until,lease.execution_deadline)==original
-            assert after.resolved==resolved
             assert after.artifact_key is None and after.public_projection is None and after.released_at is None
     asyncio.run(run())
     assert f.driver.effects==0
+    assert len(finish_calls)==1 and len(finish_boundary)==1
+    called_job,finish_kwargs=finish_calls[0]
+    assert called_job==job.id and finish_kwargs['fence']==job.execution_fence
+    assert finish_kwargs['error'].code=='execution_timeout'
+    assert finish_kwargs.get('cancelled',False) is False
+    observed_resolved=f.platform.get_job(job.id).resolved
+    initial_attempt=initial_resolved[0]['repository_run']['attempts'][-1]
+    final_attempt=observed_resolved['repository_run']['attempts'][-1]
+    assert initial_attempt['state']=='awaiting_activation'
+    assert final_attempt['state']=='activation_cancelled'
+    assert {key:value for key,value in final_attempt.items() if key not in {'state','finished_at'}}=={
+        key:value for key,value in initial_attempt.items() if key not in {'state','finished_at'}}
+    assert isinstance(final_attempt.get('finished_at'),str) and final_attempt['finished_at']
