@@ -1,0 +1,239 @@
+import asyncio
+from pathlib import Path
+
+import httpx
+import pytest
+from sqlalchemy.exc import OperationalError
+import sovite
+import model_support
+
+from model_support import (
+    _DiagnosticASGITransport,
+    _DiagnosticGateway,
+    _HandshakeDiagnostics,
+    _safe_cause_category,
+    _safe_exception_category,
+    authority_env,
+    connected,
+    consume,
+    database,
+    infer,
+    v2_bundle,
+)
+from sovite.gateway.client import AUTHORITY_TIMEOUT, AuthorityClient, GatewayError
+
+_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+assert Path(model_support.__file__).resolve() == Path(__file__).with_name("model_support.py")
+assert Path(sovite.__file__).resolve() == _SOURCE_ROOT / "sovite" / "__init__.py"
+
+
+class _ScriptedTransport(httpx.AsyncBaseTransport):
+    def __init__(self, *, status=200, content=b'{"permit":"permit-value","permit_ttl_ms":10000}', error=None):
+        self.status = status
+        self.content = content
+        self.error = error
+        self.closed = False
+
+    async def handle_async_request(self, request):
+        if self.error is not None:
+            error = self.error
+            if isinstance(error, BaseException):
+                raise error
+            raise error(request)
+        return httpx.Response(self.status, content=self.content, request=request)
+
+    async def aclose(self):
+        self.closed = True
+
+
+def _private_request():
+    return httpx.Request("POST", "http://control.test/internal/authority/authorize", json={"canary": "private-canary"})
+
+
+def test_real_authority_success_records_only_safe_diagnostics(authority_env):
+    async def scenario():
+        async with connected(authority_env) as env:
+            request = await infer(env)
+            result = await consume(request)
+            assert b"[DONE]" in result
+            assert AUTHORITY_TIMEOUT == 1
+            events = env.authority_diagnostics.events
+            assert any(event.get("action") == "authorize" and event.get("outcome") == "ok" for event in events)
+            assert any(event.get("action") == "authorize" and event.get("status") == "2xx" for event in events)
+            note = env.authority_diagnostics.note()
+            assert "private-canary" not in note
+            assert "authority-test-credential" not in note
+
+    asyncio.run(scenario())
+
+
+def test_authority_failure_note_correlates_safe_live_owner_state(authority_env):
+    async def scenario():
+        async with connected(authority_env) as env:
+            async def unavailable(_action, **_fields):
+                raise GatewayError("authority_unavailable") from TimeoutError("private-canary-timeout")
+
+            env.gateway.authority.call = unavailable
+            with pytest.raises(GatewayError) as failure:
+                await env.gateway.call("authorize", request={"canary": "private-canary"})
+            notes = "\n".join(getattr(failure.value, "__notes__", ()))
+            assert "cause_category:timeout" in notes
+            assert "job_status:running" in notes
+            assert "lease_phase:started" in notes
+            assert "lease_fence_matches_claim:true" in notes
+            assert "lease_live:true" in notes
+            assert "deadline_live:true" in notes
+            assert "helper_phase:idle" in notes
+            assert "helper_active:false" in notes
+            assert "private-canary" not in notes
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("error_factory", "category"),
+    [
+        (lambda request: httpx.ReadTimeout("private-canary", request=request), "http_timeout"),
+        (lambda request: httpx.ConnectError("private-canary", request=request), "transport_error"),
+        (lambda _request: OperationalError("select", {}, RuntimeError("private-canary")), "database_operational_error"),
+    ],
+)
+def test_transport_exception_diagnostics_are_finite_and_redacted(error_factory, category):
+    async def scenario():
+        diagnostics = _HandshakeDiagnostics()
+        inner = _ScriptedTransport(error=error_factory)
+        observed = _DiagnosticASGITransport(inner, diagnostics)
+        client = AuthorityClient("http://control.test", "never-record-this-token", transport=observed)
+        gateway = _DiagnosticGateway(client, diagnostics)
+        try:
+            with pytest.raises((GatewayError, OperationalError)):
+                await gateway.call("authorize", request={"canary": "private-canary"})
+            assert any(event.get("category") == category for event in diagnostics.events)
+            note = diagnostics.note()
+            assert "private-canary" not in note
+            assert "never-record-this-token" not in note
+        finally:
+            await client.close()
+        assert inner.closed
+
+    asyncio.run(scenario())
+
+
+def test_invalid_response_and_non_success_status_record_status_without_body():
+    async def scenario():
+        diagnostics = _HandshakeDiagnostics()
+        invalid = _ScriptedTransport(content=b"not-json-private-canary")
+        observed = _DiagnosticASGITransport(invalid, diagnostics)
+        client = AuthorityClient("http://control.test", "never-record-this-token", transport=observed)
+        gateway = _DiagnosticGateway(client, diagnostics)
+        try:
+            with pytest.raises(GatewayError) as failure:
+                await gateway.call("authorize", request={"canary": "private-canary"})
+            assert failure.value.code == "authority_unavailable"
+            assert any(event.get("cause_category") == "invalid_response" for event in diagnostics.events)
+            assert any(event.get("status") == "2xx" for event in diagnostics.events)
+            assert "private-canary" not in diagnostics.note()
+        finally:
+            await client.close()
+        assert invalid.closed
+
+        diagnostics = _HandshakeDiagnostics()
+        rejected = _ScriptedTransport(status=503, content=b'{"detail":{"code":"private-canary"}}')
+        observed = _DiagnosticASGITransport(rejected, diagnostics)
+        client = AuthorityClient("http://control.test", "never-record-this-token", transport=observed)
+        gateway = _DiagnosticGateway(client, diagnostics)
+        try:
+            with pytest.raises(GatewayError) as failure:
+                await gateway.call("authorize", request={"canary": "private-canary"})
+            assert failure.value.code == "authority_unavailable"
+            assert any(event.get("status") == "5xx" for event in diagnostics.events)
+            assert "private-canary" not in diagnostics.note()
+        finally:
+            await client.close()
+        assert rejected.closed
+
+    asyncio.run(scenario())
+
+
+def test_transport_diagnostics_do_not_consume_response_body():
+    async def scenario():
+        diagnostics = _HandshakeDiagnostics()
+        body = b"private-canary-response-body"
+        inner = _ScriptedTransport(status=503, content=body)
+        observed = _DiagnosticASGITransport(inner, diagnostics)
+        try:
+            response = await observed.handle_async_request(_private_request())
+            assert response.status_code == 503
+            assert await response.aread() == body
+            assert "private-canary" not in diagnostics.note()
+            assert any(event.get("status") == "5xx" for event in diagnostics.events)
+        finally:
+            await observed.aclose()
+        assert inner.closed
+
+    asyncio.run(scenario())
+
+
+def test_outer_timeout_cancellation_is_not_classified_as_confirmed_timeout():
+    class _NeverResponds(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            return None
+
+    async def scenario():
+        diagnostics = _HandshakeDiagnostics()
+        observed = _DiagnosticASGITransport(_NeverResponds(), diagnostics)
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(observed.handle_async_request(_private_request()), timeout=0.01)
+            assert diagnostics.events[-1]["category"] == "cancelled"
+            assert diagnostics.events[-1]["outcome"] == "cancelled"
+            assert not any(event.get("category") in {"timeout", "http_timeout"} for event in diagnostics.events)
+            assert "private-canary" not in diagnostics.note()
+        finally:
+            await observed.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_context_diagnostic_is_cycle_bounded_and_never_emits_exception_text():
+    first = RuntimeError("private-canary-first")
+    second = RuntimeError("private-canary-second")
+    first.__context__ = second
+    second.__context__ = first
+    assert _safe_cause_category(first) == "unknown"
+    assert _safe_exception_category(ValueError("private-canary")) == "invalid_response"
+    diagnostics = _HandshakeDiagnostics()
+    diagnostics.add(action="authorize", stage="authority", outcome="error", category="other",
+                    cause_category=_safe_cause_category(first))
+    assert diagnostics.events[-1]["cause_category"] == "unknown"
+    assert "private-canary" not in diagnostics.note()
+
+
+def test_early_helper_failure_attaches_only_sanitized_setup_note(authority_env):
+    class _EarlyFailureHelper:
+        instances = []
+
+        def __init__(self, _settings):
+            self.session = None
+            self.task = None
+            self.instances.append(self)
+
+        async def run(self):
+            self.task = asyncio.current_task()
+            await asyncio.sleep(0)
+            raise RuntimeError("private-canary-helper-error")
+
+    async def scenario():
+        with pytest.raises(RuntimeError) as failure:
+            async with connected(authority_env, helper_type=_EarlyFailureHelper):
+                raise AssertionError("early failing helper unexpectedly connected")
+        notes = "\n".join(getattr(failure.value, "__notes__", ()))
+        assert "stage:setup" in notes
+        assert "outcome:unknown" in notes
+        assert "private-canary-helper-error" not in notes
+        assert _EarlyFailureHelper.instances[-1].task.done()
+
+    asyncio.run(scenario())
