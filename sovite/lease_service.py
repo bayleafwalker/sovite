@@ -120,13 +120,14 @@ def _recovery_replay_safe(resolved: dict) -> bool:
 
 def _validate_recovery_retry_recipe(resolved: dict) -> None:
     """Reject malformed stored fields required when a recovered Job is retried."""
-    model, grant, harness = (resolved.get(key) for key in ("model", "grant", "harness"))
+    model, grant, harness, agent = (resolved.get(key) for key in ("model", "grant", "harness", "agent"))
     tools = resolved.get("tools", [])
     if (type(model) is not dict or type(model.get("id")) is not str
             or ("connection" in model and type(model["connection"]) is not dict)
             or ("max_concurrency" in model and
                 (type(model["max_concurrency"]) is not int or not 1 <= model["max_concurrency"] <= 64))
             or type(grant) is not dict or type(grant.get("input_class")) is not str
+            or type(agent) is not dict or type(agent.get("id")) is not str or not agent["id"]
             or type(harness) is not dict or type(harness.get("kind")) is not str
             or type(tools) is not list or any(type(tool) is not dict for tool in tools)
             or any(resolved.get(key) is not None and type(resolved[key]) is not dict
@@ -138,8 +139,87 @@ def _validate_recovery_retry_recipe(resolved: dict) -> None:
                    or ("read_only" in tool and type(tool["read_only"]) is not bool)
                    for tool in tools)
             or ("max_attempts" in grant and
-                (type(grant["max_attempts"]) is not int or not 1 <= grant["max_attempts"] <= 10))):
+                (type(grant["max_attempts"]) is not int or not 1 <= grant["max_attempts"] <= 10))
+            or ("timeout_seconds" in grant and
+                (type(grant["timeout_seconds"]) is not int or not 1 <= grant["timeout_seconds"] <= 3600))):
         raise _HandBackOwnerUnavailable()
+    prior = resolved.get("previous_attempt")
+    if prior is not None and any(type(prior.get(field)) is not str or not prior[field]
+                                 for field in ("receipt", "job_id", "submission_role")):
+        raise _HandBackOwnerUnavailable()
+    if any(resolved.get(field) is not None and
+           (type(resolved[field]) is not str or not resolved[field])
+           for field in ("source_release", "transfer_id")):
+        raise _HandBackOwnerUnavailable()
+    run = resolved.get("repository_run")
+    if run is not None:
+        from .repository_runs import RepositoryRunError, _timestamp
+        if type(run) is not dict:
+            raise _HandBackOwnerUnavailable()
+        try:
+            deadline = _timestamp(run.get("deadline"), "deadline").timestamp()
+        except (RepositoryRunError, TypeError, ValueError, OverflowError, OSError):
+            raise _HandBackOwnerUnavailable() from None
+        if not math.isfinite(deadline):
+            raise _HandBackOwnerUnavailable()
+        repair = run.get("repair")
+        if repair is not None:
+            repair_fields = {"parent_run_id", "root_run_id", "repair_number", "max_repairs",
+                             "candidate_sha256", "candidate_tip_sha", "candidate_release_id",
+                             "feedback_release_id", "feedback_sha256", "feedback_contract_ids",
+                             "input_key", "input_sha256"}
+            string_fields = repair_fields - {"repair_number", "max_repairs", "feedback_contract_ids"}
+            if (type(repair) is not dict or set(repair) != repair_fields
+                    or any(type(repair[field]) is not str or not repair[field] for field in string_fields)
+                    or type(repair["repair_number"]) is not int
+                    or type(repair["max_repairs"]) is not int
+                    or not 1 <= repair["repair_number"] <= repair["max_repairs"] <= 3
+                    or type(repair["feedback_contract_ids"]) is not list
+                    or not repair["feedback_contract_ids"]
+                    or any(type(item) is not str or not item for item in repair["feedback_contract_ids"])):
+                raise _HandBackOwnerUnavailable()
+    binding = resolved.get("workflow_binding")
+    if binding is None and (resolved.get("source_release") is not None or resolved.get("transfer_id") is not None):
+        raise _HandBackOwnerUnavailable()
+    if binding is not None:
+        from .workflows import (API_VERSION, WorkflowError, _digest as workflow_digest,
+                                delivery_role_names, validate_revision_ref, validate_workflow)
+        binding_fields = {"apiVersion", "kind", "workflow_revision", "definition", "installation_id",
+                          "bundle_generation", "input_class", "transfers", "roles", "requirements_ref",
+                          "session_policy_ref", "dispatch_authorized", "binding_digest"}
+        try:
+            if (type(binding) is not dict or set(binding) != binding_fields
+                    or binding["apiVersion"] != API_VERSION or binding["kind"] != "DeliveryWorkflowBinding"
+                    or binding["dispatch_authorized"] is not False
+                    or any(type(binding[field]) is not str or not binding[field] for field in (
+                        "workflow_revision", "installation_id", "bundle_generation", "input_class", "binding_digest"))
+                    or type(binding["roles"]) is not dict
+                    or type(binding["transfers"]) is not dict
+                    or type(resolved.get("workflow_role")) is not str):
+                raise _HandBackOwnerUnavailable()
+            definition = validate_workflow(binding["definition"])
+            validate_revision_ref(binding["requirements_ref"], "requirements_ref")
+            validate_revision_ref(binding["session_policy_ref"], "session_policy_ref")
+            role = binding["roles"].get(resolved["workflow_role"])
+            source_release, transfer_id = resolved.get("source_release"), resolved.get("transfer_id")
+            if source_release is None and transfer_id is not None:
+                raise _HandBackOwnerUnavailable()
+            if source_release is not None:
+                transfer = binding["transfers"].get(transfer_id)
+                if (type(transfer) is not dict
+                        or transfer.get("target") != {"kind": "role", "role": resolved["workflow_role"]}
+                        or type(transfer.get("contract_id")) is not str or not transfer["contract_id"]):
+                    raise _HandBackOwnerUnavailable()
+            if (resolved["workflow_role"] not in delivery_role_names(definition)
+                    or type(role) is not dict
+                    or any(type(role.get(field)) is not str for field in ("grant_id", "input_class", "model_destination"))
+                    or type(role.get("requires_output_release")) is not bool
+                    or binding["workflow_revision"] != workflow_digest(definition)
+                    or binding["binding_digest"] != workflow_digest(
+                        {key: value for key, value in binding.items() if key != "binding_digest"})):
+                raise _HandBackOwnerUnavailable()
+        except (WorkflowError, KeyError, TypeError, ValueError, OverflowError, RecursionError):
+            raise _HandBackOwnerUnavailable() from None
 
 
 @dataclass(frozen=True)
@@ -563,6 +643,14 @@ class LeaseService:
                 try:
                     self._authorize_current(session, job, now)
                 except PlatformError as exc:
+                    # A stored workflow or binding may be well formed but no
+                    # longer match current authority. Leave it untouched and
+                    # let later candidates proceed; it grants no dispatch.
+                    if (exc.status, exc.code) in {
+                        (409, "revision_superseded"), (409, "workflow_binding_mismatch"),
+                        (409, "transfer_mismatch"), (409, "repository_repair_unavailable"),
+                    }:
+                        continue
                     # Existing-job lineage can become ineligible after enqueue.
                     # These owner-declared history denials are distinct from an
                     # unavailable/corrupt current owner and may block dispatch.

@@ -1,4 +1,5 @@
 """Synthetic expired Work-owner recovery contract."""
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -180,6 +181,7 @@ def test_sweep_malformed_replay_fields_with_valid_lease_does_not_hide_later_work
 
         resolved = {
             "compute": {"id": "fixture"},
+                "agent": {"id": "synthetic-agent"},
             "model": {"id": "synthetic-model"},
             "harness": {"kind": "tool-agent", "idempotent": False},
             "grant": {"max_attempts": 3},
@@ -251,6 +253,7 @@ def test_sweep_preserves_valid_idempotent_and_read_only_replay_recipes(
         expiry = session.get(WorkerExecutionLease, "job").lease_until
         resolved = {
             "compute": {"id": "fixture"},
+            "agent": {"id": "synthetic-agent"},
             "model": {"id": "synthetic-model"},
             "grant": {"input_class": "C2", "max_attempts": 3, "on_outage": "queue"},
             "tools": [],
@@ -291,13 +294,17 @@ def test_empty_repository_recovery_respects_lease_phase(work_rows, monkeypatch, 
     _clear_work_history(db)
     with db.sessions.begin() as session:
         job = session.get(Job, "job")
+        run = dict(job.resolved["repository_run"])
+        run["deadline"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         job.resolved = {
             **job.resolved,
             "compute": {"id": "fixture"},
+            "agent": {"id": "synthetic-agent"},
             "model": {"id": "synthetic-model", "connection": {}},
             "grant": {"input_class": "C2", "max_attempts": 3, "on_outage": "queue"},
             "harness": {"kind": "tool-agent", "idempotent": False},
             "tools": [],
+            "repository_run": run,
         }
         lease = session.get(WorkerExecutionLease, "job")
         expiry = lease.lease_until
