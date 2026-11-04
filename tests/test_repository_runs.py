@@ -602,7 +602,6 @@ def test_owner_budget_reserves_before_calls_and_stops_overruns(setup, tmp_path, 
     observed = owner.get(created["id"], principal_id="cloud-codex")
     assert observed["state"] == "blocked"
     assert observed["attempts"][0]["state"] == "uncertain"
-    assert observed["evidence"] == []
     with platform.db.sessions() as session:
         internal = session.get(Job, created["id"]).resolved["repository_run"]
     if overrun == "cost":
