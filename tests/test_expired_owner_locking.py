@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, select, text
 
 from sovite.collection_transaction import owner_transaction
 from sovite.db import Database, Job, WorkerExecutionLease
+from sovite.recovery_cursor import advance_cursor, read_cursor
 from sovite.work_projection import (
     _WorkProjectionBusy, _WorkProjectionUnavailable, lock_work_projection_set,
 )
@@ -163,6 +164,28 @@ def test_recovery_lock_classifies_skip_locked_and_retries_after_release():
         thread.join(5)
         assert not thread.is_alive(), "default owner closure did not resume after lock release"
         assert outcomes == ["complete"]
+    finally:
+        db.engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+def test_cursor_json_cas_on_owned_postgresql():
+    url = _owned_pg_url()
+    admin = create_engine(url)
+    schema = "expired_cursor_" + uuid.uuid4().hex
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    db = Database(url, schema=schema)
+    try:
+        db.migrate()
+        with owner_transaction(db) as session:
+            initial = read_cursor(session, "compute", False)
+            assert advance_cursor(session, initial, "job-1")
+            assert not advance_cursor(session, initial, "job-2")
+        with owner_transaction(db) as session:
+            assert read_cursor(session, "compute", False).last_job_id == "job-1"
     finally:
         db.engine.dispose()
         with admin.begin() as connection:

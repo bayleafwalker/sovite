@@ -2797,6 +2797,34 @@ def test_comparator_keeps_terminal_attempts_opt_in_only(work_rows):
         ) == "canonical_rows_agree"
 
 
+def test_recovery_comparator_uses_finite_state_and_exact_stored_owner(work_rows):
+    db, _, _, _ = work_rows
+    _set_hand_back_attempt_state(db, "completed")
+    with db.sessions.begin() as session:
+        session.get(Job, "job").lease_owner = "trusted-worker-owner"
+
+    with owner_transaction(db) as session:
+        with pytest.raises(_WorkProjectionUnavailable):
+            _compare_actual_work_projection(session, scope_id="scope", call_id="call")
+        with pytest.raises(_WorkProjectionUnavailable):
+            _compare_actual_work_projection(
+                session, scope_id="scope", call_id="call",
+                recovery_attempt_states=frozenset({"completed"}),
+                recovery_expected_owner="different-owner",
+            )
+        with pytest.raises(_WorkProjectionUnavailable):
+            _compare_actual_work_projection(
+                session, scope_id="scope", call_id="call",
+                recovery_attempt_states=frozenset({"settled"}),
+                recovery_expected_owner="trusted-worker-owner",
+            )
+        assert _compare_actual_work_projection(
+            session, scope_id="scope", call_id="call",
+            recovery_attempt_states=frozenset({"completed"}),
+            recovery_expected_owner="trusted-worker-owner",
+        ) == "canonical_rows_agree"
+
+
 def test_finish_stale_fence_refuses_without_owner_mutation(work_rows):
     db, _, _, _ = work_rows
     before = _hand_back_service(db)

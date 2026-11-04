@@ -255,6 +255,10 @@ class _WorkProjectionBusy(_WorkProjectionUnavailable):
 
 _CANONICAL_ROWS_AGREE = "canonical_rows_agree"
 _BINDING_TABLE = "program_work_projection_bindings"
+_RECOVERY_ATTEMPT_STATES = frozenset({
+    "preparing", "awaiting_activation", "running", "interrupted", "uncertain",
+    "completed", "ineligible", "failed", "cancelled", "activation_cancelled",
+})
 _BINDING_COLUMNS = frozenset({
     "scope_id", "call_id", "subject_id", "work_job_id", "attempt_id", "slot_id",
     "purpose", "policy_revision", "policy_digest", "projection_revision",
@@ -613,7 +617,9 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
                          allow_cancel_requested: bool = False,
                          allow_interrupted_attempt: bool = False,
                          allow_preentry_cancelled_attempt: bool = False,
-                         finish_attempt_states: frozenset[str] | None = None) -> str:
+                         finish_attempt_states: frozenset[str] | None = None,
+                         recovery_attempt_states: frozenset[str] | None = None,
+                         recovery_expected_owner: str | None = None) -> str:
     """Implementation for the private owner-transaction-only comparator."""
     from sqlalchemy import MetaData, Table, and_, cast, func, inspect, or_, select, Text, LargeBinary
 
@@ -798,6 +804,17 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
     lease_until = lease["lease_until"]
     deadline = lease["execution_deadline"]
     job_lease_until = job["lease_until"]
+    recovery_mode = recovery_attempt_states is not None or recovery_expected_owner is not None
+    if recovery_mode and (
+            type(recovery_attempt_states) is not frozenset
+            or not recovery_attempt_states
+            or not recovery_attempt_states <= _RECOVERY_ATTEMPT_STATES
+            or type(recovery_expected_owner) is not str
+            or not recovery_expected_owner
+            or len(recovery_expected_owner) > 96
+            or "\x00" in recovery_expected_owner
+            or finish_attempt_states is not None):
+        raise _WorkProjectionUnavailable()
     if (job["status"] != "running"
             or bool(job["cancel_requested"]) and not allow_cancel_requested
             or lease["phase"] != "started" or lease["generation"] != job["generation"]
@@ -807,8 +824,9 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
             or type(lease_until) not in (int, float) or not math.isfinite(lease_until)
             or type(deadline) not in (int, float) or not math.isfinite(deadline)
             or job_lease_until != lease_until
-            or job["lease_owner"] != execution_owner_key(
-                workload_id=lease["workload_id"], instance_id=lease["instance_id"])
+            or (job["lease_owner"] != recovery_expected_owner if recovery_mode else
+                job["lease_owner"] != execution_owner_key(
+                    workload_id=lease["workload_id"], instance_id=lease["instance_id"]))
             or min(lease_until, deadline) * 1000 < int(intent["valid_until_ms"])):
         raise _WorkProjectionUnavailable()
     fence_digest = hashlib.sha256(lease["fence"].encode("utf-8")).hexdigest()
@@ -839,8 +857,14 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
                  or not finish_attempt_states
                  or not finish_attempt_states <= known_finish_states)):
         raise _WorkProjectionUnavailable()
+    if (recovery_attempt_states is not None
+            and (type(recovery_attempt_states) is not frozenset
+                 or not recovery_attempt_states
+                 or not recovery_attempt_states <= _RECOVERY_ATTEMPT_STATES)):
+        raise _WorkProjectionUnavailable()
     if (len(matching) != 1 or attempts[-1] is not matching[0]
-            or not (attempt_state in finish_attempt_states if finish_attempt_states is not None
+            or not (attempt_state in recovery_attempt_states if recovery_mode else
+                    attempt_state in finish_attempt_states if finish_attempt_states is not None
                     else attempt_state in active_attempt_states or hand_back_attempt_state)
             or matching[0].get("fence_sha256") != fence_digest
             or expected_lease_digest != projection.lease_digest
@@ -1011,7 +1035,9 @@ def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
                                     allow_cancel_requested: bool = False,
                                     allow_interrupted_attempt: bool = False,
                                     allow_preentry_cancelled_attempt: bool = False,
-                                    finish_attempt_states: frozenset[str] | None = None) -> str:
+                                    finish_attempt_states: frozenset[str] | None = None,
+                                    recovery_attempt_states: frozenset[str] | None = None,
+                                    recovery_expected_owner: str | None = None) -> str:
     """Compare one actual Work call within an existing owner transaction.
 
     This private comparator accepts selectors, never caller-provided rows or
@@ -1020,13 +1046,19 @@ def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
     that a receipt is genuine. In particular, this does not establish that all
     database writers use the owner lock boundary. It requires a running Job and
     started lease; it does not compare or authorize legacy display consumers.
+    Recovery mode is opt-in and compares the exact stored Job owner snapshot
+    plus a finite persisted attempt-state set. It does not make that owner a
+    caller or require the expired lease to be live; recovery validates final
+    expiry and identity separately after the full closure is locked.
     """
     try:
         return _compare_actual_rows(session, scope_id=scope_id, call_id=call_id,
                                     allow_cancel_requested=allow_cancel_requested,
                                     allow_interrupted_attempt=allow_interrupted_attempt,
                                     allow_preentry_cancelled_attempt=allow_preentry_cancelled_attempt,
-                                    finish_attempt_states=finish_attempt_states)
+                                    finish_attempt_states=finish_attempt_states,
+                                    recovery_attempt_states=recovery_attempt_states,
+                                    recovery_expected_owner=recovery_expected_owner)
     except _WorkProjectionUnavailable:
         raise
     except Exception:
