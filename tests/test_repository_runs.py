@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 from sovite import policy
 from sovite.api import create_app
-from sovite.db import Job, WorkerExecutionLease
+from sovite.db import AuditEvent, Job, WorkerExecutionLease
 from sovite.adapters import RuntimeFailure
 from sovite.repository_runs import (
     RUN_SCHEMA,
@@ -742,6 +742,16 @@ def test_cancel_during_mutable_attempt_becomes_uncertain_not_clean_cancel(setup,
     worker = Worker(platform, repository_run_executor=lifecycle)
     finish_observations = []
     real_finish = worker.finish
+    claimed_fences = []
+    real_claim = worker.claim
+
+    def capture_claim():
+        job = real_claim()
+        if job is not None:
+            claimed_fences.append(job.execution_fence)
+        return job
+
+    worker.claim = capture_claim
 
     def capture_finish(job_id, **kwargs):
         with platform.db.sessions() as session:
@@ -751,7 +761,8 @@ def test_cancel_during_mutable_attempt_becomes_uncertain_not_clean_cancel(setup,
             now = time.time()
             attempts = row.resolved["repository_run"]["attempts"]
             attempt = attempts[-1]
-            assert lease.fence == kwargs.get("fence")
+            assert len(claimed_fences) == 1
+            assert lease.fence == kwargs.get("fence") == claimed_fences[0]
             assert lease.phase == "started" and lease.lease_until > now
             assert lease.execution_deadline is not None and lease.execution_deadline > now
             assert row.status == "running" and row.cancel_requested is True
@@ -793,6 +804,17 @@ def test_cancel_during_mutable_attempt_becomes_uncertain_not_clean_cancel(setup,
     observed = owner.get(created["id"], principal_id="cloud-codex")
     assert observed["state"] == "blocked"
     assert observed["attempts"][0]["state"] == "uncertain"
+    assert observed["evidence"] == []
+    with platform.db.sessions() as session:
+        row = session.get(Job, created["id"])
+        assert row.error_code == "execution_uncertain"
+        assert row.artifact_key is None and row.artifact_sha256 is None
+        assert row.public_projection is None and row.released_at is None
+        releases = session.scalars(select(AuditEvent).where(
+            AuditEvent.target == created["id"],
+            AuditEvent.action == "result.release_authorized",
+        )).all()
+        assert releases == []
 
 
 def test_expired_worker_fence_blocks_mutable_run_replay(setup, tmp_path):
