@@ -249,6 +249,10 @@ class _WorkProjectionUnavailable(RuntimeError):
         super().__init__("Work projection is unavailable for canonical-row comparison")
 
 
+class _WorkProjectionBusy(_WorkProjectionUnavailable):
+    """A recovery candidate's exact Job or lease row was skipped as locked."""
+
+
 _CANONICAL_ROWS_AGREE = "canonical_rows_agree"
 _BINDING_TABLE = "program_work_projection_bindings"
 _BINDING_COLUMNS = frozenset({
@@ -348,7 +352,8 @@ def work_projections_from_job(raw: Any, *, allow_absent: bool = False) -> tuple[
 
 def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...], *,
                              additional_work_calls=(), legacy_batch_keys=(),
-                             expected_job_id=None, include_bindings=True) -> None:
+                             expected_job_id=None, include_bindings=True,
+                             nonblocking_owner_ids=()) -> None:
     """Prelock a multi-call Work projection set by global row class order.
 
     Per-call comparison below may repeat SELECT FOR UPDATE queries, but those
@@ -365,7 +370,12 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
     tables = Base.metadata.tables
     additional_work_calls = tuple(additional_work_calls)
     legacy_batch_keys = tuple(legacy_batch_keys)
-    if not projections and not additional_work_calls and not legacy_batch_keys:
+    nonblocking_owner_ids = frozenset(nonblocking_owner_ids)
+    if (any(type(value) is not str or not value for value in nonblocking_owner_ids)
+            or nonblocking_owner_ids and len(nonblocking_owner_ids) != 1):
+        raise _WorkProjectionUnavailable()
+    if (not projections and not additional_work_calls and not legacy_batch_keys
+            and not nonblocking_owner_ids):
         return
     if any(len(item) != 6 or item[4] != "work" or
            any(type(item[i]) is not str or not item[i] for i in (0, 1, 2, 3, 5))
@@ -405,6 +415,15 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
             if type(row["policy_revision"]) is int:
                 policies.add((scope_id, row["policy_revision"]))
 
+    if nonblocking_owner_ids:
+        discovered_job_ids = {item.work_job_id for item in projections}
+        discovered_job_ids.update(item[5] for item in additional_work_calls)
+        for rows in candidates.values():
+            discovered_job_ids.update(row["work_job_id"] for row in rows
+                                      if type(row["work_job_id"]) is str)
+        if discovered_job_ids - nonblocking_owner_ids:
+            raise _WorkProjectionUnavailable()
+
     batch_t = tables.get("program_census_batches")
     batch_discovered, batch_links_discovered = {}, {}
     if legacy_batch_keys:
@@ -428,13 +447,18 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
     def key_order(key):
         return tuple(value.encode("utf-8") if type(value) is str else value for value in key)
 
-    def lock_keys(table, columns, keys):
+    def lock_keys(table, columns, keys, *, skip_locked=False):
         locked = {}
         for key in sorted(set(keys), key=key_order):
             predicate = and_(*(column == value for column, value in zip(columns, key)))
-            rows = session.execute(select(table).where(predicate).with_for_update()).mappings().all()
+            rows = session.execute(select(table).where(predicate).with_for_update(
+                skip_locked=skip_locked)).mappings().all()
             if len(rows) > 1:
                 raise _WorkProjectionUnavailable()
+            if skip_locked and not rows:
+                present = session.execute(select(columns[0]).where(predicate)).first()
+                if present is not None:
+                    raise _WorkProjectionBusy()
             locked[key] = rows[0] if rows else None
         return locked
 
@@ -482,13 +506,25 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
                 registry_keys.add((scope_id, canonical_job, "work"))
                 subject_keys.add((scope_id, canonical_job))
                 job_ids.add(canonical_job)
+    job_ids.update(nonblocking_owner_ids)
     lock_keys(registry_t, (registry_t.c.scope_id, registry_t.c.subject_id, registry_t.c.purpose),
               registry_keys)
     lock_keys(subject_t, (subject_t.c.scope_id, subject_t.c.subject_id), subject_keys)
 
     job_ids = sorted(job_ids, key=lambda value: value.encode("utf-8"))
-    lock_keys(job_t, (job_t.c.id,), ((job_id,) for job_id in job_ids))
-    lock_keys(lease_t, (lease_t.c.job_id,), ((job_id,) for job_id in job_ids))
+    owner_job_ids = set(job_ids) & nonblocking_owner_ids
+    if nonblocking_owner_ids and set(job_ids) != nonblocking_owner_ids:
+        # Recovery's nonblocking mode owns exactly its candidate Job. Any
+        # wider owner selector would violate the one-candidate lock boundary.
+        raise _WorkProjectionUnavailable()
+    locked_jobs = lock_keys(job_t, (job_t.c.id,), ((job_id,) for job_id in job_ids),
+                            skip_locked=bool(owner_job_ids))
+    if owner_job_ids and any(locked_jobs.get((job_id,)) is None for job_id in owner_job_ids):
+        raise _WorkProjectionUnavailable()
+    locked_leases = lock_keys(lease_t, (lease_t.c.job_id,), ((job_id,) for job_id in job_ids),
+                              skip_locked=bool(owner_job_ids))
+    if owner_job_ids and any(locked_leases.get((job_id,)) is None for job_id in owner_job_ids):
+        raise _WorkProjectionUnavailable()
 
     lock_keys(reservation_t, (reservation_t.c.scope_id, reservation_t.c.call_id), calls)
 
