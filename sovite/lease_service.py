@@ -981,6 +981,14 @@ class LeaseService:
                             include_bindings=schema_version >= 10)
                     except Exception:
                         raise _HandBackOwnerUnavailable() from None
+                row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
+                lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
+                locked_raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
+                    job_table.c.id == job_id).with_for_update()).scalar_one_or_none()
+                if row is None:
+                    return False
+                if type(locked_raw) is not str:
+                    raise _HandBackOwnerUnavailable()
                 if schema_version >= 8:
                     fresh_reservations = session.execute(select(reservation_t).where(
                         reservation_t.c.subject_id == job_id)).mappings().all()
@@ -1005,9 +1013,10 @@ class LeaseService:
                         and_(intent_t.c.subject_id == job_id,
                              intent_t.c.purpose == "work"),
                     ))).mappings().all()
-                    fresh_legacy = session.execute(select(legacy_t).where(
-                        or_(legacy_t.c.job_id == job_id,
-                            legacy_t.c.subject_id == job_id))).mappings().all()
+                    fresh_legacy = session.execute(select(legacy_t).where(or_(
+                        legacy_t.c.job_id == job_id,
+                        legacy_t.c.subject_id == job_id,
+                    ))).mappings().all()
                     if (snapshot_rows(fresh_intents) != intent_snapshot
                             or snapshot_rows(fresh_legacy) != legacy_snapshot):
                         raise _HandBackOwnerUnavailable()
@@ -1019,15 +1028,6 @@ class LeaseService:
                     ))).mappings().all()
                     if snapshot_rows(fresh_bindings) != binding_snapshot:
                         raise _HandBackOwnerUnavailable()
-
-                row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
-                lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
-                locked_raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
-                    job_table.c.id == job_id).with_for_update()).scalar_one_or_none()
-                if row is None:
-                    return False
-                if type(locked_raw) is not str:
-                    raise _HandBackOwnerUnavailable()
                 if (locked_raw != raw or row.status != probe["status"]
                         or row.attempts != probe["attempts"]
                         or row.generation != probe["generation"]
@@ -1192,8 +1192,6 @@ class LeaseService:
                                     or attempt_positions.get(link["original_attempt_id"], len(attempt_positions))
                                     >= attempt_positions[current_attempt]
                                     or source_slots.count(link["original_slot_id"]) != 1
-                                    or any(call == link["original_call_id"] for _, call in current_call_ids)
-                                    or any(slot_id == link["original_slot_id"] for _, slot_id in current_slot_ids)
                                     or link["original_call_id"] in current_source_call_ids
                                     or link["original_slot_id"] in current_source_slot_ids
                                     or (link["scope_id"], link["call_id"]) in current_call_ids

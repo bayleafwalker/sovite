@@ -987,6 +987,79 @@ def test_hand_back_waits_for_locked_reservation_before_mutating_owner(work_rows)
         event.remove(db.engine, "before_cursor_execute", observe_reservation_lock)
 
 
+def test_empty_hand_back_rescans_work_membership_after_job_lock(work_rows):
+    db, _, _, binding = work_rows
+    if db.engine.dialect.name != "postgresql":
+        pytest.skip("Job-lock interleaving evidence requires the owned PostgreSQL fixture")
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.execute(delete(binding).where(binding.c.work_job_id == "job"))
+        session.execute(delete(tables["program_call_intents"]).where(tables["program_call_intents"].c.work_job_id == "job"))
+        session.execute(delete(tables["program_slots"]).where(tables["program_slots"].c.subject_id == "job"))
+        session.execute(delete(tables["program_reservations"]).where(tables["program_reservations"].c.subject_id == "job"))
+        session.execute(_job_resolved_update(db), {"resolved": json.dumps({
+            "repository_run": {"schema_version": RUN_SCHEMA, "attempts": [
+                {"id": "job-1", "state": "running",
+                 "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()},
+            ]},
+        }, separators=(",", ":")), "job_id": "job"})
+
+    from sqlalchemy import event
+    reached_job_lock = threading.Event()
+    finished = threading.Event()
+    result = []
+
+    def observe_job_lock(conn, cursor, statement, parameters, context, executemany):
+        if (threading.current_thread().name == "hand-back-empty-membership"
+                and "for update" in statement.lower()):
+            reached_job_lock.set()
+
+    event.listen(db.engine, "before_cursor_execute", observe_job_lock)
+    locker = db.sessions()
+    locker.begin()
+    try:
+        locker.execute(select(Job).where(Job.id == "job").with_for_update()).first()
+
+        def hand_back():
+            try:
+                result.append(_hand_back_service(db).hand_back("job", fence="2" * 32))
+            except Exception as error:  # surfaced below as assertion data
+                result.append(error)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=hand_back, daemon=True, name="hand-back-empty-membership")
+        worker.start()
+        assert reached_job_lock.wait(5), "empty hand_back never reached the Job lock"
+        assert not finished.wait(0.2), "empty hand_back passed a Job row held by another transaction"
+        locker.execute(insert(tables["program_reservations"]), dict(
+            scope_id="scope", call_id="late-call", subject_id="job", purpose="work",
+            effect_key="late-effect", reserved_usd_micro=1, reserved_allowance_micro=1,
+            permit_digest="f" * 64, meter_digest="e" * 64, price_digest="d" * 64,
+            permit_expires_ms=1500, state="reserved", audit_sequence=1,
+        ))
+        locker.execute(insert(tables["program_slots"]), dict(
+            scope_id="scope", slot_id="late-slot", subject_id="job", call_id="late-call",
+            state="held", audit_sequence=1,
+        ))
+        locker.commit()
+        worker.join(5)
+        assert not worker.is_alive()
+        assert len(result) == 1 and isinstance(result[0], PlatformError)
+        assert result[0].code == "execution_owner_state_unavailable"
+    finally:
+        if locker.in_transaction():
+            locker.rollback()
+        locker.close()
+        event.remove(db.engine, "before_cursor_execute", observe_job_lock)
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts) == ("running", 1)
+        assert session.scalar(select(tables["program_reservations"].c.state).where(
+            tables["program_reservations"].c.call_id == "late-call")) == "reserved"
+
+
 @pytest.mark.parametrize("change", ["attempt", "expired"])
 def test_uncertain_attempt_refuses_stale_job_or_expired_live_lease(work_rows, tmp_path, change):
     db, _, _, _ = work_rows
