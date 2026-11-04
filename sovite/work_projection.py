@@ -795,7 +795,7 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
     )
     known_finish_states = {
         "completed", "ineligible", "interrupted", "cancelled",
-        "activation_cancelled", "failed", "uncertain",
+        "activation_cancelled", "failed", "uncertain", "awaiting_activation",
     }
     known_finish_states = frozenset(known_finish_states)
     if (finish_attempt_states is not None

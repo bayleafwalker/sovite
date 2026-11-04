@@ -65,6 +65,15 @@ class Worker:
         return self.leases.finish(job_id, artifact=artifact, error=error, cancelled=cancelled,
                                   fence=fence, execution_completed=execution_completed)
 
+    def _finish_from_execute(self, job_id: str, **kwargs) -> bool:
+        """Attempt one Worker completion; refuse quietly without reclassifying it."""
+        try:
+            self.finish(job_id, **kwargs)
+        except FinishRefused:
+            log.warning("Task %s finish was refused; owner state remains unchanged", job_id)
+            return False
+        return True
+
     async def execute(self, job: Job):
         # The running task owns this immutable start fence for its entire life.
         # A later same-instance reclaim must not be borrowed from the mutable map.
@@ -79,7 +88,7 @@ class Worker:
         repository_run = job.resolved.get("repository_run")
         if repository_run is not None:
             if self.repository_run_executor is None:
-                self.finish(job.id, error=RuntimeFailure("repository_profile_unavailable"), fence=captured_fence)
+                self._finish_from_execute(job.id, error=RuntimeFailure("repository_profile_unavailable"), fence=captured_fence)
                 return
             operation = asyncio.create_task(self.repository_run_executor.run(
                 job, fence=captured_fence, authorization_check=check_authorization))
@@ -102,7 +111,7 @@ class Worker:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
                     if repository_run is not None and self.repository_run_executor.activation_not_started(job.id,captured_fence):
-                        self.finish(job.id,error=RuntimeFailure("native_vm_activation_cancelled"),fence=captured_fence)
+                        self._finish_from_execute(job.id,error=RuntimeFailure("native_vm_activation_cancelled"),fence=captured_fence)
                     else:
                         self.hand_back(job.id, fence=captured_fence)
                     return
@@ -113,19 +122,19 @@ class Worker:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
                     if repository_run is not None and self.repository_run_executor.effect_started(job.id):
-                        self.finish(job.id, error=RuntimeFailure("external_execution_uncertain"), fence=captured_fence)
+                        self._finish_from_execute(job.id, error=RuntimeFailure("external_execution_uncertain"), fence=captured_fence)
                     elif repository_run is not None and exc.code != "authorization_revoked":
-                        self.finish(job.id, error=exc, fence=captured_fence)
+                        self._finish_from_execute(job.id, error=exc, fence=captured_fence)
                     else:
-                        self.finish(job.id, cancelled=True, fence=captured_fence)
+                        self._finish_from_execute(job.id, cancelled=True, fence=captured_fence)
                     return
                 if time.monotonic() >= deadline:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
                     if repository_run is not None and self.repository_run_executor.effect_started(job.id):
-                        self.finish(job.id, error=RuntimeFailure("external_execution_uncertain"), fence=captured_fence)
+                        self._finish_from_execute(job.id, error=RuntimeFailure("external_execution_uncertain"), fence=captured_fence)
                     else:
-                        self.finish(job.id, error=RuntimeFailure("execution_timeout", False), fence=captured_fence)
+                        self._finish_from_execute(job.id, error=RuntimeFailure("execution_timeout", False), fence=captured_fence)
                     return
             result = await operation
             # Artifact commit can be retried safely, while re-executing external effects
@@ -133,21 +142,22 @@ class Worker:
             try:
                 artifact = await asyncio.to_thread(self.platform.store.put, job.id, result)
             except RuntimeFailure as exc:
-                self.finish(job.id, error=exc, fence=captured_fence,
-                            execution_completed=True)
+                self._finish_from_execute(job.id, error=exc, fence=captured_fence,
+                                          execution_completed=True)
                 return
             except Exception:
                 log.error("Task %s failed while storing a completed result", job.id)
-                self.finish(job.id, error=RuntimeFailure("internal_execution_error"),
-                            fence=captured_fence, execution_completed=True)
+                self._finish_from_execute(job.id, error=RuntimeFailure("internal_execution_error"),
+                                          fence=captured_fence, execution_completed=True)
                 return
-            self.finish(job.id, artifact=artifact, fence=captured_fence)
+            self._finish_from_execute(job.id, artifact=artifact, fence=captured_fence)
         except FinishRefused:
-            # The owner refused to close the attempt. Do not turn this refusal
-            # into another finish call or an internal execution failure.
-            raise
+            # Non-finish producers may raise this typed refusal too. Keep it
+            # nonterminal and never route it through internal-error completion.
+            log.warning("Task %s owner operation was refused; no completion was recorded", job.id)
+            return
         except RuntimeFailure as exc:
-            self.finish(job.id, error=exc, fence=captured_fence)
+            self._finish_from_execute(job.id, error=exc, fence=captured_fence)
         except asyncio.CancelledError:
             operation.cancel()
             await asyncio.gather(operation, return_exceptions=True)
@@ -156,7 +166,7 @@ class Worker:
         except Exception:
             # Exception messages may contain URLs, response bodies, or sensitive data.
             log.error("Task %s failed with an internal adapter/storage error", job.id)
-            self.finish(job.id, error=RuntimeFailure("internal_execution_error"), fence=captured_fence)
+            self._finish_from_execute(job.id, error=RuntimeFailure("internal_execution_error"), fence=captured_fence)
         finally:
             stopping.cancel()
             self.runner.authorization_check = None

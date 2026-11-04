@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -1991,6 +1992,37 @@ def _clear_work_history(db):
         }}
 
 
+def _set_native_awaiting_activation(db, *, valid=True):
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        resolved = json.loads(json.dumps(job.resolved))
+        lease = session.execute(select(Base.metadata.tables["worker_execution_leases"]).where(
+            Base.metadata.tables["worker_execution_leases"].c.job_id == "job")).mappings().one()
+        execution_deadline = lease.execution_deadline
+        generation, caller = job.generation, job.caller
+    run = resolved["repository_run"]
+    run.update(
+        workspace_id="workspace", repository_id="repository", principal_id=caller,
+        deadline=datetime.fromtimestamp(execution_deadline, timezone.utc).isoformat(),
+    )
+    attempt = run["attempts"][-1]
+    attempt.update(state="awaiting_activation", packet_sha256="a" * 64)
+    activation = {
+        "schema_version": "sovite-native-activation/v1",
+        "job_id": "job", "attempt_id": "job-1", "workspace_id": "workspace",
+        "repository_id": "repository", "principal_id": caller, "generation": generation,
+        "fence_sha256": attempt["fence_sha256"], "packet_sha256": "a" * 64,
+        "deadline": execution_deadline - 1,
+    }
+    if not valid:
+        activation["fence_sha256"] = "0" * 64
+    attempt["activation"] = activation
+    with db.sessions.begin() as session:
+        session.execute(_job_resolved_update(db), {
+            "resolved": json.dumps(resolved, separators=(",", ":")), "job_id": "job",
+        })
+
+
 def _private_artifact_route(db):
     from pathlib import Path
 
@@ -2196,6 +2228,94 @@ def test_finish_accepts_only_explicit_post_execution_store_error(work_rows):
         assert (job.status, job.error_code) == ("blocked", "storage_adapter_failure")
         assert job.artifact_key is None and job.public_projection is None and job.released_at is None
         assert lease["phase"] == "finished"
+
+
+def test_finish_preserves_awaiting_activation_persist_error_with_valid_metadata(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
+    _set_native_awaiting_activation(db)
+
+    assert _finish_service(db).finish(
+        "job", error=RuntimeFailure("fixture_persist_refused"), fence="2" * 32) is True
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        lease = session.execute(select(Base.metadata.tables["worker_execution_leases"])).mappings().one()
+        gate = session.execute(select(Base.metadata.tables["program_gate_state"])).mappings().one()
+        reservation = session.execute(select(Base.metadata.tables["program_reservations"])).mappings().one()
+        assert (job.status, job.error_code) == ("failed", "fixture_persist_refused")
+        assert job.resolved["repository_run"]["attempts"][-1]["state"] == "awaiting_activation"
+        assert job.artifact_key is None and job.public_projection is None and job.released_at is None
+        assert lease["phase"] == "finished"
+        assert gate["mode"] == "disabled" and reservation["state"] == "settled"
+
+
+def test_finish_holds_unresolved_work_after_awaiting_activation_persist_error(work_rows):
+    db, _, _, _ = work_rows
+    _set_native_awaiting_activation(db)
+
+    assert _finish_service(db).finish(
+        "job", error=RuntimeFailure("storage_adapter_failure"), fence="2" * 32) is True
+
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        reservation = session.execute(select(tables["program_reservations"])).mappings().one()
+        slot = session.execute(select(tables["program_slots"])).mappings().one()
+        intent = session.execute(select(tables["program_call_intents"])).mappings().one()
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        assert (job.status, job.error_code) == ("blocked", "execution_uncertain")
+        assert (reservation["state"], slot["state"], intent["state"]) == (
+            "unknown", "unknown", "unknown")
+        assert gate["mode"] == "inhibited"
+        assert job.artifact_key is None and job.public_projection is None and job.released_at is None
+
+
+def test_finish_refuses_malformed_awaiting_activation_metadata(work_rows):
+    db, _, _, _ = work_rows
+    _set_native_awaiting_activation(db, valid=False)
+    before = _finish_snapshot(db)
+
+    with pytest.raises(FinishRefused):
+        _finish_service(db).finish(
+            "job", error=RuntimeFailure("fixture_persist_refused"), fence="2" * 32)
+
+    assert _finish_snapshot(db) == before
+
+
+def test_finish_accepts_live_preentry_timeout_activation_cancel_marker(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
+    _set_native_awaiting_activation(db)
+    _set_hand_back_attempt_state(db, "activation_cancelled")
+
+    assert _finish_service(db).finish(
+        "job", error=RuntimeFailure("execution_timeout", False), fence="2" * 32) is True
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        lease = session.execute(select(Base.metadata.tables["worker_execution_leases"])).mappings().one()
+        assert (job.status, job.error_code) == ("failed", "execution_timeout")
+        assert job.artifact_key is None and job.public_projection is None and job.released_at is None
+        assert lease["phase"] == "finished"
+
+
+def test_finish_refuses_expired_preentry_timeout_owner_without_mutation(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
+    _set_native_awaiting_activation(db)
+    _set_hand_back_attempt_state(db, "activation_cancelled")
+    with db.sessions.begin() as session:
+        leases = Base.metadata.tables["worker_execution_leases"]
+        session.execute(update(leases).where(leases.c.job_id == "job").values(
+            execution_deadline=time.time() - 1))
+    before = _finish_snapshot(db)
+
+    with pytest.raises(FinishRefused):
+        _finish_service(db).finish(
+            "job", error=RuntimeFailure("execution_timeout", False), fence="2" * 32)
+
+    assert _finish_snapshot(db) == before
 
 
 def test_finish_execution_completed_hint_cannot_replace_attempt_marker(work_rows):
@@ -2467,6 +2587,40 @@ def test_finish_allows_verified_empty_work_preappend_error(work_rows, error_code
         assert lease["phase"] == "finished"
 
 
+def test_finish_allows_requested_cancel_before_preappend_with_empty_work(work_rows):
+    db, _, _, _ = work_rows
+    _clear_work_history(db)
+    with db.sessions.begin() as session:
+        session.get(Job, "job").cancel_requested = True
+
+    assert _finish_service(db).finish("job", cancelled=True, fence="2" * 32) is True
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        lease = session.execute(select(Base.metadata.tables["worker_execution_leases"])).mappings().one()
+        assert (job.status, job.error_code) == ("cancelled", "cancelled")
+        assert job.resolved["repository_run"]["attempts"] == []
+        assert job.artifact_key is None and job.artifact_sha256 is None
+        assert job.public_projection is None and job.released_at is None
+        assert lease["phase"] == "finished"
+
+
+@pytest.mark.parametrize("case", ["not_requested", "workful"])
+def test_finish_refuses_preappend_cancel_without_empty_requested_closure(work_rows, case):
+    db, _, _, _ = work_rows
+    if case == "not_requested":
+        _clear_work_history(db)
+    else:
+        with db.sessions.begin() as session:
+            session.get(Job, "job").cancel_requested = True
+    before = _finish_snapshot(db)
+
+    with pytest.raises(FinishRefused):
+        _finish_service(db).finish("job", cancelled=True, fence="2" * 32)
+
+    assert _finish_snapshot(db) == before
+
+
 @pytest.mark.parametrize("extra", [
     {"cancelled": True}, {"execution_completed": True},
 ])
@@ -2603,7 +2757,7 @@ def test_finish_stale_fence_refuses_without_owner_mutation(work_rows):
         assert lease["phase"] == "started"
 
 
-def test_worker_does_not_retry_a_refused_finish():
+def test_worker_handles_one_refused_finish_without_reclassification():
     class Stop:
         def is_set(self):
             return False
@@ -2640,10 +2794,58 @@ def test_worker_does_not_retry_a_refused_finish():
         execution_fence="2" * 32, id="job", task="task",
         resolved={"grant": {"timeout_seconds": 5}, "tools": []},
     )
-    with pytest.raises(FinishRefused):
-        asyncio.run(worker.execute(job))
+    asyncio.run(worker.execute(job))
     assert completed == ["job"]
     assert len(calls) == 1 and "artifact" in calls[0] and "error" not in calls[0]
+
+
+def test_worker_handles_refusal_inside_store_error_path_once(monkeypatch):
+    failure = RuntimeFailure("storage_adapter_failure")
+    completed = []
+
+    class Stop:
+        def is_set(self):
+            return False
+
+        async def wait(self):
+            return False
+
+    class Runner:
+        authorization_check = None
+
+        async def run(self, resolved, task, job_id):
+            completed.append(job_id)
+            return {"answer": "ok"}
+
+    async def fail_store(_put, job_id, result):
+        raise failure
+
+    monkeypatch.setattr(asyncio, "to_thread", fail_store)
+    worker = Worker.__new__(Worker)
+    worker.platform = SimpleNamespace(
+        settings=SimpleNamespace(job_timeout_seconds=5, lease_seconds=1),
+        store=SimpleNamespace(put=lambda job_id, result: None),
+    )
+    worker.runner = Runner()
+    worker.repository_run_executor = None
+    worker.stop = Stop()
+    worker.heartbeat = lambda job_id=None: None
+    calls = []
+
+    def refuse(*args, **kwargs):
+        calls.append(kwargs)
+        raise FinishRefused("owner refusal")
+
+    worker.finish = refuse
+    job = SimpleNamespace(
+        execution_fence="2" * 32, id="job", task="task",
+        resolved={"grant": {"timeout_seconds": 5}, "tools": []},
+    )
+    asyncio.run(worker.execute(job))
+    assert completed == ["job"]
+    assert len(calls) == 1
+    assert calls[0]["error"].code == "storage_adapter_failure"
+    assert calls[0]["execution_completed"] is True
 
 
 @pytest.mark.parametrize(("failure", "expected_code"), [

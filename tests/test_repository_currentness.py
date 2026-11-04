@@ -221,6 +221,8 @@ def test_cancelled_started_worker_can_record_cleanup_after_work_revocation(guard
     worker.finish(claimed.id,cancelled=True,fence=claimed.execution_fence)
     row=platform.get_job(claimed.id)
     assert row.status=='cancelled' and row.lease_owner is None and row.lease_until is None
+    assert row.error_code=='cancelled' and row.artifact_key is None
+    assert row.public_projection is None and row.released_at is None
     with platform.db.sessions() as session:
         assert session.get(WorkerExecutionLease,claimed.id).phase=='finished'
 

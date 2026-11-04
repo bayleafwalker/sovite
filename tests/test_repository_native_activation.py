@@ -256,7 +256,12 @@ def test_running_persist_failure_stays_known_nonexecuted(native_owner,monkeypatc
     asyncio.run(run())
     observed=f.platform.get_job(job.id)
     assert f.driver.effects==0 and not f.lifecycle.effect_started(job.id)
-    assert observed.error_code=='fixture_persist_refused'
+    assert observed.status=='failed' and observed.error_code=='fixture_persist_refused'
+    assert observed.artifact_key is None and observed.public_projection is None and observed.released_at is None
+    with f.platform.db.sessions() as session:
+        assert session.get(WorkerExecutionLease,job.id).phase=='finished'
+        persisted=session.get(Job,job.id).resolved['repository_run']['attempts'][-1]
+        assert persisted['state']=='awaiting_activation'
 
 
 def test_sdk1_4_preserves_all_previous1_3_named_schemas():
@@ -291,8 +296,9 @@ def test_stale_work_veto_stops_wait_but_preserves_history(native_owner):
 
 
 def test_wait_never_extends_started_execution_deadline(native_owner):
-    f=native_owner;f.platform.settings=replace(f.platform.settings,job_timeout_seconds=2)
+    f=native_owner;f.platform.settings=replace(f.platform.settings,job_timeout_seconds=10)
     worker,job=queued(f)
+    f.platform.settings=replace(f.platform.settings,job_timeout_seconds=2)
     async def run():
         task=await waiting(f,worker,job)
         original=f.driver.context.deadline
@@ -301,4 +307,29 @@ def test_wait_never_extends_started_execution_deadline(native_owner):
             assert session.get(WorkerExecutionLease,job.id).execution_deadline==original
     asyncio.run(run())
     assert f.driver.effects==0
-    assert f.platform.get_job(job.id).error_code not in {'execution_uncertain','external_execution_uncertain'}
+    observed=f.platform.get_job(job.id)
+    assert (observed.status,observed.error_code)==('failed','execution_timeout')
+    assert observed.artifact_key is None and observed.public_projection is None and observed.released_at is None
+    assert observed.resolved['repository_run']['attempts'][-1]['state']=='activation_cancelled'
+
+
+def test_expired_started_execution_deadline_refuses_cleanup(native_owner):
+    f=native_owner;f.platform.settings=replace(f.platform.settings,job_timeout_seconds=2)
+    worker,job=queued(f)
+    async def run():
+        task=await waiting(f,worker,job)
+        with f.platform.db.sessions()as session:
+            before=session.get(Job,job.id)
+            resolved=copy.deepcopy(before.resolved)
+            lease=session.get(WorkerExecutionLease,job.id)
+            original=(before.status,before.error_code,before.lease_owner,before.lease_until,
+                      lease.phase,lease.lease_until,lease.execution_deadline)
+        await asyncio.wait_for(task,6)
+        with f.platform.db.sessions()as session:
+            after=session.get(Job,job.id);lease=session.get(WorkerExecutionLease,job.id)
+            assert (after.status,after.error_code,after.lease_owner,after.lease_until,
+                    lease.phase,lease.lease_until,lease.execution_deadline)==original
+            assert after.resolved==resolved
+            assert after.artifact_key is None and after.public_projection is None and after.released_at is None
+    asyncio.run(run())
+    assert f.driver.effects==0

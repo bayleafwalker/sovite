@@ -29,6 +29,53 @@ class FinishRefused(RuntimeError):
     """A finish owner decision was unavailable; execution must not be reclassified."""
 
 
+def _native_activation_preentry_matches(job, run, attempt, fence: str, execution_deadline) -> bool:
+    """Check the persisted native activation descriptor against this exact attempt."""
+    activation = attempt.get("activation") if type(attempt) is dict else None
+    expected_fields = {
+        "schema_version", "job_id", "attempt_id", "workspace_id", "repository_id",
+        "principal_id", "generation", "fence_sha256", "packet_sha256", "deadline",
+    }
+    if (type(activation) is not dict or set(activation) != expected_fields
+            or activation.get("schema_version") != "sovite-native-activation/v1"
+            or type(fence) is not str or not fence):
+        return False
+    fence_digest = hashlib.sha256(fence.encode("utf-8")).hexdigest()
+    packet_digest = attempt.get("packet_sha256")
+    deadline = activation.get("deadline")
+    if (type(packet_digest) is not str or re.fullmatch(r"[0-9a-f]{64}", packet_digest) is None
+            or type(deadline) not in {int, float} or isinstance(deadline, bool)
+            or not math.isfinite(deadline)
+            or type(execution_deadline) not in {int, float} or isinstance(execution_deadline, bool)
+            or not math.isfinite(execution_deadline)):
+        return False
+    try:
+        run_deadline_value = datetime.fromisoformat(run["deadline"].replace("Z", "+00:00"))
+        if run_deadline_value.tzinfo is None or run_deadline_value.utcoffset() is None:
+            return False
+        run_deadline = run_deadline_value.timestamp()
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if (not math.isfinite(run_deadline)
+            or any(type(value) is not str or not value for value in (
+                job.id, job.caller, job.generation, run.get("workspace_id"),
+                run.get("repository_id"), attempt.get("id"),
+            ))):
+        return False
+    return (
+        activation["job_id"] == job.id
+        and activation["attempt_id"] == attempt.get("id") == f"{job.id}-{job.attempts}"
+        and activation["workspace_id"] == run.get("workspace_id")
+        and activation["repository_id"] == run.get("repository_id")
+        and activation["principal_id"] == job.caller == run.get("principal_id")
+        and activation["generation"] == job.generation
+        and activation["fence_sha256"] == fence_digest == attempt.get("fence_sha256")
+        and activation["packet_sha256"] == packet_digest
+        and deadline <= execution_deadline
+        and deadline <= run_deadline
+    )
+
+
 # Arbitrary constant naming the PostgreSQL advisory lock that serializes claims.
 CLAIM_LOCK = 0x50617669746531
 
@@ -820,9 +867,18 @@ class LeaseService:
                             "repository_binding_unavailable",
                             "repository_binding_mismatch",
                         }
+                        preappend_cancel = (
+                            finish_outcome is not None
+                            and finish_outcome[0] is None
+                            and finish_outcome[1] is None
+                            and finish_outcome[2] is True
+                            and finish_outcome[3] is False
+                            and probe["cancel_requested"] is True
+                        )
                         # A narrow pre-append finish is safe only when no record
-                        # exists for this claimed attempt and the producer failed
-                        # before it could create any Work state.
+                        # exists for this claimed attempt and either the producer
+                        # failed before Work creation or an authorized cancellation
+                        # request must retire the still-live lease.
                         attempt_numbers = []
                         prefix = f"{job_id}-"
                         prior_terminal = {
@@ -839,11 +895,16 @@ class LeaseService:
                                     or not _is_lower_hex(attempt.get("fence_sha256"), 64)):
                                 raise _HandBackOwnerUnavailable()
                             attempt_numbers.append(int(suffix))
-                        if (finish_outcome is None or finish_outcome[0] is not None
-                                or finish_outcome[2] is not False
-                                or finish_outcome[3] is not False
-                                or type(getattr(error, "code", None)) is not str
-                                or error.code not in preappend_codes
+                        preappend_error = (
+                            finish_outcome is not None
+                            and finish_outcome[0] is None
+                            and finish_outcome[1] is not None
+                            and finish_outcome[2] is False
+                            and finish_outcome[3] is False
+                            and type(getattr(error, "code", None)) is str
+                            and error.code in preappend_codes
+                        )
+                        if (not (preappend_error or preappend_cancel)
                                 or any(number >= probe["attempts"] for number in attempt_numbers)
                                 or attempt_numbers != sorted(set(attempt_numbers))):
                             raise _HandBackOwnerUnavailable()
@@ -1414,6 +1475,8 @@ class LeaseService:
                     artifact, error, cancelled, execution_completed = finish_outcome
                     now = time.time()
                     projected_history = bool(projections_all or legacy_links)
+                    if preappend_finish and cancelled and row.cancel_requested is not True:
+                        raise _HandBackOwnerUnavailable()
                     if lease is None:
                         raise _HandBackOwnerUnavailable()
                     try:
@@ -1447,6 +1510,28 @@ class LeaseService:
                             accepted_attempt_states = frozenset({
                                 "failed", "cancelled", "activation_cancelled",
                             })
+                        elif (error is not None and artifact is None and not cancelled
+                              and not execution_completed and not row.cancel_requested
+                              and current_attempt_state == "awaiting_activation"
+                              and _native_activation_preentry_matches(
+                                  row, run, current_attempt_row, fence,
+                                  lease.execution_deadline)):
+                            # The executor persisted the native activation
+                            # descriptor but a later pre-entry persistence
+                            # failure prevented its terminal marker. Preserve
+                            # the original error only for this exact attempt.
+                            accepted_attempt_states = frozenset({"awaiting_activation"})
+                        elif (error is not None and error.code == "execution_timeout"
+                              and artifact is None and not cancelled
+                              and not execution_completed and not row.cancel_requested
+                              and current_attempt_state == "activation_cancelled"
+                              and _native_activation_preentry_matches(
+                                  row, run, current_attempt_row, fence,
+                                  lease.execution_deadline)):
+                            # A live timeout may pair with the executor's
+                            # durable pre-entry cancellation marker. The exact
+                            # lease/deadline checks above still gate closure.
+                            accepted_attempt_states = frozenset({"activation_cancelled"})
                         elif error is not None and execution_completed is True:
                             accepted_attempt_states = frozenset({"completed"})
                         elif cancelled or row.cancel_requested:
@@ -1524,10 +1609,16 @@ class LeaseService:
 
                     if explicit_uncertainty or unresolved_work:
                         row.status, row.error_code = "blocked", "execution_uncertain"
+                    elif cancelled or row.cancel_requested:
+                        # A persisted caller cancellation may retire a live lease
+                        # after Work currentness alone was revoked. Other role or
+                        # owner denials still prevent a cancellation outcome.
+                        if denied and denied != "repository_currentness_revoked":
+                            row.status, row.error_code = "blocked", denied
+                        else:
+                            row.status, row.error_code = "cancelled", "cancelled"
                     elif denied:
                         row.status, row.error_code = "blocked", denied
-                    elif cancelled or row.cancel_requested:
-                        row.status, row.error_code = "cancelled", "cancelled"
                     elif execution_completed and run is not None:
                         # Do not replay a repository effect because storing its
                         # completed result failed; this outcome preserves the
