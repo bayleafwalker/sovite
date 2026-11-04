@@ -14,7 +14,9 @@ from sovite.service import PlatformError
 from test_work_projection_rows import _finish_snapshot, work_rows
 
 
-@pytest.mark.parametrize("failure_site", ("lock_executor", "comparator"))
+@pytest.mark.parametrize("failure_site", (
+    "lock_executor", "comparator", "receipt_query", "binding_reflection",
+))
 def test_unexpected_recovery_helper_failure_rolls_back_and_blocks_claim(
     work_rows, monkeypatch, failure_site,
 ):
@@ -51,12 +53,36 @@ def test_unexpected_recovery_helper_failure_rolls_back_and_blocks_claim(
             raise RuntimeError("synthetic-private-lock-marker")
 
         monkeypatch.setattr(projection_module, "lock_work_projection_set", fail_after_candidate_write)
-    else:
+    elif failure_site == "comparator":
         def fail_comparator(*_args, **_kwargs):
             injected["reached"] = True
             raise RuntimeError("synthetic-private-comparator-marker")
 
         monkeypatch.setattr(projection_module, "_compare_actual_rows", fail_comparator)
+    elif failure_site == "receipt_query":
+        from sqlalchemy.orm import Session
+
+        original_execute = Session.execute
+
+        def fail_receipt_query(session, statement, *args, **kwargs):
+            if not injected["reached"] and "program_call_receipts" in str(statement):
+                injected["reached"] = True
+                raise RuntimeError("synthetic-private-receipt-query-marker")
+            return original_execute(session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(Session, "execute", fail_receipt_query)
+    else:
+        import sqlalchemy
+
+        original_table = sqlalchemy.Table
+
+        def fail_binding_reflection(name, *args, **kwargs):
+            if not injected["reached"] and name == projection_module._BINDING_TABLE:
+                injected["reached"] = True
+                raise RuntimeError("synthetic-private-binding-reflection-marker")
+            return original_table(name, *args, **kwargs)
+
+        monkeypatch.setattr(sqlalchemy, "Table", fail_binding_reflection)
 
     with pytest.raises(PlatformError) as error:
         service.claim()

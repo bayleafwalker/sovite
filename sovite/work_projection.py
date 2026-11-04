@@ -634,6 +634,7 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
     from .db import Base, digest
     from .lease_service import execution_owner_key
 
+    recovery_mode = recovery_attempt_states is not None or recovery_expected_owner is not None
     if not _owner_transaction_is_active(session):
         raise _WorkProjectionUnavailable()
     if (not _projection_id(scope_id) or not _projection_id(call_id)
@@ -914,6 +915,8 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
                                receipt_t.c.call_id == call_id,
                                order=(receipt_t.c.receipt_id,))
     except Exception:
+        if recovery_mode:
+            raise _WorkProjectionOperationFailure() from None
         raise _WorkProjectionUnavailable() from None
     if len(receipts) > 1:
         raise _WorkProjectionUnavailable()
@@ -979,6 +982,8 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
         binding_t = Table(_BINDING_TABLE, MetaData(), schema=binding_schema,
                           autoload_with=connection)
     except Exception:
+        if recovery_mode:
+            raise _WorkProjectionOperationFailure() from None
         raise _WorkProjectionUnavailable() from None
     if (set(binding_t.c.keys()) != _BINDING_COLUMNS
             or [column.name for column in binding_t.primary_key.columns] != ["scope_id", "call_id"]):
