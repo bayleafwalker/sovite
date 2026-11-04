@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from .adapters import AdapterRunner, RuntimeFailure
 from .db import Job, WorkerHeartbeat
-from .lease_service import CLAIM_LOCK, LeaseService, replay_safe
+from .lease_service import CLAIM_LOCK, FinishRefused, LeaseService, replay_safe
 from .service import Platform
 
 log = logging.getLogger("sovite.worker")
@@ -131,6 +131,10 @@ class Worker:
             # after an uncertain failure is a separate decision.
             artifact = await asyncio.to_thread(self.platform.store.put, job.id, result)
             self.finish(job.id, artifact=artifact, fence=captured_fence)
+        except FinishRefused:
+            # The owner refused to close the attempt. Do not turn this refusal
+            # into another finish call or an internal execution failure.
+            raise
         except RuntimeFailure as exc:
             self.finish(job.id, error=exc, fence=captured_fence)
         except asyncio.CancelledError:

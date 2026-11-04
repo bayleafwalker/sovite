@@ -16,8 +16,10 @@ from test_workflow_admission import installed as mixed_installed, approval
 def finish_source(platform, binding, key):
     job = platform.submit_workflow_role(binding, "implementer", "private source", "workflow-consumer", key)
     worker = Worker(platform)
-    assert worker.claim().id == job.id
-    worker.finish(job.id, artifact=platform.store.put(job.id, {"answer": "PRIVATE-" + key}))
+    claimed = worker.claim()
+    assert claimed.id == job.id
+    worker.finish(job.id, artifact=platform.store.put(job.id, {"answer": "PRIVATE-" + key}),
+                  fence=claimed.execution_fence)
     return platform.get_job(job.id)
 
 
@@ -365,8 +367,10 @@ def approved_eight_link_chain(mixed_installed):
             source = platform.submit_workflow_role(binding, next_role, "", "workflow-consumer",
                 f"chain-source-{depth + 1}", source_release=release["release_id"],
                 transfer_id=transfer_id)
-            assert worker.claim().id == source.id
-            worker.finish(source.id, artifact=platform.store.put(source.id, {"answer": f"Review output {depth + 1}"}))
+            claimed = worker.claim()
+            assert claimed.id == source.id
+            worker.finish(source.id, artifact=platform.store.put(source.id, {"answer": f"Review output {depth + 1}"}),
+                          fence=claimed.execution_fence)
             source = platform.get_job(source.id)
     return platform, release, args["content"]
 

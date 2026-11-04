@@ -2,6 +2,7 @@
 from dataclasses import replace
 import pytest
 from sovite import lease_service as leases
+from sovite.lease_service import FinishRefused
 from sovite.adapters import RuntimeFailure
 from sovite.worker import Worker
 from test_execution_leases import owner,submit,pull,context,snapshot,refused
@@ -29,5 +30,6 @@ def test_repository_only_cannot_renew_finish_or_hand_back_ordinary_job(owner):
     before=snapshot(owner.platform)
     assert worker.renew(job.id,fence=job.execution_fence)is False
     worker.hand_back(job.id,fence=job.execution_fence)
-    worker.finish(job.id,error=RuntimeFailure('fixture_failure'),fence=job.execution_fence)
+    with pytest.raises(FinishRefused):
+        worker.finish(job.id,error=RuntimeFailure('fixture_failure'),fence=job.execution_fence)
     assert snapshot(owner.platform)==before

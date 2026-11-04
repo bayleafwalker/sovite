@@ -18,6 +18,7 @@ from sovite.adapters import AdapterRunner, RuntimeFailure
 from sovite.api import create_app
 from sovite.cli import assessment
 from sovite.db import AuditEvent, Job, Qualification
+from sovite.lease_service import FinishRefused
 from sovite.qualification import initialize_keys, is_qualified, issue_qualification, verify_qualification, runtime_settings_fingerprint
 from sovite.service import Platform, PlatformError
 from sovite.settings import Settings
@@ -122,7 +123,7 @@ def test_revocation_between_artifact_commit_and_release_is_fail_closed(setup):
     assert claimed.id == job.id
     artifact = platform.store.put(job.id, {"answer": "PRIVATE"})
     platform.inhibit(job.grant_id, "Operator revocation during execution")
-    worker.finish(job.id, artifact=artifact)
+    worker.finish(job.id, artifact=artifact, fence=claimed.execution_fence)
     row = platform.get_job(job.id)
     assert row.status == "blocked" and row.public_projection is None
     assert row.artifact_key is not None
@@ -306,14 +307,22 @@ def test_compute_pool_binding_and_late_lease_holder_cannot_publish(setup):
     wrong = Platform(replace(settings, compute_id="different-pool"))
     assert Worker(wrong).claim() is None
     worker = Worker(platform)
-    assert worker.claim().id == job.id
+    claimed = worker.claim()
+    assert claimed.id == job.id
     with platform.db.sessions.begin() as session:
         session.get(Job, job.id).lease_until = time.time() - 1
     second = Worker(platform)
-    assert second.claim().id == job.id
-    worker.finish(job.id, artifact=platform.store.put(job.id, {"answer": "stale"}))
+    replacement = second.claim()
+    assert replacement.id == job.id
+    from test_execution_leases import snapshot
+    stale_blob = platform.store.put(job.id, {"answer": "stale"})
+    before_stale_finish = snapshot(platform)
+    with pytest.raises(FinishRefused):
+        worker.finish(job.id, artifact=stale_blob, fence=claimed.execution_fence)
+    assert snapshot(platform) == before_stale_finish
     assert platform.get_job(job.id).public_projection is None
-    second.finish(job.id, artifact=platform.store.put(job.id, {"answer": "current"}))
+    second.finish(job.id, artifact=platform.store.put(job.id, {"answer": "current"}),
+                  fence=replacement.execution_fence)
     assert platform.get_job(job.id).status == "completed"
 
 
@@ -550,10 +559,11 @@ def test_model_concurrency_limit_lets_other_models_overtake(tmp_path):
     second = platform.submit("incident-forensics", "task", "cloud-codex", "b")
     other = platform.submit("change-assessment", "task", "operations", "c", input_class="C2")
     a, b, c = Worker(platform), Worker(platform), Worker(platform)
-    assert a.claim().id == first.id
+    first_claim = a.claim()
+    assert first_claim.id == first.id
     assert b.claim().id == other.id  # The queued slow-model job waits; it does not block the fast lane.
     assert c.claim() is None
-    a.finish(first.id, error=RuntimeFailure("upstream_unavailable"))
+    a.finish(first.id, error=RuntimeFailure("upstream_unavailable"), fence=first_claim.execution_fence)
     assert c.claim().id == second.id
 
 
@@ -684,7 +694,7 @@ def test_o2_worker_claim_preserves_trusted_owner_and_populates_universal_lease(s
         assert lease.fence == job.execution_fence
         assert platform.get_job(job.id, session).attempts == 1
         assert session.scalars(select(WorkerExecutionOperation)).all()
-    worker.finish(job.id, error=RuntimeFailure("upstream_rejected"))
+    worker.finish(job.id, error=RuntimeFailure("upstream_rejected"), fence=job.execution_fence)
     with platform.db.sessions() as session:
         assert session.get(WorkerExecutionLease, job.id).phase == "finished"
         assert session.get(Job, job.id).lease_owner is None

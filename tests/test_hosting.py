@@ -462,10 +462,11 @@ def test_revocation_rechecked_at_claim_and_release(hosted):
     assert platform.get_job(first.id).status == "blocked"
     settings.qualification_revoked_keys = []
     second = platform.submit("incident-forensics", "private", "cloud-codex", "second", input_class="C1")
-    assert worker.claim().id == second.id
+    claimed = worker.claim()
+    assert claimed.id == second.id
     artifact = platform.store.put(second.id, {"private": "result"})
     settings.qualification_revoked_keys = [key_digest(tenant.public_key)]
-    worker.finish(second.id, artifact=artifact)
+    worker.finish(second.id, artifact=artifact, fence=claimed.execution_fence)
     assert platform.get_job(second.id).status == "blocked"
     assert platform.public_status(second.receipt, second.caller)["status"] == "unavailable"
 
