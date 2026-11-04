@@ -3,10 +3,12 @@ from contextlib import asynccontextmanager
 from collections import deque
 import copy
 import json
+import sqlite3
 import time
 from types import SimpleNamespace
 
 import httpx
+from sqlalchemy.exc import OperationalError
 import pytest
 from websockets.asyncio.server import serve
 import yaml
@@ -39,18 +41,26 @@ class _HandshakeDiagnostics:
         if len(self.events) == self.events.maxlen:
             self.dropped += 1
         allowed = {
-            "action": {"start", "open", "hello", "touch", "fence"},
-            "stage": {"connect", "setup"},
-            "outcome": {"ok", "error", "unknown"},
+            "action": {"start", "open", "hello", "touch", "fence", "authorize", "renew", "other"},
+            "stage": {"connect", "setup", "authority"},
+            "outcome": {"ok", "error", "cancelled", "unknown"},
             "category": {"authority_unavailable", "model_identity_mismatch", "workload_denied",
                          "model_protocol_error", "model_host_unavailable", "gateway_fenced",
-                         "gateway_error", "timeout", "other"},
+                         "gateway_error", "timeout", "http_timeout", "transport_error",
+                         "database_busy", "database_operational_error", "invalid_response",
+                         "cancelled", "unknown", "other"},
+            "cause_category": {"timeout", "http_timeout", "transport_error", "database_busy",
+                               "database_operational_error", "invalid_response", "cancelled",
+                               "other", "unknown", "none"},
+            "status": {"2xx", "422", "4xx", "5xx", "other"},
+            "owner_state": {"not_observed"},
             "predicates": {"unavailable"},
         }
         booleans = {"tls_present", "tls13", "subprotocol_ok", "no_extensions", "path_ok"}
         safe = {key: value for key, value in fields.items()
                 if (key in booleans and type(value) is bool)
-                or (key in allowed and type(value) is str and value in allowed[key])}
+                or (key in allowed and type(value) is str and value in allowed[key])
+                or (key == "duration_ms" and type(value) is int and 0 <= value <= 60000)}
         elapsed = min(60000, max(0, int((time.monotonic() - self.started) * 1000)))
         self.events.append({"elapsed_ms": elapsed, **safe})
 
@@ -72,6 +82,97 @@ def _error_category(error):
     return "other"
 
 
+def _safe_exception_category(error):
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "http_timeout" if isinstance(error, httpx.TimeoutException) else "timeout"
+    if isinstance(error, httpx.TransportError):
+        return "transport_error"
+    if isinstance(error, OperationalError):
+        code = getattr(getattr(error, "orig", None), "sqlite_errorcode", None)
+        if code in {getattr(sqlite3, "SQLITE_BUSY", -1), getattr(sqlite3, "SQLITE_LOCKED", -1)}:
+            return "database_busy"
+        return "database_operational_error"
+    if isinstance(error, (ValueError, KeyError, TypeError, json.JSONDecodeError)):
+        return "invalid_response"
+    return "other"
+
+
+def _safe_cause_category(error):
+    seen = set()
+    current = error.__cause__ or error.__context__
+    for _ in range(4):
+        if current is None:
+            return "none"
+        identity = id(current)
+        if identity in seen:
+            return "unknown"
+        seen.add(identity)
+        category = _safe_exception_category(current)
+        if category != "other":
+            return category
+        current = current.__cause__ or current.__context__
+    return "unknown" if current is not None else "none"
+
+
+def _status_category(status):
+    if status == 422:
+        return "422"
+    if 200 <= status < 300:
+        return "2xx"
+    if 400 <= status < 500:
+        return "4xx"
+    if 500 <= status < 600:
+        return "5xx"
+    return "other"
+
+
+def _best_effort_observation(callback):
+    """Diagnostic failures must not replace the observed operation outcome."""
+    try:
+        callback()
+    except asyncio.CancelledError:
+        # The callback is synchronous observer code. Even if it raises
+        # CancelledError, it must not replace the transport/gateway outcome.
+        return
+    except Exception:
+        return
+
+
+class _DiagnosticASGITransport(httpx.AsyncBaseTransport):
+    """Pass through ASGI requests while retaining bounded, body-free diagnostics."""
+    def __init__(self, transport, diagnostics):
+        self.transport = transport
+        self.diagnostics = diagnostics
+
+    async def handle_async_request(self, request):
+        action = request.url.path.rsplit("/", 1)[-1]
+        if action not in {"start", "open", "hello", "touch", "fence", "authorize", "renew"}:
+            action = "other"
+        started = time.monotonic()
+        try:
+            response = await self.transport.handle_async_request(request)
+        except asyncio.CancelledError:
+            _best_effort_observation(lambda: self.diagnostics.add(
+                action=action, stage="authority", outcome="cancelled", category="cancelled",
+                duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
+            raise
+        except Exception as error:
+            _best_effort_observation(lambda: self.diagnostics.add(
+                action=action, stage="authority", outcome="error", category=_safe_exception_category(error),
+                duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
+            raise
+        _best_effort_observation(lambda: self.diagnostics.add(
+            action=action, stage="authority", outcome="ok" if response.status_code == 200 else "error",
+            status=_status_category(response.status_code),
+            duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
+        return response
+
+    async def aclose(self):
+        await self.transport.aclose()
+
+
 class _DiagnosticGateway(Gateway):
     """Call the real gateway while retaining only fixed diagnostic categories."""
     def __init__(self, authority, diagnostics):
@@ -79,27 +180,45 @@ class _DiagnosticGateway(Gateway):
         self.diagnostics = diagnostics
 
     async def call(self, action, **fields):
-        recorded = type(action) is str and action in {"start", "open", "hello", "touch", "fence"}
+        recorded = type(action) is str and action in {"start", "open", "hello", "touch", "fence", "authorize", "renew"}
         try:
             result = await super().call(action, **fields)
+        except asyncio.CancelledError:
+            if recorded:
+                _best_effort_observation(lambda: self.diagnostics.add(
+                    action=action, stage="authority", outcome="cancelled", category="cancelled"))
+            raise
         except Exception as error:
             if recorded:
-                self.diagnostics.add(action=action, outcome="error", category=_error_category(error))
+                def observe_failure():
+                    event = {"action": action, "stage": "authority", "outcome": "error",
+                             "category": _error_category(error), "cause_category": _safe_cause_category(error),
+                             "owner_state": "not_observed"}
+                    self.diagnostics.add(**event)
+                    if action in {"authorize", "renew"} and isinstance(error, GatewayError):
+                        error.add_note(self.diagnostics.note())
+
+                _best_effort_observation(observe_failure)
             raise
         if recorded:
-            self.diagnostics.add(action=action, outcome="ok")
+            _best_effort_observation(lambda: self.diagnostics.add(
+                action=action, stage="authority", outcome="ok"))
         return result
 
     async def connect(self, socket):
-        try:
-            tls = socket.transport.get_extra_info("ssl_object")
-            self.diagnostics.add(stage="connect", tls_present=tls is not None,
-                tls13=bool(tls and tls.version() == "TLSv1.3"),
-                subprotocol_ok=socket.subprotocol == SUBPROTOCOL,
-                no_extensions=not bool(socket.protocol.extensions),
-                path_ok=socket.request.path == "/connector")
-        except Exception:
-            self.diagnostics.add(stage="connect", predicates="unavailable")
+        def observe_connect():
+            try:
+                tls = socket.transport.get_extra_info("ssl_object")
+                fields = {"tls_present": tls is not None,
+                          "tls13": bool(tls and tls.version() == "TLSv1.3"),
+                          "subprotocol_ok": socket.subprotocol == SUBPROTOCOL,
+                          "no_extensions": not bool(socket.protocol.extensions),
+                          "path_ok": socket.request.path == "/connector"}
+            except Exception:
+                fields = {"predicates": "unavailable"}
+            self.diagnostics.add(stage="connect", **fields)
+
+        _best_effort_observation(observe_connect)
         return await super().connect(socket)
 
 
@@ -132,7 +251,7 @@ def authority_env(database, tmp_path, v2_bundle):
 
 
 @asynccontextmanager
-async def connected(env, *, stall=False, helper_type=PilotHelper):
+async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_factory=_HandshakeDiagnostics):
     tls, key = certificates(env.path)
     provision_enrollment(env.platform, enrollment_id=ASSERTION['enrollment_id'], binding_id=env.model['id'],
                          installation_id=ASSERTION['installation_id'], role=env.role['id'], certificate=(env.path / 'helper.pem').read_bytes())
@@ -142,8 +261,11 @@ async def connected(env, *, stall=False, helper_type=PilotHelper):
     metadata.update(binding_id=env.model['id'], enrollment_role=env.role['id'], cancellation='disconnect-only')
     (env.path / 'identity.json').write_text(json.dumps(metadata))
     (env.path / 'model.gguf').write_bytes(b'weights')
-    client = AuthorityClient('http://control.test', env.settings.authority_token, transport=httpx.ASGITransport(app=env.app))
-    diagnostics = _HandshakeDiagnostics()
+    diagnostics = diagnostics_factory()
+    transport = _DiagnosticASGITransport(httpx.ASGITransport(app=env.app), diagnostics)
+    client = AuthorityClient('http://control.test', env.settings.authority_token, transport=transport)
+    helper_holder = {"value": None}
+
     gateway = _DiagnosticGateway(client, diagnostics)
     await gateway.start()
     async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
@@ -152,6 +274,7 @@ async def connected(env, *, stall=False, helper_type=PilotHelper):
             signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
             identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
         helper = helper_type(settings)
+        helper_holder["value"] = helper
         task = asyncio.create_task(helper.run())
         try:
             try:
@@ -160,11 +283,22 @@ async def connected(env, *, stall=False, helper_type=PilotHelper):
                         if task.done():
                             task.result()
                         await asyncio.sleep(.01)
+            except asyncio.CancelledError as error:
+                def observe_setup_cancellation():
+                    diagnostics.add(stage="setup", outcome="unknown")
+                    error.add_note(diagnostics.note())
+
+                _best_effort_observation(observe_setup_cancellation)
+                raise
             except Exception as error:
-                diagnostics.add(stage="setup", outcome="unknown")
-                error.add_note(diagnostics.note())
+                def observe_setup_failure():
+                    diagnostics.add(stage="setup", outcome="unknown")
+                    error.add_note(diagnostics.note())
+
+                _best_effort_observation(observe_setup_failure)
                 raise
             env.gateway, env.helper, env.engine, env.helper_settings = gateway, helper, engine, settings
+            env.authority_diagnostics = diagnostics
             yield env
         finally:
             await gateway.close()
