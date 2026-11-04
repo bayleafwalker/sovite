@@ -1494,11 +1494,6 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                     awaiting_activation_persist_failure = False
                     if run is not None and not preappend_finish:
-                        if cancelled or row.cancel_requested:
-                            # Repository cancellation cleanup is permitted only
-                            # for a requested cancellation before any attempt
-                            # record or Work/history has been created.
-                            raise _HandBackOwnerUnavailable()
                         if current_attempt_row is None or current_attempt is None:
                             raise _HandBackOwnerUnavailable()
                         fence_digest = hashlib.sha256(fence.encode("utf-8")).hexdigest()
@@ -1592,6 +1587,19 @@ class LeaseService:
                             session, row, purpose="active" if artifact else "observe")
                     except PlatformError as exc:
                         denied = exc.code
+                    currentness_cancel_cleanup = (
+                        denied == "repository_currentness_revoked"
+                        and preappend_finish and cancelled
+                        and row.cancel_requested is True
+                    )
+                    if ((cancelled and row.cancel_requested is not True)
+                            or (denied == "repository_currentness_revoked"
+                                and (cancelled or row.cancel_requested)
+                                and not currentness_cancel_cleanup)):
+                        # Currentness loss only permits the exact validated
+                        # empty-preappend cancellation; hints or current attempts
+                        # cannot expand that exception.
+                        raise _HandBackOwnerUnavailable()
                     if row.resolved.get("model", {}).get("connection", {}).get("kind") == "model-gateway":
                         try:
                             check_execution_binding(self.platform, session, row)

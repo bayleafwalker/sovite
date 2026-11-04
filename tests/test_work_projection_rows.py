@@ -1955,7 +1955,8 @@ def test_repository_running_persist_rejects_prior_cancel_request(work_rows, tmp_
 def _finish_service(db, *, deny=False):
     def authorize(session, job, *, purpose):
         if deny:
-            raise PlatformError("execution_scope_denied", "denied", 403)
+            code = deny if type(deny) is str else "execution_scope_denied"
+            raise PlatformError(code, "denied", 403)
         return {}
 
     platform = SimpleNamespace(
@@ -2159,18 +2160,47 @@ def test_finish_ineligible_is_nonrelease(work_rows):
         assert job.public_projection is None and job.released_at is None
 
 
-@pytest.mark.parametrize("cancel_requested", [False, True])
-def test_finish_preentry_cancel_requires_empty_history(work_rows, cancel_requested):
+def test_finish_preentry_cancel_without_persisted_intent_refuses(work_rows):
     db, _, _, _ = work_rows
     _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
     _set_hand_back_attempt_state(db, "activation_cancelled")
-    if cancel_requested:
-        with db.sessions.begin() as session:
-            session.get(Job, "job").cancel_requested = True
     before = _finish_snapshot(db)
 
     with pytest.raises(FinishRefused):
         _finish_service(db).finish("job", cancelled=True, fence="2" * 32)
+
+    assert _finish_snapshot(db) == before
+
+
+def test_finish_preentry_cancel_with_current_authority_preserves_known_projection(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
+    _set_hand_back_attempt_state(db, "activation_cancelled")
+    with db.sessions.begin() as session:
+        session.get(Job, "job").cancel_requested = True
+
+    assert _finish_service(db).finish("job", cancelled=True, fence="2" * 32) is True
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        gate = session.execute(select(Base.metadata.tables["program_gate_state"])).mappings().one()
+        reservation = session.execute(select(Base.metadata.tables["program_reservations"])).mappings().one()
+        assert (job.status, job.error_code) == ("cancelled", "cancelled")
+        assert gate["mode"] == "disabled" and reservation["state"] == "settled"
+        assert job.artifact_key is None and job.public_projection is None and job.released_at is None
+
+
+def test_finish_preentry_cancel_refuses_currentness_revoked_existing_attempt(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
+    _set_hand_back_attempt_state(db, "activation_cancelled")
+    with db.sessions.begin() as session:
+        session.get(Job, "job").cancel_requested = True
+    before = _finish_snapshot(db)
+
+    with pytest.raises(FinishRefused):
+        _finish_service(db, deny="repository_currentness_revoked").finish(
+            "job", cancelled=True, fence="2" * 32)
 
     assert _finish_snapshot(db) == before
 
