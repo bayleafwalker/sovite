@@ -1120,6 +1120,8 @@ class LeaseService:
                                    gate["cutover_fence_digest"], gate["cutover_owner_epoch"])
                         if any(value is None for value in cutover) and any(value is not None for value in cutover):
                             raise _HandBackOwnerUnavailable()
+                        if gate["mode"] == "active" and cutover[0] is None:
+                            raise _HandBackOwnerUnavailable()
                         if cutover[0] is not None and (not _is_lower_hex(cutover[1], 64)
                                 or not _is_lower_hex(cutover[2], 32) or not _is_lower_hex(cutover[3], 64)
                                 or type(cutover[4]) is not int or cutover[4] < 0):

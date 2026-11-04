@@ -826,6 +826,35 @@ def test_hand_back_finds_legacy_link_selected_by_subject_even_with_wrong_job(wor
         assert session.scalar(select(text("count(*)")).select_from(Base.metadata.tables["audit_events"])) == audits
 
 
+def test_hand_back_refuses_active_gate_without_cutover_in_history_only_branch(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("the PostgreSQL ledger_gate_active_batch CHECK forbids this stored row")
+    _seed_retained_legacy_history(db, include_current_projection=False)
+    connection = db.engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA ignore_check_constraints=ON")
+        cursor.execute("UPDATE program_gate_state SET mode = 'active' WHERE scope_id = 'scope'")
+        connection.commit()
+        cursor.execute("PRAGMA ignore_check_constraints=OFF")
+        connection.commit()
+    finally:
+        connection.close()
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
+
+
 def test_hand_back_rolls_back_all_ledger_and_owner_changes_after_projection_failure(work_rows, monkeypatch):
     db, _, _, binding = work_rows
     from sovite import program_ledger
