@@ -2,15 +2,17 @@
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, insert, make_url, select, text, update
+from sqlalchemy import create_engine, delete, insert, make_url, select, text, update
 
 from sovite.collection_transaction import owner_transaction
 from sovite.db import Base, Database, Job, MetadataRow, digest
-from sovite.lease_service import execution_owner_key
+from sovite.lease_service import LeaseService, execution_owner_key
 from sovite.repository_runs import RUN_SCHEMA, RepositoryRunAttemptExecutor
 from sovite.service import Platform, PlatformError
 from sovite.work_projection import (
@@ -450,6 +452,777 @@ def test_explicit_uncertain_attempt_holds_projection_in_same_owner_transaction(w
         assert binding_row[field] == (int(original[field]) if field == "policy_revision"
                                       else original[field])
     assert job.resolved["repository_run"]["attempts"][-1]["state"] == "uncertain"
+
+
+def _hand_back_service(db, *, captured_fence=None):
+    return LeaseService(
+        SimpleNamespace(db=db),
+        execution_owner_key(workload_id="workload", instance_id="instance"),
+        {"job": "2" * 32} if captured_fence is None else {"job": captured_fence},
+    )
+
+
+def _set_hand_back_attempt_state(db, state):
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        resolved = json.loads(json.dumps(job.resolved))
+    resolved["repository_run"]["attempts"][-1]["state"] = state
+    with db.sessions.begin() as session:
+        session.execute(_job_resolved_update(db), {
+            "resolved": json.dumps(resolved, separators=(",", ":")), "job_id": "job",
+        })
+
+
+def test_hand_back_holds_possible_dispatch_and_inhibits_gate_atomically(work_rows):
+    db, original, _, binding = work_rows
+    service = _hand_back_service(db)
+
+    assert service.hand_back("job", fence="2" * 32) is True
+
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        lease = session.execute(select(tables["worker_execution_leases"])).mappings().one()
+        reservation = session.execute(select(tables["program_reservations"])).mappings().one()
+        slot = session.execute(select(tables["program_slots"])).mappings().one()
+        intent = session.execute(select(tables["program_call_intents"])).mappings().one()
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        binding_row = session.execute(select(binding)).mappings().one()
+        projection = job.resolved["repository_run"]["program_ledger_projections_v1"][0]
+
+    assert (job.status, job.error_code, job.attempts) == ("blocked", "execution_uncertain", 1)
+    assert job.lease_owner is None and job.lease_until is None
+    assert lease.phase == "finished"
+    assert (reservation["state"], slot["state"], intent["state"]) == (
+        "unknown", "unknown", "unknown",
+    )
+    assert (reservation["reserved_usd_micro"], reservation["reserved_allowance_micro"]) == (10, 20)
+    assert gate["mode"] == "inhibited"
+    assert (projection["intent_state"], projection["reservation_state"], projection["slot_state"]) == (
+        "unknown", "unknown", "unknown",
+    )
+    assert projection["projection_revision"] == "2"
+    assert binding_row["projection_revision"] == 2
+    assert binding_row["projection_digest"] == projection_digest(projection)
+    for field in ("scope_id", "call_id", "subject_id", "work_job_id", "attempt_id",
+                  "slot_id", "purpose", "policy_revision", "policy_digest"):
+        assert binding_row[field] == (int(original[field]) if field == "policy_revision"
+                                      else original[field])
+    assert db.verify_audit()["valid"]
+
+
+@pytest.mark.parametrize("attempt_state", ["interrupted", "cancelled", "activation_cancelled"])
+def test_hand_back_conservatively_holds_nonactive_shutdown_attempt(work_rows, attempt_state):
+    db, _, _, binding = work_rows
+    _set_hand_back_attempt_state(db, attempt_state)
+
+    with owner_transaction(db) as session:
+        with pytest.raises(_WorkProjectionUnavailable):
+            _compare_actual_work_projection(session, scope_id="scope", call_id="call")
+        if attempt_state == "interrupted":
+            assert _compare_actual_work_projection(
+                session, scope_id="scope", call_id="call", allow_interrupted_attempt=True,
+            ) == "canonical_rows_agree"
+        else:
+            assert _compare_actual_work_projection(
+                session, scope_id="scope", call_id="call", allow_preentry_cancelled_attempt=True,
+            ) == "canonical_rows_agree"
+
+    assert _hand_back_service(db).hand_back("job", fence="2" * 32) is True
+
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        reservation = session.execute(select(tables["program_reservations"])).mappings().one()
+        slot = session.execute(select(tables["program_slots"])).mappings().one()
+        intent = session.execute(select(tables["program_call_intents"])).mappings().one()
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        binding_row = session.execute(select(binding)).mappings().one()
+        projection = job.resolved["repository_run"]["program_ledger_projections_v1"][0]
+
+    assert (job.status, job.error_code, job.attempts) == ("blocked", "execution_uncertain", 1)
+    assert job.resolved["repository_run"]["attempts"][-1]["state"] == attempt_state
+    assert (reservation["state"], slot["state"], intent["state"]) == ("unknown", "unknown", "unknown")
+    assert gate["mode"] == "inhibited"
+    assert (projection["intent_state"], projection["reservation_state"], projection["slot_state"]) == (
+        "unknown", "unknown", "unknown",
+    )
+    assert binding_row["projection_revision"] == 2
+    assert db.verify_audit()["valid"]
+
+
+@pytest.mark.parametrize("attempt_state", ["completed", "failed", "uncertain"])
+def test_hand_back_does_not_admit_other_nonactive_attempt_states(work_rows, attempt_state):
+    db, _, _, _ = work_rows
+    _set_hand_back_attempt_state(db, attempt_state)
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
+
+
+@pytest.mark.parametrize("captured_fence", [None, "", "3" * 32])
+def test_projected_hand_back_requires_explicit_captured_fence_without_mutation(work_rows, captured_fence):
+    db, _, _, _ = work_rows
+    service = _hand_back_service(db, captured_fence=captured_fence)
+    tables = Base.metadata.tables
+
+    with db.sessions() as session:
+        before_job = session.get(Job, "job")
+        before_job_state = (before_job.status, before_job.attempts, before_job.lease_owner,
+                            before_job.lease_until, before_job.resolved)
+        before_audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+        before_gate = session.scalar(select(tables["program_gate_state"].c.mode))
+
+    with pytest.raises(PlatformError) as caught:
+        service.hand_back("job", fence=captured_fence)
+    assert caught.value.code == "execution_fenced"
+    assert caught.value.status == 409
+
+    with db.sessions() as session:
+        after_job = session.get(Job, "job")
+        assert (after_job.status, after_job.attempts, after_job.lease_owner,
+                after_job.lease_until, after_job.resolved) == before_job_state
+        assert session.scalar(select(tables["worker_execution_leases"].c.phase).where(
+            tables["worker_execution_leases"].c.job_id == "job")) == "started"
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == before_audits
+        assert session.scalar(select(tables["program_gate_state"].c.mode)) == before_gate
+
+
+def test_missing_projection_array_with_relational_rows_refuses_legacy_hand_back(work_rows):
+    db, _, _, _ = work_rows
+    service = _hand_back_service(db)
+    raw = json.dumps({"repository_run": {
+        "schema_version": RUN_SCHEMA,
+        "attempts": [{"id": "job-1", "state": "running",
+                      "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()}],
+    }}, separators=(",", ":"))
+    with db.engine.begin() as connection:
+        connection.execute(_job_resolved_update(db), {"resolved": raw, "job_id": "job"})
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        before_job = session.get(Job, "job")
+        before_job_state = (before_job.status, before_job.attempts, before_job.lease_owner,
+                            before_job.lease_until, before_job.resolved)
+        before_audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+
+    with pytest.raises(PlatformError) as caught:
+        service.hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    assert caught.value.status == 503
+
+    with db.sessions() as session:
+        after_job = session.get(Job, "job")
+        assert (after_job.status, after_job.attempts, after_job.lease_owner,
+                after_job.lease_until, after_job.resolved) == before_job_state
+        assert session.scalar(select(tables["worker_execution_leases"].c.phase).where(
+            tables["worker_execution_leases"].c.job_id == "job")) == "started"
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == before_audits
+
+
+def test_work_intent_attributed_by_subject_cannot_disappear_from_empty_proof(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("the PostgreSQL ledger_intent_context CHECK forbids subject/work_job_id asymmetry")
+    tables = Base.metadata.tables
+    raw = json.dumps({
+        "harness": {"kind": "tool-agent", "idempotent": True},
+        "tools": [],
+    }, separators=(",", ":"))
+    connection = db.engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("PRAGMA ignore_check_constraints=ON")
+        cursor.execute("DELETE FROM program_work_projection_bindings WHERE work_job_id = 'job'")
+        cursor.execute("DELETE FROM program_slots WHERE subject_id = 'job'")
+        cursor.execute("DELETE FROM program_reservations WHERE subject_id = 'job'")
+        cursor.execute("UPDATE program_call_intents SET work_job_id = 'other-job' WHERE subject_id = 'job'")
+        cursor.execute("UPDATE jobs SET resolved = ? WHERE id = 'job'", (raw,))
+        connection.commit()
+        cursor.execute("PRAGMA ignore_check_constraints=OFF")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        connection.commit()
+    finally:
+        connection.close()
+    service = _hand_back_service(db)
+
+    with db.sessions() as session:
+        before_job = session.get(Job, "job")
+        before_job_state = (before_job.status, before_job.attempts, before_job.lease_owner,
+                            before_job.lease_until, before_job.resolved)
+        before_audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+
+    with pytest.raises(PlatformError) as caught:
+        service.hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    assert caught.value.status == 503
+
+    with db.sessions() as session:
+        after_job = session.get(Job, "job")
+        assert (after_job.status, after_job.attempts, after_job.lease_owner,
+                after_job.lease_until, after_job.resolved) == before_job_state
+        assert session.scalar(select(tables["worker_execution_leases"].c.phase).where(
+            tables["worker_execution_leases"].c.job_id == "job")) == "started"
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == before_audits
+
+
+def test_postgresql_rejects_subject_work_job_asymmetry_by_schema_constraint(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "postgresql":
+        pytest.skip("ledger_intent_context enforcement evidence requires PostgreSQL")
+    from sqlalchemy.exc import IntegrityError
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.add(Job(
+            id="other-job", receipt="other-receipt", idempotency_key="other-idempotency",
+            request_digest="f" * 64, caller="fixture", grant_id="fixture",
+            generation="sha256:" + "3" * 64, resolved={}, task="synthetic",
+            status="queued", attempts=0,
+        ))
+        session.flush()
+        with pytest.raises(IntegrityError):
+            with session.begin_nested():
+                session.execute(update(tables["program_call_intents"]).where(
+                    tables["program_call_intents"].c.call_id == "call").values(work_job_id="other-job"))
+
+
+def test_account_only_work_subject_does_not_disable_legacy_empty_hand_back(work_rows):
+    db, _, raw, binding = work_rows
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.execute(delete(binding).where(binding.c.work_job_id == "job"))
+        session.execute(delete(tables["program_call_intents"]).where(
+            tables["program_call_intents"].c.work_job_id == "job"))
+        session.execute(delete(tables["program_slots"]).where(
+            tables["program_slots"].c.subject_id == "job"))
+        session.execute(delete(tables["program_reservations"]).where(
+            tables["program_reservations"].c.subject_id == "job"))
+        session.execute(_job_resolved_update(db), {"resolved": json.dumps({
+            "repository_run": {"schema_version": RUN_SCHEMA, "attempts": [
+                {"id": "job-1", "state": "running",
+                 "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()},
+            ]},
+        }, separators=(",", ":")), "job_id": "job"})
+    service = _hand_back_service(db)
+
+    assert service.hand_back("job", fence="2" * 32) is True
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+    assert (job.status, job.error_code, job.attempts) == ("blocked", "execution_uncertain", 1)
+
+
+def _seed_retained_legacy_history(db, *, target_call="legacy-target", target_slot="legacy-target-slot",
+                                  include_current_projection=True, include_target_intent=False,
+                                  link_job_id="job", gate_cutover=False):
+    tables = Base.metadata.tables
+    baseline = dict(
+        scope_id="scope", batch_id="history-batch", link_id="history-link",
+        job_id=link_job_id, original_attempt_id="job-0", original_call_id="source-call",
+        original_slot_id="source-slot", subject_id="job", call_id=target_call,
+        slot_id=target_slot, baseline_state="reserved", baseline_slot_state="held",
+        baseline_reserved_usd_micro=4, baseline_reserved_allowance_micro=5,
+        baseline_actual_usd_micro=None, baseline_actual_allowance_micro=None,
+    )
+    snapshot = digest([baseline])
+    with db.sessions() as session:
+        current_projection = session.execute(select(tables["jobs"].c.resolved).where(
+            tables["jobs"].c.id == "job")).scalar_one()["repository_run"]["program_ledger_projections_v1"][0]
+    resolved = {
+        "repository_run": {
+            "schema_version": RUN_SCHEMA,
+            "attempts": [
+                {"id": "job-0", "state": "completed"},
+                {"id": "job-1", "state": "running",
+                 "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()},
+            ],
+            "budget_reservations": [{"call_id": "source-call", "attempt_id": "job-0",
+                                     "slot_id": "source-slot", "state": "settled"}],
+            "active_slots": ["source-slot"],
+            "program_ledger_projections_v1": [current_projection] if include_current_projection else [],
+        },
+    }
+    with db.sessions.begin() as session:
+        if link_job_id != "job":
+            session.add(Job(
+                id=link_job_id, receipt="other-receipt", idempotency_key="other-idempotency",
+                request_digest="f" * 64, caller="fixture", grant_id="fixture",
+                generation="sha256:" + "3" * 64, resolved={}, task="synthetic",
+                status="queued", attempts=0,
+            ))
+            session.flush()
+        if not include_current_projection:
+            session.execute(delete(tables["program_work_projection_bindings"]).where(
+                tables["program_work_projection_bindings"].c.call_id == "call"))
+            session.execute(delete(tables["program_call_intents"]).where(
+                tables["program_call_intents"].c.call_id == "call"))
+            session.execute(delete(tables["program_slots"]).where(tables["program_slots"].c.call_id == "call"))
+            session.execute(delete(tables["program_reservations"]).where(
+                tables["program_reservations"].c.call_id == "call"))
+        session.execute(_job_resolved_update(db), {"resolved": json.dumps(resolved, separators=(",", ":")), "job_id": "job"})
+        session.execute(insert(tables["program_census_batches"]), dict(
+            scope_id="scope", batch_id="history-batch", policy_revision=1,
+            policy_digest="c" * 64, census_generation="a" * 32,
+            snapshot_digest=snapshot, fence_digest="a" * 64, owner_epoch=1,
+            state="complete", source_count=1, mapped_count=1, unmatched_count=0,
+            reserved_usd_micro=4, settled_usd_micro=0, unknown_usd_micro=0,
+            reserved_allowance_micro=5, settled_allowance_micro=0,
+            unknown_allowance_micro=0, held_slots=1, unknown_slots=0, audit_sequence=1,
+        ))
+        if gate_cutover:
+            session.execute(update(tables["program_gate_state"]).where(
+                tables["program_gate_state"].c.scope_id == "scope").values(
+                    mode="active", cutover_batch_id="history-batch", cutover_digest=snapshot,
+                    cutover_generation="a" * 32, cutover_fence_digest="a" * 64,
+                    cutover_owner_epoch=1,
+                ))
+        if target_call != "call":
+            session.execute(insert(tables["program_reservations"]), dict(
+                scope_id="scope", call_id=target_call, subject_id="job", purpose="work",
+                effect_key="legacy-effect", reserved_usd_micro=4, reserved_allowance_micro=5,
+                permit_digest="f" * 64, meter_digest="e" * 64, price_digest="d" * 64,
+                permit_expires_ms=1500, state="reserved", audit_sequence=1,
+            ))
+            session.execute(insert(tables["program_slots"]), dict(
+                scope_id="scope", slot_id=target_slot, subject_id="job", call_id=target_call,
+                state="held", audit_sequence=1,
+            ))
+        if include_target_intent:
+            source_intent = session.execute(select(tables["program_call_intents"]).where(
+                tables["program_call_intents"].c.call_id == "call")).mappings().one()
+            intent = dict(source_intent)
+            intent.update(call_id=target_call, effect_key="legacy-effect", idempotency_key="legacy-idempotency",
+                          work_attempt_id="job-0", work_lease_digest="b" * 64)
+            session.execute(insert(tables["program_call_intents"]), intent)
+        session.execute(insert(tables["program_legacy_links"]), dict(
+            **baseline, original_digest=digest(baseline), audit_sequence=1,
+        ))
+    return baseline
+
+
+def test_hand_back_preserves_valid_prior_legacy_link_and_target(work_rows):
+    db, _, _, _ = work_rows
+    baseline = _seed_retained_legacy_history(db, include_target_intent=True, gate_cutover=True)
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        before_link = session.execute(select(tables["program_legacy_links"])).mappings().one()
+        before_target = session.execute(select(tables["program_reservations"]).where(
+            tables["program_reservations"].c.call_id == "legacy-target")).mappings().one()
+        before_slot = session.execute(select(tables["program_slots"]).where(
+            tables["program_slots"].c.slot_id == "legacy-target-slot")).mappings().one()
+
+    assert _hand_back_service(db).hand_back("job", fence="2" * 32) is True
+
+    with db.sessions() as session:
+        after_link = session.execute(select(tables["program_legacy_links"])).mappings().one()
+        after_target = session.execute(select(tables["program_reservations"]).where(
+            tables["program_reservations"].c.call_id == "legacy-target")).mappings().one()
+        after_slot = session.execute(select(tables["program_slots"]).where(
+            tables["program_slots"].c.slot_id == "legacy-target-slot")).mappings().one()
+        job = session.get(Job, "job")
+    assert dict(after_link) == dict(before_link)
+    assert dict(after_target) == dict(before_target)
+    assert dict(after_slot) == dict(before_slot)
+    assert after_link["original_digest"] == digest(baseline)
+    assert job.attempts == 1
+
+
+def test_hand_back_history_only_path_locks_and_keeps_attempt_monotonic(work_rows):
+    db, _, _, _ = work_rows
+    _seed_retained_legacy_history(db, include_current_projection=False)
+    assert _hand_back_service(db).hand_back("job", fence="2" * 32) is True
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        target = session.execute(select(Base.metadata.tables["program_reservations"]).where(
+            Base.metadata.tables["program_reservations"].c.call_id == "legacy-target")).mappings().one()
+    assert (job.status, job.attempts) == ("blocked", 1)
+    assert target["state"] == "reserved"
+
+
+def test_hand_back_rejects_historical_target_overlapping_current_projection(work_rows):
+    db, _, _, _ = work_rows
+    _seed_retained_legacy_history(db, target_call="call", target_slot="slot")
+    before = None
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+
+
+def test_hand_back_rejects_corrupt_historical_batch_snapshot_without_mutation(work_rows):
+    db, _, _, _ = work_rows
+    _seed_retained_legacy_history(db)
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.execute(update(tables["program_census_batches"]).where(
+            tables["program_census_batches"].c.batch_id == "history-batch").values(snapshot_digest="9" * 64))
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(tables["worker_execution_leases"].c.phase)) == "started"
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
+
+
+def test_hand_back_finds_legacy_link_selected_by_subject_even_with_wrong_job(work_rows):
+    db, _, _, _ = work_rows
+    _seed_retained_legacy_history(db, link_job_id="other-job")
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(Base.metadata.tables["audit_events"]))
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(Base.metadata.tables["audit_events"])) == audits
+
+
+def test_hand_back_refuses_active_gate_without_cutover_in_history_only_branch(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("the PostgreSQL ledger_gate_active_batch CHECK forbids this stored row")
+    _seed_retained_legacy_history(db, include_current_projection=False)
+    connection = db.engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA ignore_check_constraints=ON")
+        cursor.execute("UPDATE program_gate_state SET mode = 'active' WHERE scope_id = 'scope'")
+        connection.commit()
+        cursor.execute("PRAGMA ignore_check_constraints=OFF")
+        connection.commit()
+    finally:
+        connection.close()
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
+
+
+def test_hand_back_refuses_gate_policy_digest_drift_in_history_only_branch(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("the PostgreSQL ledger_gate_policy_fk forbids this stored row")
+    _seed_retained_legacy_history(db, include_current_projection=False)
+    connection = db.engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("UPDATE program_gate_state SET policy_digest = ? WHERE scope_id = 'scope'", ("b" * 64,))
+        connection.commit()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        connection.commit()
+    finally:
+        connection.close()
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
+
+
+def test_hand_back_refuses_gate_audit_sequence_above_canonical_integer_bound(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("PostgreSQL Integer enforces the canonical audit sequence bound")
+    _seed_retained_legacy_history(db, include_current_projection=False)
+    tables = Base.metadata.tables
+    oversized = (1 << 31)
+    with db.engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO audit_events "
+            "SELECT :oversized, created_at, actor, action, target, detail, previous_hash, hash "
+            "FROM audit_events WHERE sequence = (SELECT audit_sequence FROM program_gate_state "
+            "WHERE scope_id = 'scope')"), {"oversized": oversized})
+        connection.execute(text(
+            "UPDATE program_gate_state SET audit_sequence = :oversized WHERE scope_id = 'scope'"),
+            {"oversized": oversized})
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
+
+
+def test_hand_back_rolls_back_all_ledger_and_owner_changes_after_projection_failure(work_rows, monkeypatch):
+    db, _, _, binding = work_rows
+    from sovite import program_ledger
+    original = program_ledger._mark_work_projection_unknown_in_transaction
+
+    def fail_after_work_write(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("synthetic post-write failure")
+
+    monkeypatch.setattr(program_ledger, "_mark_work_projection_unknown_in_transaction", fail_after_work_write)
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before_job = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        before_audits = session.scalar(select(text("count(*)")).select_from(Base.metadata.tables["audit_events"]))
+
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before_job
+        assert session.scalar(select(Base.metadata.tables["worker_execution_leases"].c.phase)) == "started"
+        assert session.scalar(select(Base.metadata.tables["program_reservations"].c.state)) == "reserved"
+        assert session.scalar(select(Base.metadata.tables["program_slots"].c.state)) == "held"
+        assert session.scalar(select(Base.metadata.tables["program_call_intents"].c.state)) == "committed"
+        assert session.scalar(select(Base.metadata.tables["program_gate_state"].c.mode)) == "disabled"
+        assert session.scalar(select(binding.c.projection_revision)) == 1
+        assert session.scalar(select(text("count(*)")).select_from(Base.metadata.tables["audit_events"])) == before_audits
+
+
+def _seed_hand_back_known_receipt(work_rows, *, actual_usd, actual_allowance):
+    db, _, _, binding = work_rows
+    tables = Base.metadata.tables
+    source_identity = digest({"source_code": "fixture", "issuer_code": "fixture"})
+    receipt_body = dict(
+        scope_id="scope", call_id="call", receipt_id="receipt", actual_usd=actual_usd,
+        actual_allowance=actual_allowance, currency="USD", allowance_unit="opencode-go-allowance",
+        source_code="fixture", issuer_code="fixture", source_digest="b" * 64,
+        source_identity_digest=source_identity, custody_ref="fixture-object", custody_bytes=10,
+        observed_ms=300,
+    )
+    args = {**receipt_body, "receipt_digest": digest(receipt_body)}
+    from sovite.program_ledger_core import _record_known_in_transaction
+    with owner_transaction(db) as session:
+        result, _ = _record_known_in_transaction(db, session, tables, **args)
+        assert result == ("known_unresolved_unverified" if int(actual_usd) > 10
+                          or int(actual_allowance) > 20 else "known_settled_unverified")
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        resolved = dict(job.resolved)
+        run = dict(resolved["repository_run"])
+        entries = [dict(item) for item in run["program_ledger_projections_v1"]]
+        payload = entries[0]
+        state = "unknown" if int(actual_usd) > 10 or int(actual_allowance) > 20 else "known"
+        payload.update(
+            receipt_id="receipt", receipt_digest=args["receipt_digest"],
+            actual_usd_micro=actual_usd, actual_allowance_micro=actual_allowance,
+            intent_state=state, reservation_state="unknown" if state == "unknown" else "settled",
+            slot_state="unknown" if state == "unknown" else "released",
+        )
+        sequence = session.execute(select(tables["program_call_intents"].c.audit_sequence).where(
+            tables["program_call_intents"].c.call_id == "call")).scalar_one()
+        payload["audit_sequence"] = str(sequence)
+        run["program_ledger_projections_v1"] = entries
+        resolved["repository_run"] = run
+        job.resolved = resolved
+        session.execute(update(binding).where(binding.c.call_id == "call").values(
+            projection_digest=projection_digest(payload), audit_sequence=sequence))
+    return args, binding
+
+
+def test_hand_back_preserves_known_settled_receipt_and_projection(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        before_receipt = dict(session.execute(select(tables["program_call_receipts"])).mappings().one())
+        before_reservation = dict(session.execute(select(tables["program_reservations"])).mappings().one())
+        before_slot = dict(session.execute(select(tables["program_slots"])).mappings().one())
+        before_intent = dict(session.execute(select(tables["program_call_intents"])).mappings().one())
+        before_projection = session.get(Job, "job").resolved["repository_run"]["program_ledger_projections_v1"][0]
+
+    assert _hand_back_service(db).hand_back("job", fence="2" * 32) is True
+
+    with db.sessions() as session:
+        assert dict(session.execute(select(tables["program_call_receipts"])).mappings().one()) == before_receipt
+        assert dict(session.execute(select(tables["program_reservations"])).mappings().one()) == before_reservation
+        assert dict(session.execute(select(tables["program_slots"])).mappings().one()) == before_slot
+        assert dict(session.execute(select(tables["program_call_intents"])).mappings().one()) == before_intent
+        job = session.get(Job, "job")
+        assert job.resolved["repository_run"]["program_ledger_projections_v1"][0] == before_projection
+        assert job.attempts == 1
+
+
+def test_hand_back_preserves_known_receipt_while_unsettled_capacity_stays_held(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="11", actual_allowance="1")
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        before_receipt = dict(session.execute(select(tables["program_call_receipts"])).mappings().one())
+        before_projection = session.get(Job, "job").resolved["repository_run"]["program_ledger_projections_v1"][0]
+
+    assert _hand_back_service(db).hand_back("job", fence="2" * 32) is True
+
+    with db.sessions() as session:
+        receipt = dict(session.execute(select(tables["program_call_receipts"])).mappings().one())
+        reservation = session.execute(select(tables["program_reservations"])).mappings().one()
+        slot = session.execute(select(tables["program_slots"])).mappings().one()
+        intent = session.execute(select(tables["program_call_intents"])).mappings().one()
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        job = session.get(Job, "job")
+    assert receipt == before_receipt
+    assert (reservation["state"], reservation["actual_usd_micro"], reservation["actual_allowance_micro"]) == (
+        "unknown", 11, 1,
+    )
+    assert (slot["state"], intent["state"], gate["mode"]) == ("unknown", "unknown", "inhibited")
+    assert job.resolved["repository_run"]["program_ledger_projections_v1"][0] == before_projection
+    assert (job.status, job.attempts) == ("blocked", 1)
+
+
+def test_hand_back_waits_for_locked_reservation_before_mutating_owner(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "postgresql":
+        pytest.skip("row-lock contention evidence requires the owned PostgreSQL fixture")
+    from sqlalchemy import event
+    reached = threading.Event()
+    finished = threading.Event()
+    result = []
+
+    def observe_reservation_lock(conn, cursor, statement, parameters, context, executemany):
+        if (threading.current_thread().name == "hand-back-lock-contention"
+                and "program_reservations" in statement.lower()
+                and "for update" in statement.lower()):
+            reached.set()
+
+    event.listen(db.engine, "before_cursor_execute", observe_reservation_lock)
+    try:
+        with db.sessions.begin() as locker:
+            locker.execute(select(Base.metadata.tables["program_reservations"]).where(
+                Base.metadata.tables["program_reservations"].c.call_id == "call").with_for_update()).first()
+
+            def hand_back():
+                try:
+                    result.append(_hand_back_service(db).hand_back("job", fence="2" * 32))
+                except Exception as error:  # surfaced below as assertion data
+                    result.append(error)
+                finally:
+                    finished.set()
+
+            worker = threading.Thread(target=hand_back, daemon=True, name="hand-back-lock-contention")
+            worker.start()
+            assert reached.wait(5), "hand_back never reached its reservation lock"
+            assert not finished.wait(0.2), "hand_back passed a reservation row held by another transaction"
+        worker.join(5)
+        assert not worker.is_alive()
+        assert result == [True]
+    finally:
+        event.remove(db.engine, "before_cursor_execute", observe_reservation_lock)
+
+
+def test_empty_hand_back_rescans_work_membership_after_job_lock(work_rows):
+    db, _, _, binding = work_rows
+    if db.engine.dialect.name != "postgresql":
+        pytest.skip("Job-lock interleaving evidence requires the owned PostgreSQL fixture")
+    tables = Base.metadata.tables
+    with db.sessions.begin() as session:
+        session.execute(delete(binding).where(binding.c.work_job_id == "job"))
+        session.execute(delete(tables["program_call_intents"]).where(tables["program_call_intents"].c.work_job_id == "job"))
+        session.execute(delete(tables["program_slots"]).where(tables["program_slots"].c.subject_id == "job"))
+        session.execute(delete(tables["program_reservations"]).where(tables["program_reservations"].c.subject_id == "job"))
+        session.execute(_job_resolved_update(db), {"resolved": json.dumps({
+            "repository_run": {"schema_version": RUN_SCHEMA, "attempts": [
+                {"id": "job-1", "state": "running",
+                 "fence_sha256": hashlib.sha256(("2" * 32).encode()).hexdigest()},
+            ]},
+        }, separators=(",", ":")), "job_id": "job"})
+
+    from sqlalchemy import event
+    reached_job_lock = threading.Event()
+    finished = threading.Event()
+    result = []
+
+    def observe_job_lock(conn, cursor, statement, parameters, context, executemany):
+        if (threading.current_thread().name == "hand-back-empty-membership"
+                and "for update" in statement.lower()):
+            reached_job_lock.set()
+
+    event.listen(db.engine, "before_cursor_execute", observe_job_lock)
+    locker = db.sessions()
+    locker.begin()
+    try:
+        locker.execute(select(Job).where(Job.id == "job").with_for_update()).first()
+
+        def hand_back():
+            try:
+                result.append(_hand_back_service(db).hand_back("job", fence="2" * 32))
+            except Exception as error:  # surfaced below as assertion data
+                result.append(error)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=hand_back, daemon=True, name="hand-back-empty-membership")
+        worker.start()
+        assert reached_job_lock.wait(5), "empty hand_back never reached the Job lock"
+        assert not finished.wait(0.2), "empty hand_back passed a Job row held by another transaction"
+        locker.execute(insert(tables["program_reservations"]), dict(
+            scope_id="scope", call_id="late-call", subject_id="job", purpose="work",
+            effect_key="late-effect", reserved_usd_micro=1, reserved_allowance_micro=1,
+            permit_digest="f" * 64, meter_digest="e" * 64, price_digest="d" * 64,
+            permit_expires_ms=1500, state="reserved", audit_sequence=1,
+        ))
+        locker.execute(insert(tables["program_slots"]), dict(
+            scope_id="scope", slot_id="late-slot", subject_id="job", call_id="late-call",
+            state="held", audit_sequence=1,
+        ))
+        locker.commit()
+        worker.join(5)
+        assert not worker.is_alive()
+        assert len(result) == 1 and isinstance(result[0], PlatformError)
+        assert result[0].code == "execution_owner_state_unavailable"
+    finally:
+        if locker.in_transaction():
+            locker.rollback()
+        locker.close()
+        event.remove(db.engine, "before_cursor_execute", observe_job_lock)
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts) == ("running", 1)
+        assert session.scalar(select(tables["program_reservations"].c.state).where(
+            tables["program_reservations"].c.call_id == "late-call")) == "reserved"
 
 
 @pytest.mark.parametrize("change", ["attempt", "expired"])
