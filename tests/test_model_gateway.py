@@ -8,7 +8,8 @@ from sqlalchemy import select
 
 from connector_support import BODY
 from model_support import authority_env, connected, consume, database, infer, v2_bundle
-from sovite.db import BindingState, BundleRevision, ExecutionAuthority, GrantState, HelperEnrollment, Job, MetadataRow, RequestLedger
+from sovite.db import (BindingState, BundleRevision, ExecutionAuthority, GrantState, HelperEnrollment,
+                       Job, MetadataRow, RequestLedger, WorkerExecutionLease)
 from sovite.gateway.client import GatewayError
 from sovite.gateway.runtime import Gateway
 from sovite.gateway.server import create_inference_app
@@ -100,9 +101,59 @@ def test_EXACT_BINDING_SESSION_IDENTITY_success_records_private_evidence(authori
 def test_LEASE_FENCED_BOUNDED_STOP_mid_stream_withdrawal_cancels_no_completion(authority_env, withdrawal):
     async def scenario():
         async with connected(authority_env, stall=True) as env:
-            request = await infer(env)
+            request_deadline = int(time.time()) + 25
+            request = await infer(env, deadline=request_deadline)
             consumer = asyncio.create_task(consume(request))
-            await asyncio.wait_for(env.engine.started.wait(), 3)
+            startup_budget = min(10.0, request_deadline - time.time(),
+                                 env.job.lease_until - time.time(),
+                                 env.job.execution_deadline - time.time())
+            assert startup_budget > 5.0
+            engine_started = asyncio.create_task(env.engine.started.wait())
+            done, _ = await asyncio.wait({engine_started, consumer}, timeout=startup_budget,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if engine_started not in done or consumer in done:
+                error = None
+                if consumer.done() and not consumer.cancelled():
+                    error = consumer.exception()
+                safe_codes = {
+                    'authority_unavailable', 'gateway_fenced', 'model_host_unavailable',
+                    'model_host_preempted', 'model_identity_mismatch', 'model_protocol_error',
+                    'permit_expired', 'deadline_exceeded', 'inference_request_denied',
+                }
+                with env.platform.db.sessions() as session:
+                    ledger = session.get(RequestLedger, request.id)
+                    ledger_status = ledger.status if ledger is not None else None
+                    ledger_outcome = ledger.outcome if ledger is not None else None
+                    job = session.get(Job, env.job.id)
+                    lease = session.get(WorkerExecutionLease, env.job.id)
+                now = time.time()
+                diagnostic = {
+                    'consumer_done': consumer.done(),
+                    'consumer_error_class': type(error).__name__ if error is not None else None,
+                    'consumer_error_code': error.code if isinstance(error, GatewayError) and error.code in safe_codes else None,
+                    'ledger_status': ledger_status,
+                    'ledger_outcome': ledger_outcome,
+                    'engine_calls': len(env.engine.calls),
+                    'helper_closed': env.helper.closed.is_set(),
+                    'helper_busy': env.helper.busy,
+                    'helper_phase': env.helper.session.phase,
+                    'request_seconds_left': round(request_deadline - now, 3),
+                    'job_status': job.status if job is not None else None,
+                    'cancel_requested': job.cancel_requested if job is not None else None,
+                    'lease_phase': lease.phase if lease is not None else None,
+                    'lease_fence_matches': lease.fence == env.job.execution_fence if lease is not None else None,
+                    'lease_seconds_left': round(lease.lease_until - now, 3) if lease is not None else None,
+                    'execution_seconds_left': round(lease.execution_deadline - now, 3)
+                        if lease is not None and lease.execution_deadline is not None else None,
+                }
+                engine_started.cancel()
+                consumer.cancel()
+                await asyncio.gather(engine_started, consumer, return_exceptions=True)
+                raise AssertionError(f'bounded pre-partition start barrier failed: {diagnostic!r}')
+            remaining = min(request_deadline - time.time(),
+                            env.job.lease_until - time.time(),
+                            env.job.execution_deadline - time.time())
+            assert remaining > 5.0
             start = time.monotonic()
             with env.platform.db.sessions.begin() as session:
                 if withdrawal == 'lease': session.get(Job, env.job.id).lease_until = time.time() - 1
@@ -112,6 +163,17 @@ def test_LEASE_FENCED_BOUNDED_STOP_mid_stream_withdrawal_cancels_no_completion(a
                 elif withdrawal == 'generation': session.get(MetadataRow, 'active_generation').value = {'generation': 'superseded'}
                 elif withdrawal == 'enrollment': session.get(HelperEnrollment, 'enrollment-a').revoked = True
             if withdrawal == 'control_partition':
+                with env.platform.db.sessions() as session:
+                    job = session.get(Job, env.job.id)
+                    lease = session.get(WorkerExecutionLease, env.job.id)
+                    assert job is not None and lease is not None
+                    now = time.time()
+                    remaining = min(request_deadline - now, lease.lease_until - now,
+                                    lease.execution_deadline - now)
+                    assert lease.fence == env.job.execution_fence
+                    assert job.lease_until == lease.lease_until
+                    assert job.status == 'running' and not job.cancel_requested
+                    assert remaining > 5.0
                 original = env.gateway.authority.call
                 async def partition(action, **kwargs):
                     if action in {'renew', 'touch'}: raise GatewayError('authority_unavailable')
