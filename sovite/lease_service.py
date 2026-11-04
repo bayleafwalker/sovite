@@ -800,17 +800,52 @@ class LeaseService:
                 current_attempt = None
                 current_attempt_row = None
                 current_attempt_state = None
+                preappend_finish = False
                 if run is not None and probe["status"] == "running":
                     if (type(probe["attempts"]) is not int or isinstance(probe["attempts"], bool)
-                            or probe["attempts"] < 1 or not attempts
-                            or type(attempts[-1]) is not dict):
+                            or probe["attempts"] < 1):
                         raise _HandBackOwnerUnavailable()
-                    current_attempt_row = attempts[-1]
-                    current_attempt = current_attempt_row.get("id")
-                    current_attempt_state = current_attempt_row.get("state")
-                    if (current_attempt != f"{job_id}-{probe['attempts']}"
-                            or current_attempt_state not in owner_attempt_states):
-                        raise _HandBackOwnerUnavailable()
+                    expected_attempt = f"{job_id}-{probe['attempts']}"
+                    if attempts and type(attempts[-1]) is dict and attempts[-1].get("id") == expected_attempt:
+                        current_attempt_row = attempts[-1]
+                        current_attempt = current_attempt_row.get("id")
+                        current_attempt_state = current_attempt_row.get("state")
+                        if current_attempt_state not in owner_attempt_states:
+                            raise _HandBackOwnerUnavailable()
+                    else:
+                        error = finish_outcome[1] if finish_outcome is not None else None
+                        preappend_codes = {
+                            "repository_profile_unavailable",
+                            "repository_binding_revoked",
+                            "repository_binding_unavailable",
+                            "repository_binding_mismatch",
+                        }
+                        # A narrow pre-append finish is safe only when no record
+                        # exists for this claimed attempt and the producer failed
+                        # before it could create any Work state.
+                        attempt_numbers = []
+                        prefix = f"{job_id}-"
+                        prior_terminal = {
+                            "interrupted", "cancelled", "activation_cancelled", "failed",
+                            "uncertain", "completed", "ineligible", "settled",
+                        }
+                        for attempt in attempts:
+                            attempt_id = attempt["id"]
+                            suffix = attempt_id[len(prefix):] if attempt_id.startswith(prefix) else ""
+                            if (not suffix.isascii() or not suffix.isdigit() or int(suffix) < 1
+                                    or str(int(suffix)) != suffix):
+                                raise _HandBackOwnerUnavailable()
+                            if (attempt.get("state") not in prior_terminal
+                                    or not _is_lower_hex(attempt.get("fence_sha256"), 64)):
+                                raise _HandBackOwnerUnavailable()
+                            attempt_numbers.append(int(suffix))
+                        if (finish_outcome is None or finish_outcome[0] is not None
+                                or type(getattr(error, "code", None)) is not str
+                                or error.code not in preappend_codes
+                                or any(number >= probe["attempts"] for number in attempt_numbers)
+                                or attempt_numbers != sorted(set(attempt_numbers))):
+                            raise _HandBackOwnerUnavailable()
+                        preappend_finish = True
                 elif run is not None and type(probe["attempts"]) is not int:
                     raise _HandBackOwnerUnavailable()
 
@@ -994,6 +1029,10 @@ class LeaseService:
                 intent_snapshot = snapshot_rows(work_intents)
                 binding_snapshot = snapshot_rows(work_bindings)
                 legacy_snapshot = snapshot_rows(legacy_links)
+
+                if preappend_finish and (projections_all or legacy_links or legacy_batch_keys
+                        or work_reservations or work_slots or work_intents or work_bindings):
+                    raise _HandBackOwnerUnavailable()
 
                 if projections_all or legacy_batch_keys:
                     try:
@@ -1370,7 +1409,7 @@ class LeaseService:
                     succeeded = True
                     succeeded_fence = lease.fence if lease is not None else None
                 else:
-                    artifact, error, cancelled = finish_outcome
+                    artifact, error, cancelled, execution_completed = finish_outcome
                     now = time.time()
                     projected_history = bool(projections_all or legacy_links)
                     if lease is None:
@@ -1388,7 +1427,7 @@ class LeaseService:
                     if (not self._eligible_job(row) or row.status != "running"
                             or row.lease_owner != self.id):
                         raise _HandBackOwnerUnavailable()
-                    if run is not None:
+                    if run is not None and not preappend_finish:
                         if current_attempt_row is None or current_attempt is None:
                             raise _HandBackOwnerUnavailable()
                         fence_digest = hashlib.sha256(fence.encode("utf-8")).hexdigest()
@@ -1402,7 +1441,11 @@ class LeaseService:
                             accepted_attempt_states = frozenset({"uncertain", "interrupted"})
                         elif error is not None and error.code == "native_vm_activation_cancelled":
                             accepted_attempt_states = frozenset({"activation_cancelled"})
-                        elif error is not None and error.code == "internal_execution_error":
+                        elif error is not None and error.code == "repository_binding_revoked":
+                            accepted_attempt_states = frozenset({
+                                "failed", "cancelled", "activation_cancelled",
+                            })
+                        elif error is not None and execution_completed is True:
                             accepted_attempt_states = frozenset({"completed"})
                         elif cancelled or row.cancel_requested:
                             accepted_attempt_states = frozenset({"cancelled", "activation_cancelled"})
@@ -1538,7 +1581,13 @@ class LeaseService:
 
     def finish(self, job_id: str, artifact: tuple[str, str] | None = None,
                error: RuntimeFailure | None = None, cancelled: bool = False,
-               fence: str | None = None):
+               fence: str | None = None, execution_completed: bool = False):
         """Finish a lease using the same owner closure as hand_back."""
+        if type(execution_completed) is not bool or (execution_completed and
+                (artifact is not None or error is None or cancelled
+                 or getattr(error, "code", None) in {"repository_candidate_ineligible",
+                                                       "external_execution_uncertain",
+                                                       "native_vm_activation_cancelled"})):
+            raise FinishRefused("invalid finish outcome")
         return self._close_owner(
-            job_id, fence=fence, finish_outcome=(artifact, error, cancelled))
+            job_id, fence=fence, finish_outcome=(artifact, error, cancelled, execution_completed))

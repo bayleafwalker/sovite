@@ -61,8 +61,9 @@ class Worker:
     def hand_back(self, job_id: str, fence: str | None = None):
         return self.leases.hand_back(job_id, fence=fence)
 
-    def finish(self, job_id: str, artifact: tuple[str, str] | None = None, error: RuntimeFailure | None = None, cancelled: bool = False, fence: str | None = None):
-        return self.leases.finish(job_id, artifact=artifact, error=error, cancelled=cancelled, fence=fence)
+    def finish(self, job_id: str, artifact: tuple[str, str] | None = None, error: RuntimeFailure | None = None, cancelled: bool = False, fence: str | None = None, execution_completed: bool = False):
+        return self.leases.finish(job_id, artifact=artifact, error=error, cancelled=cancelled,
+                                  fence=fence, execution_completed=execution_completed)
 
     async def execute(self, job: Job):
         # The running task owns this immutable start fence for its entire life.
@@ -129,7 +130,17 @@ class Worker:
             result = await operation
             # Artifact commit can be retried safely, while re-executing external effects
             # after an uncertain failure is a separate decision.
-            artifact = await asyncio.to_thread(self.platform.store.put, job.id, result)
+            try:
+                artifact = await asyncio.to_thread(self.platform.store.put, job.id, result)
+            except RuntimeFailure as exc:
+                self.finish(job.id, error=exc, fence=captured_fence,
+                            execution_completed=True)
+                return
+            except Exception:
+                log.error("Task %s failed while storing a completed result", job.id)
+                self.finish(job.id, error=RuntimeFailure("internal_execution_error"),
+                            fence=captured_fence, execution_completed=True)
+                return
             self.finish(job.id, artifact=artifact, fence=captured_fence)
         except FinishRefused:
             # The owner refused to close the attempt. Do not turn this refusal
