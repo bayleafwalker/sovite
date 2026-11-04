@@ -99,6 +99,49 @@ def replay_safe(resolved: dict) -> bool:
     return harness["kind"] in {"demo", "tool-agent"} and all(t.get("read_only", t["kind"] == "kubernetes-read") for t in resolved.get("tools", [])) or harness.get("idempotent", False)
 
 
+def _recovery_replay_safe(resolved: dict) -> bool:
+    """Validate stored replay flags before they can authorize a retry."""
+    if resolved.get("repository_run") is not None:
+        return False
+    harness = resolved.get("harness")
+    tools = resolved.get("tools", [])
+    if type(harness) is not dict or type(tools) is not list:
+        raise _HandBackOwnerUnavailable()
+    if harness.get("kind") not in {"demo", "tool-agent", "native-codex", "native-claude", "native-opencode", "agent-http"}:
+        raise _HandBackOwnerUnavailable()
+    if "idempotent" in harness and type(harness["idempotent"]) is not bool:
+        raise _HandBackOwnerUnavailable()
+    for tool in tools:
+        if (type(tool) is not dict or tool.get("kind") not in {"http-json", "kubernetes-read"}
+                or ("read_only" in tool and type(tool["read_only"]) is not bool)):
+            raise _HandBackOwnerUnavailable()
+    return bool(replay_safe(resolved))
+
+
+def _validate_recovery_retry_recipe(resolved: dict) -> None:
+    """Reject malformed stored fields required when a recovered Job is retried."""
+    model, grant, harness = (resolved.get(key) for key in ("model", "grant", "harness"))
+    tools = resolved.get("tools", [])
+    if (type(model) is not dict or type(model.get("id")) is not str
+            or ("connection" in model and type(model["connection"]) is not dict)
+            or ("max_concurrency" in model and
+                (type(model["max_concurrency"]) is not int or not 1 <= model["max_concurrency"] <= 64))
+            or type(grant) is not dict or type(grant.get("input_class")) is not str
+            or type(harness) is not dict or type(harness.get("kind")) is not str
+            or type(tools) is not list or any(type(tool) is not dict for tool in tools)
+            or any(resolved.get(key) is not None and type(resolved[key]) is not dict
+                   for key in ("previous_attempt", "workflow_binding"))):
+        raise _HandBackOwnerUnavailable()
+    if (harness["kind"] not in {"demo", "tool-agent", "native-codex", "native-claude", "native-opencode", "agent-http"}
+            or ("idempotent" in harness and type(harness["idempotent"]) is not bool)
+            or any(type(tool.get("kind")) is not str or tool["kind"] not in {"http-json", "kubernetes-read"}
+                   or ("read_only" in tool and type(tool["read_only"]) is not bool)
+                   for tool in tools)
+            or ("max_attempts" in grant and
+                (type(grant["max_attempts"]) is not int or not 1 <= grant["max_attempts"] <= 10))):
+        raise _HandBackOwnerUnavailable()
+
+
 @dataclass(frozen=True)
 class ExecutionPrincipal:
     workload_id: str
@@ -346,8 +389,13 @@ class LeaseService:
             id_count = select(func.count()).select_from(compute_members).where(
                 compute_members.c.key == "id").correlate(Job).scalar_subquery()
             kind = func.json_type(Job.resolved, "$.compute.id")
+            identifier = case((kind == "text", value.as_string()), else_="")
+            # Use the bundle producer's ID contract, not the distinct execution
+            # principal syntax. A malformed string is unknown, not foreign.
+            valid_identifier = and_(identifier.regexp_match(r"^[A-Za-z][A-Za-z0-9_.-]{0,95}$"),
+                                    ~identifier.contains("\n"))
             in_scope = or_(root_count != 1, id_count != 1, kind.is_(None),
-                           kind != "text", value.as_string() == compute_id)
+                           kind != "text", ~valid_identifier, identifier == compute_id)
             if self.repository_worker_only:
                 from .repository_runs import RUN_SCHEMA
                 in_scope = and_(Job.resolved["repository_run"]["schema_version"].as_string() == RUN_SCHEMA,
@@ -366,9 +414,12 @@ class LeaseService:
             id_count = select(func.count()).select_from(compute_members).where(
                 compute_members.c.key == "id").correlate(Job).scalar_subquery()
             kind = func.json_typeof(value)
+            identifier = case((kind == "string", value.as_string()), else_="")
+            valid_identifier = and_(identifier.regexp_match(r"^[A-Za-z][A-Za-z0-9_.-]{0,95}$"),
+                                    ~identifier.contains("\n"))
             return self._eligible_query(query).where(or_(
                 root_count != 1, id_count != 1, kind.is_(None),
-                kind != "string", value.as_string() == compute_id))
+                kind != "string", ~valid_identifier, identifier == compute_id))
         raise RuntimeError("unsupported recovery database")
 
     def _guard_fresh_reservation(self, session, compute_id, *, request_recovery=False):
@@ -1629,7 +1680,9 @@ class LeaseService:
                             or type(row.lease_until) not in (int, float)
                             or not math.isfinite(row.lease_until)
                             or row.lease_until != lease.lease_until or row.lease_until >= now
-                            or lease.phase not in {"reserved", "started"}):
+                            or lease.phase not in {"reserved", "started"}
+                            or (lease.phase == "started" and
+                                (type(row.attempts) is not int or row.attempts < 1))):
                         raise _HandBackOwnerUnavailable()
                     derived_owner = execution_owner_key(workload_id=lease.workload_id,
                                                         instance_id=lease.instance_id)
@@ -1687,12 +1740,21 @@ class LeaseService:
                     elif row.cancel_requested:
                         row.status, row.error_code = "cancelled", "cancelled"
                     elif lease.phase == "reserved":
+                        _validate_recovery_retry_recipe(row.resolved)
                         row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
                     else:
                         try:
-                            safe = False if projected_history else replay_safe(row.resolved)
-                            max_attempts = (int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts))
-                                            if safe else None)
+                            safe = False if projected_history else _recovery_replay_safe(row.resolved)
+                            if safe:
+                                grant = row.resolved["grant"]
+                                if type(grant) is not dict:
+                                    raise _HandBackOwnerUnavailable()
+                                max_attempts = grant.get("max_attempts", self.platform.settings.max_attempts)
+                                if (type(max_attempts) is not int or max_attempts < 1
+                                        or ("max_attempts" in grant and max_attempts > 10)):
+                                    raise _HandBackOwnerUnavailable()
+                            else:
+                                max_attempts = None
                         except (KeyError, TypeError, AttributeError, ValueError, OverflowError):
                             raise _HandBackOwnerUnavailable() from None
                         if not safe:
@@ -1700,6 +1762,7 @@ class LeaseService:
                         elif row.attempts >= max_attempts:
                             row.status, row.error_code = "failed", "lease_recovery_exhausted"
                         else:
+                            _validate_recovery_retry_recipe(row.resolved)
                             row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
                     row.lease_owner, row.lease_until, row.updated_at = None, None, now
                     lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now

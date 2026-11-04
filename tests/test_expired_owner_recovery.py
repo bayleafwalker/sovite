@@ -155,8 +155,18 @@ def test_sweep_malformed_compute_container_does_not_hide_later_valid_work(
 @pytest.mark.parametrize(("field", "shape"), [
     ("harness", "missing"), ("harness", "null"), ("harness", "scalar"),
     ("grant", "missing"), ("grant", "null"), ("grant", "scalar"),
+    ("harness.idempotent", "truthy-string"),
+    ("tool.read_only", "truthy-string"),
+    ("attempts", "zero"), ("attempts", "negative"),
+    ("grant.max_attempts", "string"), ("grant.max_attempts", "boolean"),
+    ("grant.max_attempts", "zero"), ("grant.max_attempts", "negative"),
+    ("grant.max_attempts", "too-large"), ("grant.max_attempts", "float"),
 ], ids=["harness-missing", "harness-null", "harness-scalar",
-       "grant-missing", "grant-null", "grant-scalar"])
+       "grant-missing", "grant-null", "grant-scalar", "idempotent-truthy-string",
+       "read-only-truthy-string", "attempts-zero", "attempts-negative",
+       "max-attempts-string", "max-attempts-boolean",
+       "max-attempts-zero", "max-attempts-negative", "max-attempts-too-large",
+       "max-attempts-float"])
 def test_sweep_malformed_replay_fields_with_valid_lease_does_not_hide_later_work(
     work_rows, monkeypatch, field, shape,
 ):
@@ -171,11 +181,23 @@ def test_sweep_malformed_replay_fields_with_valid_lease_does_not_hide_later_work
         resolved = {
             "compute": {"id": "fixture"},
             "model": {"id": "synthetic-model"},
-            "harness": {"kind": "tool-agent", "idempotent": True},
+            "harness": {"kind": "tool-agent", "idempotent": False},
             "grant": {"max_attempts": 3},
             "tools": [],
         }
-        if shape == "missing":
+        if field in {"attempts", "harness.idempotent", "tool.read_only", "grant.max_attempts"}:
+            if field == "harness.idempotent":
+                resolved["harness"] = {"kind": "native-codex", "idempotent": "yes"}
+            elif field == "tool.read_only":
+                resolved["harness"] = {"kind": "tool-agent", "idempotent": False}
+                resolved["tools"] = [{"kind": "http-json", "read_only": "yes"}]
+            elif field == "grant.max_attempts":
+                bad_values = {
+                    "string": "3", "boolean": True, "zero": 0,
+                    "negative": -1, "too-large": 11, "float": 3.0,
+                }
+                resolved["grant"]["max_attempts"] = bad_values[shape]
+        elif shape == "missing":
             resolved.pop(field)
         elif shape == "null":
             resolved[field] = None
@@ -185,7 +207,9 @@ def test_sweep_malformed_replay_fields_with_valid_lease_does_not_hide_later_work
                         idempotency_key=f"malformed-{field}-{shape}",
                         request_digest="x", caller=later.caller, grant_id=later.grant_id,
                         generation=later.generation, resolved=resolved,
-                        task="synthetic malformed replay field", status="running", attempts=1,
+                        task="synthetic malformed replay field", status="running",
+                        attempts=(0 if field == "attempts" and shape == "zero" else
+                                  -1 if field == "attempts" else 1),
                         lease_owner=later.lease_owner, lease_until=expiry))
         session.flush()
         session.add(WorkerExecutionLease(
@@ -208,6 +232,57 @@ def test_sweep_malformed_replay_fields_with_valid_lease_does_not_hide_later_work
         assert session.get(Job, "job").status == "blocked"
 
 
+@pytest.mark.parametrize("replay_recipe", [
+    {"harness": {"kind": "native-codex", "idempotent": True}, "tools": []},
+    {"harness": {"kind": "tool-agent", "idempotent": False},
+     "tools": [{"kind": "kubernetes-read"}]},
+    {"grant": {"input_class": "C2", "on_outage": "queue"},
+     "harness": {"kind": "tool-agent"}, "tools": [{"kind": "kubernetes-read"}]},
+], ids=["idempotent-harness", "read-only-tool", "default-max-attempts-and-flags"])
+def test_sweep_preserves_valid_idempotent_and_read_only_replay_recipes(
+    work_rows, monkeypatch, replay_recipe,
+):
+    """Valid historical replay-safe recipe forms still allow a bounded retry."""
+    import sovite.lease_service as lease_module
+    db, _, _, _ = work_rows
+    with db.sessions.begin() as session:
+        later = session.get(Job, "job")
+        later.resolved = {**later.resolved, "compute": {"id": "fixture"}}
+        expiry = session.get(WorkerExecutionLease, "job").lease_until
+        resolved = {
+            "compute": {"id": "fixture"},
+            "model": {"id": "synthetic-model"},
+            "grant": {"input_class": "C2", "max_attempts": 3, "on_outage": "queue"},
+            "tools": [],
+            **replay_recipe,
+        }
+        session.add(Job(id="aaa", receipt="valid-replay-recipe",
+                        idempotency_key="valid-replay-recipe", request_digest="x",
+                        caller=later.caller, grant_id=later.grant_id,
+                        generation=later.generation, resolved=resolved,
+                        task="synthetic replay safe", status="running", attempts=1,
+                        lease_owner=later.lease_owner, lease_until=expiry))
+        session.flush()
+        session.add(WorkerExecutionLease(
+            job_id="aaa", workload_id="workload", instance_id="instance",
+            fence="3" * 32, generation=later.generation, phase="started",
+            lease_until=expiry, execution_deadline=expiry, created_at=1, updated_at=1,
+        ))
+    monkeypatch.setattr(lease_module.time, "time", lambda: expiry + 1)
+    monkeypatch.setattr(lease_module, "sweep_terminal_authority", lambda *_: None)
+    service = LeaseService(SimpleNamespace(db=db, settings=SimpleNamespace(
+        compute_id="fixture", max_attempts=3)),
+        execution_owner_key(workload_id="workload", instance_id="instance"), {})
+    counts = service.recover_expired()
+    assert counts["examined"] == 2 and counts["retired"] == 2
+    with db.sessions() as session:
+        replayed = session.get(Job, "aaa")
+        assert (replayed.status, replayed.error_code, replayed.attempts) == (
+            "retry_wait", "lease_expired", 1)
+        assert session.get(WorkerExecutionLease, "aaa").phase == "finished"
+        assert session.get(Job, "job").status == "blocked"
+
+
 @pytest.mark.parametrize("phase", ["reserved", "started"])
 def test_empty_repository_recovery_respects_lease_phase(work_rows, monkeypatch, phase):
     from test_work_projection_rows import _clear_work_history
@@ -216,7 +291,14 @@ def test_empty_repository_recovery_respects_lease_phase(work_rows, monkeypatch, 
     _clear_work_history(db)
     with db.sessions.begin() as session:
         job = session.get(Job, "job")
-        job.resolved = {**job.resolved, "compute": {"id": "fixture"}}
+        job.resolved = {
+            **job.resolved,
+            "compute": {"id": "fixture"},
+            "model": {"id": "synthetic-model", "connection": {}},
+            "grant": {"input_class": "C2", "max_attempts": 3, "on_outage": "queue"},
+            "harness": {"kind": "tool-agent", "idempotent": False},
+            "tools": [],
+        }
         lease = session.get(WorkerExecutionLease, "job")
         expiry = lease.lease_until
         lease.phase = phase

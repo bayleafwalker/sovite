@@ -853,7 +853,9 @@ def test_duplicate_raw_cursor_keys_fail_closed_in_peek_cas_reaper_and_reserve(
 
 @pytest.mark.parametrize("owner", ["direct"], indirect=True)
 def test_duplicate_compute_keys_are_scanned_but_explicit_foreign_compute_is_not(owner):
-    """Duplicate root/nested keys cannot make a local candidate disappear."""
+    """Duplicate or producer-invalid selector keys are examined, valid foreign IDs are excluded."""
+    import json
+
     local_id = owner.principal.compute_id
     duplicate_rows = [
         ("root-foreign-local", f'{{"compute":{{"id":"foreign"}},"compute":{{"id":"{local_id}"}},"model":{{"id":"m"}}}}'),
@@ -873,13 +875,32 @@ def test_duplicate_compute_keys_are_scanned_but_explicit_foreign_compute_is_not(
             ))
         stored[job.id] = raw
 
+    invalid_compute_ids = ["", "9-leading", "a" * 97, "éclair", "line\nbreak"]
+    for index, invalid_compute_id in enumerate(invalid_compute_ids):
+        job = submit(owner, key=f"invalid-compute-selector-{index}")
+        raw = json.dumps(
+            {"compute": {"id": invalid_compute_id}, "model": {"id": "m"}},
+            separators=(",", ":"), ensure_ascii=False,
+        )
+        with owner.platform.db.sessions.begin() as session:
+            session.execute(update(Job).where(Job.id == job.id).values(
+                status="running", lease_owner="expired-owner", lease_until=now - 1,
+                created_at=now - 100, updated_at=now - 1,
+                resolved={"compute": {"id": local_id}, "model": {"id": "m"}},
+            ))
+        stored[job.id] = raw
+
     foreign = submit(owner, key="duplicate-compute-foreign-valid")
+    foreign_compute_id = "foreign-valid-Compute_1"
+    foreign_raw = json.dumps(
+        {"compute": {"id": foreign_compute_id}, "model": {"id": "foreign-model"}},
+        separators=(",", ":"),
+    )
     with owner.platform.db.sessions.begin() as session:
         session.execute(update(Job).where(Job.id == foreign.id).values(
             status="running", lease_owner="foreign-owner", lease_until=now - 1,
             created_at=now - 100, updated_at=now - 1,
-            resolved={"compute": {"id": "another-valid-compute"},
-                      "model": {"id": "foreign-model"}},
+            resolved={"compute": {"id": foreign_compute_id}, "model": {"id": "foreign-model"}},
         ))
 
     db = owner.platform.db
@@ -894,9 +915,18 @@ def test_duplicate_compute_keys_are_scanned_but_explicit_foreign_compute_is_not(
                 session.execute(text(
                     f"UPDATE {jobs_table} SET resolved = :raw WHERE id = :job_id"
                 ), {"raw": raw, "job_id": job_id})
+    with db.sessions.begin() as session:
+        if db.engine.dialect.name == "postgresql":
+            session.execute(text(
+                f"UPDATE {jobs_table} SET resolved = CAST(:raw AS JSON) WHERE id = :job_id"
+            ), {"raw": foreign_raw, "job_id": foreign.id})
+        else:
+            session.execute(text(
+                f"UPDATE {jobs_table} SET resolved = :raw WHERE id = :job_id"
+            ), {"raw": foreign_raw, "job_id": foreign.id})
 
     counts = owner.service.recover_expired()
-    assert counts == {"examined": 4, "retired": 0, "changed": 0, "busy": 0, "invalid": 4}
+    assert counts == {"examined": 9, "retired": 0, "changed": 0, "busy": 0, "invalid": 9}
     with db.sessions() as session:
         cursor = peek_cursor(session, local_id, False)
         assert cursor.phase == "idle"
@@ -907,6 +937,10 @@ def test_duplicate_compute_keys_are_scanned_but_explicit_foreign_compute_is_not(
             ), {"job_id": job_id}).scalar_one()
             assert raw_stored == expected_raw
         assert session.get(Job, foreign.id).status == "running"
+        foreign_stored = session.execute(text(
+            f"SELECT CAST(resolved AS TEXT) FROM {jobs_table} WHERE id = :job_id"
+        ), {"job_id": foreign.id}).scalar_one()
+        assert foreign_stored == foreign_raw
 
 
 @pytest.mark.parametrize("owner", ["direct"], indirect=True)
@@ -1013,6 +1047,108 @@ def test_direct_reserve_counts_malformed_running_model_as_unknown_and_reserves_l
     assert counts and counts[0]["examined"] == 1 and counts[0]["invalid"] == 1
     with owner.platform.db.sessions() as session:
         assert session.get(Job, expired.id).status == "running"
+        assert session.get(Job, queued.id).status == "running"
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+@pytest.mark.parametrize("entrypoint", ["reserve", "pull"], ids=["direct-reserve", "installed-pull"])
+@pytest.mark.parametrize("malformed_recipe", [
+    "model", "connection", "grant", "input_class", "harness", "tools-object",
+    "tool-item", "idempotent", "read_only",
+], ids=["model", "connection", "grant", "input-class", "harness",
+       "tools-object", "tool-item", "idempotent", "read-only"])
+def test_expired_reserved_malformed_recipe_stays_held_and_later_reservation_progresses(
+    owner, monkeypatch, entrypoint, malformed_recipe,
+):
+    """Malformed pre-start recipes remain unchanged without wedging fresh reserve or pull."""
+    import copy
+    import time as wall_time
+    from dataclasses import replace
+
+    if entrypoint == "pull":
+        from test_worker_remote_boundary import admit_agent_http_owner, TOKEN
+        from sovite.api import create_app
+        from sovite.execution_api import Pull
+
+        admit_agent_http_owner(owner)
+
+        def submit_case(key):
+            return owner.platform.submit(
+                "native-code-review", f"reserved recovery {key}", "operations", key,
+                input_class="C2",
+            )
+    else:
+        from test_execution_leases import submit
+
+        def submit_case(key):
+            return submit(owner, key=key, task=f"reserved recovery {key}")
+
+    candidate = submit_case(f"malformed-reserved-{entrypoint}-{malformed_recipe}")
+    first = owner.service.reserve(
+        principal=owner.principal, instance_id=owner.instance,
+        operation_id=f"reserve-before-malformation-{entrypoint}-{malformed_recipe}",
+    )
+    assert first["state"] == "reserved" and first["job"]["job_id"] == candidate.id
+    now = max(owner.clock[0], wall_time.time() + 1)
+    owner.clock[0] = now + 2
+    expiry = now - 1
+    with owner.platform.db.sessions.begin() as session:
+        row = session.get(Job, candidate.id)
+        assert type(row.resolved) is dict
+        resolved = copy.deepcopy(row.resolved)
+        if malformed_recipe == "model":
+            resolved["model"] = None
+        elif malformed_recipe == "connection":
+            resolved["model"]["connection"] = "malformed-connection"
+        elif malformed_recipe == "grant":
+            resolved["grant"] = None
+        elif malformed_recipe == "input_class":
+            resolved["grant"]["input_class"] = 17
+        elif malformed_recipe == "harness":
+            resolved["harness"] = "malformed-harness"
+        elif malformed_recipe == "tools-object":
+            resolved["tools"] = {"kind": "malformed"}
+        elif malformed_recipe == "tool-item":
+            resolved["tools"] = ["malformed-tool"]
+        elif malformed_recipe == "idempotent":
+            resolved["harness"]["idempotent"] = "yes"
+        else:
+            resolved["tools"] = [{"kind": "http-json", "read_only": "yes"}]
+        row.resolved = resolved
+        row.lease_until = expiry
+        row.updated_at = expiry
+        lease = session.get(WorkerExecutionLease, candidate.id)
+        assert lease is not None and lease.phase == "reserved"
+        lease.lease_until = expiry
+        lease.updated_at = expiry
+        assert lease.execution_deadline is None
+
+    queued = submit_case(f"valid-after-malformed-reserved-{entrypoint}-{malformed_recipe}")
+    monkeypatch.setattr(LeaseService, "claim",
+                        lambda *_args, **_kwargs: pytest.fail("recovery must not use local claim"))
+    if entrypoint == "pull":
+        settings = replace(owner.platform.settings, execution_tokens={"actual-workload": TOKEN})
+        app = create_app(settings=settings, platform=owner.platform)
+        pull = next(route.endpoint for route in app.routes
+                    if getattr(route, "path", None) == "/internal/execution/v1/pull")
+        result = pull(Pull(instance_id=owner.instance,
+                           operation_id=f"pull-after-malformed-{malformed_recipe}"),
+                      principal=owner.principal)
+    else:
+        result = owner.service.reserve(
+            principal=owner.principal, instance_id=owner.instance,
+            operation_id=f"reserve-after-malformed-{malformed_recipe}",
+        )
+
+    assert result["state"] == "reserved" and result["job"]["job_id"] == queued.id
+    with owner.platform.db.sessions() as session:
+        held = session.get(Job, candidate.id)
+        held_lease = session.get(WorkerExecutionLease, candidate.id)
+        assert held.status == "running" and held.lease_owner is not None
+        assert held.lease_until == expiry
+        assert held.resolved == resolved
+        assert held_lease.phase == "reserved" and held_lease.lease_until == expiry
+        assert held_lease.execution_deadline is None
         assert session.get(Job, queued.id).status == "running"
 
 
