@@ -33,13 +33,20 @@ def test_unexpected_recovery_helper_failure_rolls_back_and_blocks_claim(
     # this service fixture intentionally does not configure sweep retention.
     monkeypatch.setattr(lease_module, "sweep_terminal_authority", lambda *_: None)
     service = LeaseService(
-        SimpleNamespace(db=db, settings=SimpleNamespace(compute_id="fixture", max_attempts=3)),
+        SimpleNamespace(db=db, settings=SimpleNamespace(
+            compute_id="fixture", execution_workload_identity="workload", max_attempts=3)),
         execution_owner_key(workload_id="workload", instance_id="instance"), {},
     )
     reserve_calls = []
-    monkeypatch.setattr(service, "reserve", lambda **_: reserve_calls.append(True))
+    monkeypatch.setattr(service, "bind_trusted_worker", lambda **_: None)
+    monkeypatch.setattr(service, "reserve", lambda **_: (reserve_calls.append(True) or {"state": "not_reserved"}))
     before = _finish_snapshot(db)
-    injected = {"reached": False}
+    injected = {
+        "reached": False,
+        "recovery_comparator_entered": False,
+        "comparator_wrapper_called": False,
+    }
+    recovery_comparator_active = {"value": False}
 
     if failure_site == "lock_executor":
         original = projection_module.lock_work_projection_set
@@ -62,32 +69,70 @@ def test_unexpected_recovery_helper_failure_rolls_back_and_blocks_claim(
     elif failure_site == "receipt_query":
         from sqlalchemy.orm import Session
 
+        original_comparator = projection_module._compare_actual_rows
         original_execute = Session.execute
 
+        def track_recovery_comparator(session, *args, **kwargs):
+            injected["comparator_wrapper_called"] = True
+            recovery = kwargs.get("recovery_attempt_states") is not None
+            previous = recovery_comparator_active["value"]
+            recovery_comparator_active["value"] = recovery
+            if recovery:
+                injected["recovery_comparator_entered"] = True
+            try:
+                return original_comparator(session, *args, **kwargs)
+            finally:
+                recovery_comparator_active["value"] = previous
+
         def fail_receipt_query(session, statement, *args, **kwargs):
-            if not injected["reached"] and "program_call_receipts" in str(statement):
-                injected["reached"] = True
-                raise RuntimeError("synthetic-private-receipt-query-marker")
+            if (not injected["reached"] and recovery_comparator_active["value"]
+                    and hasattr(statement, "get_final_froms")):
+                receipt_select = any(
+                    getattr(table, "name", None) == "program_call_receipts"
+                    for table in statement.get_final_froms()
+                )
+                locked = getattr(statement, "_for_update_arg", None) is not None
+                if receipt_select and locked:
+                    injected["reached"] = True
+                    raise RuntimeError("synthetic-private-receipt-query-marker")
             return original_execute(session, statement, *args, **kwargs)
 
+        monkeypatch.setattr(projection_module, "_compare_actual_rows", track_recovery_comparator)
         monkeypatch.setattr(Session, "execute", fail_receipt_query)
     else:
         import sqlalchemy
 
+        original_comparator = projection_module._compare_actual_rows
         original_table = sqlalchemy.Table
 
+        def track_recovery_comparator(session, *args, **kwargs):
+            injected["comparator_wrapper_called"] = True
+            recovery = kwargs.get("recovery_attempt_states") is not None
+            previous = recovery_comparator_active["value"]
+            recovery_comparator_active["value"] = recovery
+            if recovery:
+                injected["recovery_comparator_entered"] = True
+            try:
+                return original_comparator(session, *args, **kwargs)
+            finally:
+                recovery_comparator_active["value"] = previous
+
         def fail_binding_reflection(name, *args, **kwargs):
-            if not injected["reached"] and name == projection_module._BINDING_TABLE:
+            if (not injected["reached"] and recovery_comparator_active["value"]
+                    and name == projection_module._BINDING_TABLE and "autoload_with" in kwargs):
                 injected["reached"] = True
                 raise RuntimeError("synthetic-private-binding-reflection-marker")
             return original_table(name, *args, **kwargs)
 
+        monkeypatch.setattr(projection_module, "_compare_actual_rows", track_recovery_comparator)
         monkeypatch.setattr(sqlalchemy, "Table", fail_binding_reflection)
 
     with pytest.raises(PlatformError) as error:
         service.claim()
     assert error.value.code == "owner_unavailable"
-    assert injected["reached"] is True
+    assert injected["reached"] is True, injected
+    if failure_site in {"receipt_query", "binding_reflection"}:
+        assert injected["recovery_comparator_entered"] is True
     assert "synthetic-private" not in "".join(traceback.format_exception(error.value))
     assert error.value.__suppress_context__ is True
     assert reserve_calls == []
