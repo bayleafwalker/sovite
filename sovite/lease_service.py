@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -628,43 +629,119 @@ class LeaseService:
                 row.updated_at, row.job_id = time.time(), job_id
 
     def recover_expired(self):
-        now = time.time()
-        with self.platform.db.sessions.begin() as session:
-            self.platform.db.authority_lock(session)
-            if self.platform.db.engine.dialect.name == "postgresql":
+        """Recover expired owners; global failures prevent a subsequent claim."""
+        try:
+            return self._recover_expired_sweep()
+        except Exception:
+            try:
+                logging.getLogger(__name__).warning("recovery_scan status=unavailable")
+            except Exception:
+                pass
+            raise
+
+    def _recover_expired_sweep(self):
+        """Recover bounded expired owner snapshots without borrowing a live fence."""
+        from .collection_transaction import owner_transaction
+        from .db import Base, MIGRATIONS
+        from .recovery_cursor import read_cursor, advance_cursor
+        from .work_projection import _WorkProjectionBusy
+
+        database = self.platform.db
+        counts = {"examined": 0, "retired": 0, "changed": 0, "busy": 0, "invalid": 0}
+
+        def coordinate(session):
+            if database.engine.dialect.name == "postgresql":
                 session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CLAIM_LOCK})
+
+        # Global schema/audit/terminal authority failures must abort the claim.
+        with owner_transaction(database) as session:
+            coordinate(session)
+            connection = session.connection()
+            version = database._version(connection)
+            if type(version) is not int or not 1 <= version <= database.schema_version:
+                raise RuntimeError("recovery schema unavailable")
+            expected = {table.name: table for migration, tables in MIGRATIONS
+                        if migration <= version for table in tables}
+            later = {table.name for migration, tables in MIGRATIONS if migration > version
+                     for table in tables if table.name not in expected}
+            names = set(inspect(connection).get_table_names(schema=database.schema))
+            if set(expected) - names or names.intersection(later):
+                raise RuntimeError("recovery schema unavailable")
+            database._structure(connection, list(expected.values()))
             if not self.repository_worker_only:
                 sweep_terminal_authority(self.platform, session)
-            rows = session.scalars(self._eligible_query(select(Job).where(Job.status == "running", Job.lease_until < now)).with_for_update(skip_locked=True)).all()
-            for row in rows:
-                lease = session.get(WorkerExecutionLease, row.id, with_for_update=True)
-                if lease is not None:
-                    self._check_lease_finite(row, lease)
-                    if lease.phase not in {"reserved", "started"}:
-                        _fail("owner_unavailable", 503, "Execution owner state is unavailable")
-                if row.resolved.get("compute", {}).get("id") != self.platform.settings.compute_id:
-                    continue
-                if row.cancel_requested:
-                    row.status, row.error_code = "cancelled", "cancelled"
-                elif lease is not None and lease.phase == "reserved":
-                    # No execution started, so this reservation is free to retry.
-                    row.status, row.error_code = "retry_wait", "lease_expired"
-                    row.next_attempt_at = now
-                elif not replay_safe(row.resolved):
-                    row.status, row.error_code = "blocked", "execution_uncertain"
-                elif row.attempts >= int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts)):
-                    row.status, row.error_code = "failed", "lease_recovery_exhausted"
-                else:
-                    row.status, row.error_code = "retry_wait", "lease_expired"
-                    row.next_attempt_at = now
-                row.lease_owner, row.lease_until, row.updated_at = None, None, now
-                if lease is not None:
-                    lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
-                revoke_execution(session, row.id)
-                self._forget_fence(row.id, lease.fence if lease is not None else None)
-                if row.status in TERMINAL:
-                    row.finished_at = now
-                self.platform.db.audit(session, self.id, "task.lease_recovered", row.id, {"status": row.status, "error_code": row.error_code})
+
+        while counts["examined"] < 1000:
+            cursor = None
+            candidate_id = None
+            retired_fence = None
+            outcome = "changed"
+            try:
+                with owner_transaction(database) as session:
+                    coordinate(session)
+                    cursor = read_cursor(session, self.platform.settings.compute_id,
+                                         self.repository_worker_only)
+                    statement = self._eligible_query(select(Job.id).where(
+                        Job.status == "running", Job.lease_until < time.time()))
+                    if cursor.last_job_id is not None:
+                        statement = statement.where(Job.id > cursor.last_job_id)
+                    candidate_id = session.execute(statement.order_by(Job.id).limit(1)).scalar_one_or_none()
+                    if candidate_id is None:
+                        if not advance_cursor(session, cursor, None):
+                            raise RuntimeError("recovery cursor changed")
+                    else:
+                        counts["examined"] += 1
+                        if self._close_owner(candidate_id, recovery_session=session):
+                            locked_lease = session.get(WorkerExecutionLease, candidate_id)
+                            if locked_lease is None:
+                                raise RuntimeError("recovered lease unavailable")
+                            retired_fence = locked_lease.fence
+                            outcome = "retired"
+                        if not advance_cursor(session, cursor, candidate_id):
+                            raise RuntimeError("recovery cursor changed")
+                if candidate_id is None:
+                    try:
+                        logging.getLogger(__name__).info("recovery_scan status=complete counts=%s", counts)
+                    except Exception:
+                        pass
+                    return counts
+                counts[outcome] += 1
+                if outcome == "retired":
+                    self._forget_fence(candidate_id, retired_fence)
+            except (_WorkProjectionBusy, _HandBackOwnerUnavailable) as exc:
+                # Candidate transaction rolled back; progress requires exact cursor CAS.
+                if cursor is None or candidate_id is None:
+                    raise
+                with owner_transaction(database) as session:
+                    coordinate(session)
+                    latest = read_cursor(session, self.platform.settings.compute_id,
+                                         self.repository_worker_only)
+                    if latest.value != cursor.value or not advance_cursor(session, latest, candidate_id):
+                        raise RuntimeError("recovery cursor changed") from None
+                counts["busy" if isinstance(exc, _WorkProjectionBusy) else "invalid"] += 1
+        # Distinguish exactly-at-cap completion from a genuinely incomplete pass.
+        with owner_transaction(database) as session:
+            coordinate(session)
+            cursor = read_cursor(session, self.platform.settings.compute_id,
+                                 self.repository_worker_only)
+            statement = self._eligible_query(select(Job.id).where(
+                Job.status == "running", Job.lease_until < time.time()))
+            if cursor.last_job_id is not None:
+                statement = statement.where(Job.id > cursor.last_job_id)
+            remaining = session.execute(statement.order_by(Job.id).limit(1)).scalar_one_or_none()
+            if remaining is None and not advance_cursor(session, cursor, None):
+                raise RuntimeError("recovery cursor changed")
+        if remaining is None:
+            try:
+                logging.getLogger(__name__).info("recovery_scan status=complete counts=%s", counts)
+            except Exception:
+                pass
+            return counts
+        try:
+            logging.getLogger(__name__).warning("recovery_scan status=limit counts=%s", counts)
+        except Exception:
+            pass
+        raise RuntimeError("recovery sweep incomplete")
 
     def claim(self) -> Job | None:
         self.recover_expired()
@@ -737,17 +814,19 @@ class LeaseService:
     def hand_back(self, job_id: str, fence: str | None = None):
         return self._close_owner(job_id, fence=fence)
 
-    def _close_owner(self, job_id: str, fence: str | None = None, *, finish_outcome=None):
+    def _close_owner(self, job_id: str, fence: str | None = None, *, finish_outcome=None,
+                     recovery_session=None):
         """Validate, lock, and rescan one complete Job/Work owner snapshot."""
+        from contextlib import nullcontext
         from sqlalchemy import outerjoin
 
-        from .collection_transaction import owner_transaction
+        from .collection_transaction import _owner_transaction_is_active, owner_transaction
         from .db import Base, MIGRATIONS, digest
         from .program_ledger import _mark_work_projection_unknown_in_transaction
         from .program_ledger import _is_lower_hex, _validate_locked_legacy_binding
         from .repository_runs import RUN_SCHEMA
         from .work_projection import (
-            WorkProjectionError,
+            WorkProjectionError, _WorkProjectionBusy, _WorkProjectionUnavailable,
             _compare_actual_work_projection,
             _raw_job_object,
             lock_work_projection_set,
@@ -755,6 +834,8 @@ class LeaseService:
         )
 
         database = self.platform.db
+        if recovery_session is not None and not _owner_transaction_is_active(recovery_session):
+            raise ValueError("recovery owner transaction unavailable")
         hand_back_attempt_states = {
             "preparing", "awaiting_activation", "running", "interrupted",
             "cancelled", "activation_cancelled",
@@ -776,7 +857,9 @@ class LeaseService:
         succeeded = False
         succeeded_fence = None
         try:
-            with owner_transaction(database) as session:
+            transaction = (owner_transaction(database) if recovery_session is None
+                           else nullcontext(recovery_session))
+            with transaction as session:
                 connection = session.connection()
                 try:
                     version = database._version(connection)
@@ -798,8 +881,12 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                     database._structure(connection, expected_tables)
                 except _HandBackOwnerUnavailable:
+                    if recovery_session is not None:
+                        raise RuntimeError("recovery schema unavailable") from None
                     raise
                 except Exception:
+                    if recovery_session is not None:
+                        raise RuntimeError("recovery schema unavailable") from None
                     raise _HandBackOwnerUnavailable() from None
 
                 tables = Base.metadata.tables
@@ -812,6 +899,12 @@ class LeaseService:
                     if finish_outcome is not None:
                         raise _HandBackOwnerUnavailable()
                     return False
+                lease_snapshot = None
+                if recovery_session is not None:
+                    lease_snapshot = session.execute(select(WorkerExecutionLease.__table__).where(
+                        WorkerExecutionLease.job_id == job_id)).mappings().one_or_none()
+                    if lease_snapshot is None:
+                        raise _HandBackOwnerUnavailable()
                 raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
                     job_table.c.id == job_id)).scalar_one_or_none()
                 if type(raw) is not str:
@@ -848,7 +941,10 @@ class LeaseService:
                 current_attempt_row = None
                 current_attempt_state = None
                 preappend_finish = False
-                if run is not None and probe["status"] == "running":
+                recovery_reserved = (recovery_session is not None and lease_snapshot["phase"] == "reserved")
+                if recovery_reserved:
+                    preappend_finish = True
+                if run is not None and probe["status"] == "running" and not recovery_reserved:
                     if (type(probe["attempts"]) is not int or isinstance(probe["attempts"], bool)
                             or probe["attempts"] < 1):
                         raise _HandBackOwnerUnavailable()
@@ -904,7 +1000,8 @@ class LeaseService:
                             and type(getattr(error, "code", None)) is str
                             and error.code in preappend_codes
                         )
-                        if (not (preappend_error or preappend_cancel)
+                        recovery_preappend = recovery_session is not None
+                        if (not (preappend_error or preappend_cancel or recovery_preappend)
                                 or any(number >= probe["attempts"] for number in attempt_numbers)
                                 or attempt_numbers != sorted(set(attempt_numbers))):
                             raise _HandBackOwnerUnavailable()
@@ -1097,12 +1194,15 @@ class LeaseService:
                         or work_reservations or work_slots or work_intents or work_bindings):
                     raise _HandBackOwnerUnavailable()
 
-                if projections_all or legacy_batch_keys:
+                if projections_all or legacy_batch_keys or recovery_session is not None:
                     try:
                         lock_work_projection_set(session, projections_all,
                             additional_work_calls=tuple(historical_calls),
                             legacy_batch_keys=tuple(legacy_batch_keys), expected_job_id=job_id,
-                            include_bindings=schema_version >= 10)
+                            include_bindings=schema_version >= 10,
+                            nonblocking_owner_ids=(job_id,) if recovery_session is not None else ())
+                    except _WorkProjectionBusy:
+                        raise
                     except Exception:
                         raise _HandBackOwnerUnavailable() from None
                 row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
@@ -1162,7 +1262,7 @@ class LeaseService:
                         or row.cancel_requested != probe["cancel_requested"]):
                     raise _HandBackOwnerUnavailable()
                 if (not self._eligible_job(row) or row.status != "running"
-                        or row.lease_owner != self.id):
+                        or (recovery_session is None and row.lease_owner != self.id)):
                     if finish_outcome is not None:
                         raise _HandBackOwnerUnavailable()
                     return False
@@ -1363,7 +1463,94 @@ class LeaseService:
                             job_mapping = {column.name: getattr(row, column.name) for column in job_table.columns}
                             _validate_locked_legacy_binding(link, batch, registry, job_mapping, reservation, slot)
 
-                if finish_outcome is None:
+                if recovery_session is not None:
+                    now = time.time()
+                    if lease is None or lease_snapshot is None:
+                        raise _HandBackOwnerUnavailable()
+                    if any(getattr(lease, col.name) != lease_snapshot[col.name]
+                           for col in WorkerExecutionLease.__table__.columns):
+                        raise _HandBackOwnerUnavailable()
+                    try:
+                        self._check_lease_finite(row, lease)
+                    except PlatformError:
+                        raise _HandBackOwnerUnavailable() from None
+                    if (row.resolved.get("compute", {}).get("id") != self.platform.settings.compute_id
+                            or type(row.lease_until) not in (int, float)
+                            or not math.isfinite(row.lease_until)
+                            or row.lease_until != lease.lease_until or row.lease_until >= now
+                            or lease.phase not in {"reserved", "started"}):
+                        raise _HandBackOwnerUnavailable()
+                    derived_owner = execution_owner_key(workload_id=lease.workload_id,
+                                                        instance_id=lease.instance_id)
+                    if (type(row.lease_owner) is not str or not row.lease_owner
+                            or (row.lease_owner != derived_owner and
+                                hashlib.sha256(row.lease_owner.encode("utf-8")).hexdigest() != lease.instance_id)):
+                        raise _HandBackOwnerUnavailable()
+                    if ((lease.phase == "reserved" and lease.execution_deadline is not None)
+                            or (lease.phase == "started" and lease.execution_deadline is None)):
+                        raise _HandBackOwnerUnavailable()
+                    projected_history = bool(projections_all or legacy_links)
+                    if lease.phase == "reserved" and projected_history:
+                        raise _HandBackOwnerUnavailable()
+                    if run is not None and not recovery_reserved and current_attempt_row is not None:
+                        if hashlib.sha256(lease.fence.encode("utf-8")).hexdigest() != current_attempt_row.get("fence_sha256"):
+                            raise _HandBackOwnerUnavailable()
+                    elif projected_history:
+                        raise _HandBackOwnerUnavailable()
+                    recovery_states = frozenset(owner_attempt_states)
+                    for projection in current:
+                        try:
+                            _compare_actual_work_projection(
+                                session, scope_id=projection.scope_id, call_id=projection.call_id,
+                                allow_cancel_requested=True,
+                                recovery_attempt_states=recovery_states,
+                                recovery_expected_owner=row.lease_owner,
+                            )
+                        except _WorkProjectionUnavailable:
+                            raise _HandBackOwnerUnavailable() from None
+                    unresolved_work = False
+                    next_projections = {}
+                    explicit_uncertainty = current_attempt_state == "uncertain"
+                    for projection in current:
+                        state = (projection.intent_state, projection.reservation_state, projection.slot_state)
+                        if state == ("known", "settled", "released") and not explicit_uncertainty:
+                            continue
+                        if state in {("committed", "reserved", "held"), ("unknown", "unknown", "unknown")}:
+                            unresolved_work = True
+                        elif state != ("known", "settled", "released"):
+                            raise _HandBackOwnerUnavailable()
+                        payload = _mark_work_projection_unknown_in_transaction(
+                            database, session, projection, job_id=job_id, attempt_id=current_attempt)
+                        if payload is not None:
+                            next_projections[(projection.scope_id, projection.call_id)] = payload
+                    if next_projections:
+                        locked_root["repository_run"]["program_ledger_projections_v1"] = [
+                            next_projections.get((entry.get("scope_id"), entry.get("call_id")), entry)
+                            for entry in locked_root["repository_run"]["program_ledger_projections_v1"]
+                        ]
+                        row.resolved = locked_root
+                    if unresolved_work or explicit_uncertainty:
+                        row.status, row.error_code = "blocked", "execution_uncertain"
+                    elif row.cancel_requested:
+                        row.status, row.error_code = "cancelled", "cancelled"
+                    elif lease.phase == "reserved":
+                        row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
+                    elif projected_history or not replay_safe(row.resolved):
+                        row.status, row.error_code = "blocked", "execution_uncertain"
+                    elif row.attempts >= int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts)):
+                        row.status, row.error_code = "failed", "lease_recovery_exhausted"
+                    else:
+                        row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
+                    row.lease_owner, row.lease_until, row.updated_at = None, None, now
+                    lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
+                    revoke_execution(session, row.id)
+                    if row.status in TERMINAL:
+                        row.finished_at = now
+                    self.platform.db.audit(session, self.id, "task.lease_recovered", row.id,
+                                           {"status": row.status, "error_code": row.error_code})
+                    succeeded = True
+                    succeeded_fence = lease.fence
+                elif finish_outcome is None:
                     now = time.time()
                     projected_history = bool(projections_all or legacy_links)
                     if run is not None and current_attempt_state not in hand_back_attempt_states:
@@ -1679,21 +1866,27 @@ class LeaseService:
                     succeeded_fence = lease.fence
 
         except PlatformError:
+            if recovery_session is not None:
+                raise
             if finish_outcome is not None:
                 raise FinishRefused("execution owner state unavailable") from None
             raise
         except _HandBackOwnerUnavailable:
+            if recovery_session is not None:
+                raise
             if finish_outcome is not None:
                 raise FinishRefused("execution owner state unavailable") from None
             _fail("execution_owner_state_unavailable", 503,
                   "Execution owner state is unavailable; retry the request")
         except Exception:
+            if recovery_session is not None:
+                raise
             if finish_outcome is not None:
                 raise FinishRefused("execution owner state unavailable") from None
             _fail("execution_owner_state_unavailable", 503,
                   "Execution owner state is unavailable; retry the request")
 
-        if succeeded:
+        if succeeded and recovery_session is None:
             self._forget_fence(job_id, succeeded_fence)
         return succeeded
 
