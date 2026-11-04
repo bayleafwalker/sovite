@@ -65,8 +65,9 @@ def configure(platform, bundle, **fields):
 def complete(platform, *, caller="cloud-codex", grant="incident-forensics", key="result", input_class=None):
     row = platform.submit(grant, "private task", caller, key, input_class=input_class)
     worker = Worker(platform)
-    assert worker.claim().id == row.id
-    worker.finish(row.id, artifact=platform.store.put(row.id, BODY))
+    claimed = worker.claim()
+    assert claimed.id == row.id
+    worker.finish(row.id, artifact=platform.store.put(row.id, BODY), fence=claimed.execution_fence)
     row = platform.get_job(row.id)
     assert row.status == "completed"
     return row
@@ -342,14 +343,17 @@ def complete_workflow_chain(platform, binding):
     source = platform.submit_workflow_role(binding, "implementer", "Private source",
         "workflow-consumer", "source-chain")
     worker = Worker(platform)
-    assert worker.claim().id == source.id
-    worker.finish(source.id, artifact=platform.store.put(source.id, {"answer": "PRIVATE-SOURCE"}))
+    claimed = worker.claim()
+    assert claimed.id == source.id
+    worker.finish(source.id, artifact=platform.store.put(source.id, {"answer": "PRIVATE-SOURCE"}),
+                  fence=claimed.execution_fence)
     source = platform.get_job(source.id)
     release = approve_output(platform, **approval(platform, source))
     target = platform.submit_workflow_role(binding, "inline_reviewer", "", "workflow-consumer",
         "target-chain", source_release=release["release_id"], transfer_id="inline")
-    assert worker.claim().id == target.id
-    worker.finish(target.id, artifact=platform.store.put(target.id, BODY))
+    claimed = worker.claim()
+    assert claimed.id == target.id
+    worker.finish(target.id, artifact=platform.store.put(target.id, BODY), fence=claimed.execution_fence)
     return source, platform.get_job(target.id)
 
 

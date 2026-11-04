@@ -198,8 +198,10 @@ def test_gateway_lineage_requires_retained_stop_evidence(installed, ledger_state
         # admission must survive ordinary retention through execution/release.
         from sovite.worker import Worker
         worker = Worker(platform)
-        assert worker.claim().id == child.id
-        worker.finish(child.id, artifact=platform.store.put(child.id, {"answer": "new result"}))
+        claimed = worker.claim()
+        assert claimed.id == child.id
+        worker.finish(child.id, artifact=platform.store.put(child.id, {"answer": "new result"}),
+                      fence=claimed.execution_fence)
         assert platform.public_status(child.receipt, "operations")["status"] == "available"
     else:
         with pytest.raises(PlatformError) as exc:

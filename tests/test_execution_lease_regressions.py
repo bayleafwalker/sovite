@@ -14,6 +14,7 @@ from test_execution_leases import submit, pull, start, snapshot
 from sovite.db import ExecutionAuthority, WorkerExecutionLease
 from sovite.service import PlatformError
 from sovite.worker import Worker
+from sovite.lease_service import FinishRefused
 
 
 def test_repeated_new_start_replay_key_remains_already_started(owner):
@@ -44,7 +45,8 @@ def test_fixed_execution_deadline_prevents_late_artifact_release(owner):
     job = worker.claim()
     owner.clock[0] = job.execution_deadline + 1
     assert owner.clock[0] < job.lease_until
-    worker.finish(job.id, artifact=("synthetic-no-read-artifact", "a" * 64), fence=job.execution_fence)
+    with pytest.raises(FinishRefused):
+        worker.finish(job.id, artifact=("synthetic-no-read-artifact", "a" * 64), fence=job.execution_fence)
     current = owner.platform.get_job(job.id)
     assert current.public_projection is None, "elapsed fixed deadline published an artifact"
     assert current.status != "completed"
@@ -76,7 +78,8 @@ def test_actual_binding_inhibit_prevents_artifact_release(owner):
     job = worker.claim()
     owner.platform.inhibit_binding(job.resolved["model"]["id"], "independent fixture stop")
     assert owner.platform.get_job(job.id).cancel_requested is False
-    worker.finish(job.id, artifact=("synthetic-no-read-artifact", "a" * 64), fence=job.execution_fence)
+    with pytest.raises(FinishRefused):
+        worker.finish(job.id, artifact=("synthetic-no-read-artifact", "a" * 64), fence=job.execution_fence)
     assert owner.platform.get_job(job.id).public_projection is None, "inhibited gateway binding published an artifact"
 
 
@@ -164,7 +167,8 @@ def test_finish_refuses_expiry_observed_after_actual_lock_acquisition(owner, mon
 
     monkeypatch.setattr(owner.platform.db, "authority_lock", lock_then_advance_clock)
     before = snapshot(owner.platform)
-    worker.finish(job.id, artifact=("synthetic-no-read-artifact", "a" * 64), fence=job.execution_fence)
+    with pytest.raises(FinishRefused):
+        worker.finish(job.id, artifact=("synthetic-no-read-artifact", "a" * 64), fence=job.execution_fence)
     assert owner.platform.get_job(job.id).public_projection is None
     assert snapshot(owner.platform) == before
 

@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from sqlalchemy import select
 
 from sovite import policy
 from sovite.api import create_app
-from sovite.db import Job
+from sovite.db import AuditEvent, Job, WorkerExecutionLease
 from sovite.adapters import RuntimeFailure
 from sovite.repository_runs import (
     RUN_SCHEMA,
@@ -721,7 +722,7 @@ def test_revocation_after_mutation_preserves_uncertain_attempt_and_candidate_wor
 
 def test_cancel_during_mutable_attempt_becomes_uncertain_not_clean_cancel(setup, tmp_path):
     _, platform = setup
-    platform.settings.lease_seconds = 1
+    platform.settings.lease_seconds = 30
     mirror, base = make_repo(tmp_path)
     resolver = BindingResolver(mirror, base, platform.active()[1])
     started = asyncio.Event()
@@ -738,17 +739,81 @@ def test_cancel_during_mutable_attempt_becomes_uncertain_not_clean_cancel(setup,
     created = submit(owner, packet(base), principal_id="cloud-codex",
                      idempotency_key="cancel-mid-run-0000000")
     worker = Worker(platform, repository_run_executor=lifecycle)
+    finish_observations = []
+    real_finish = worker.finish
+    claimed_fences = []
+    real_claim = worker.claim
+
+    def capture_claim():
+        job = real_claim()
+        if job is not None:
+            claimed_fences.append(job.execution_fence)
+        return job
+
+    worker.claim = capture_claim
+
+    def capture_finish(job_id, **kwargs):
+        with platform.db.sessions() as session:
+            row = session.get(Job, job_id)
+            lease = session.get(WorkerExecutionLease, job_id)
+            assert row is not None and lease is not None
+            now = time.time()
+            attempts = row.resolved["repository_run"]["attempts"]
+            attempt = attempts[-1]
+            assert len(claimed_fences) == 1
+            assert lease.fence == kwargs.get("fence") == claimed_fences[0]
+            assert lease.phase == "started" and lease.lease_until > now
+            assert lease.execution_deadline is not None and lease.execution_deadline > now
+            assert row.status == "running" and row.cancel_requested is True
+            observation = {
+                "job_id": job_id,
+                "fence_matches": lease.fence == kwargs.get("fence"),
+                "lease_live": lease.lease_until > now,
+                "deadline_live": lease.execution_deadline > now,
+                "phase": lease.phase,
+                "cancel_requested": row.cancel_requested,
+                "attempt_id": attempt["id"],
+                "attempt_state": attempt["state"],
+                "failure_type": None,
+            }
+        try:
+            real_finish(job_id, **kwargs)
+        except Exception as exc:
+            observation["failure_type"] = type(exc).__name__
+            finish_observations.append(observation)
+            raise
+        finish_observations.append(observation)
+
+    worker.finish = capture_finish
 
     async def cancel_run():
         operation = asyncio.create_task(worker.run_once())
         await asyncio.wait_for(started.wait(), timeout=5)
         owner.cancel(created["id"], principal_id="cloud-codex", workspace_id="workspace-1")
-        await asyncio.wait_for(operation, timeout=5)
+        await asyncio.wait_for(operation, timeout=15)
 
     asyncio.run(cancel_run())
+    assert len(finish_observations) == 1
+    boundary = finish_observations[0]
+    assert boundary["job_id"] == created["id"]
+    assert boundary["fence_matches"] and boundary["lease_live"] and boundary["deadline_live"]
+    assert boundary["phase"] == "started" and boundary["cancel_requested"] is True
+    assert boundary["attempt_id"] == f'{created["id"]}-1'
+    assert boundary["attempt_state"] == "interrupted" and boundary["failure_type"] is None
     observed = owner.get(created["id"], principal_id="cloud-codex")
     assert observed["state"] == "blocked"
     assert observed["attempts"][0]["state"] == "uncertain"
+    assert observed["evidence"] == []
+    with platform.db.sessions() as session:
+        row = session.get(Job, created["id"])
+        assert row.error_code == "execution_uncertain"
+        assert row.artifact_key is None and row.artifact_sha256 is None
+        assert row.public_projection is None and row.released_at is None
+        releases = session.scalars(select(AuditEvent).where(
+            AuditEvent.target == created["id"],
+            AuditEvent.action == "result.release_authorized",
+        )).all()
+        assert releases == []
 
 
 def test_expired_worker_fence_blocks_mutable_run_replay(setup, tmp_path):

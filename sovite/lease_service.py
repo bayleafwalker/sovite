@@ -25,6 +25,57 @@ class _HandBackOwnerUnavailable(RuntimeError):
     """A complete Job/Work owner snapshot could not be established."""
 
 
+class FinishRefused(RuntimeError):
+    """A finish owner decision was unavailable; execution must not be reclassified."""
+
+
+def _native_activation_preentry_matches(job, run, attempt, fence: str, execution_deadline) -> bool:
+    """Check the persisted native activation descriptor against this exact attempt."""
+    activation = attempt.get("activation") if type(attempt) is dict else None
+    expected_fields = {
+        "schema_version", "job_id", "attempt_id", "workspace_id", "repository_id",
+        "principal_id", "generation", "fence_sha256", "packet_sha256", "deadline",
+    }
+    if (type(activation) is not dict or set(activation) != expected_fields
+            or activation.get("schema_version") != "sovite-native-activation/v1"
+            or type(fence) is not str or not fence):
+        return False
+    fence_digest = hashlib.sha256(fence.encode("utf-8")).hexdigest()
+    packet_digest = attempt.get("packet_sha256")
+    deadline = activation.get("deadline")
+    if (type(packet_digest) is not str or re.fullmatch(r"[0-9a-f]{64}", packet_digest) is None
+            or type(deadline) not in {int, float} or isinstance(deadline, bool)
+            or not math.isfinite(deadline)
+            or type(execution_deadline) not in {int, float} or isinstance(execution_deadline, bool)
+            or not math.isfinite(execution_deadline)):
+        return False
+    try:
+        run_deadline_value = datetime.fromisoformat(run["deadline"].replace("Z", "+00:00"))
+        if run_deadline_value.tzinfo is None or run_deadline_value.utcoffset() is None:
+            return False
+        run_deadline = run_deadline_value.timestamp()
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if (not math.isfinite(run_deadline)
+            or any(type(value) is not str or not value for value in (
+                job.id, job.caller, job.generation, run.get("workspace_id"),
+                run.get("repository_id"), attempt.get("id"),
+            ))):
+        return False
+    return (
+        activation["job_id"] == job.id
+        and activation["attempt_id"] == attempt.get("id") == f"{job.id}-{job.attempts}"
+        and activation["workspace_id"] == run.get("workspace_id")
+        and activation["repository_id"] == run.get("repository_id")
+        and activation["principal_id"] == job.caller == run.get("principal_id")
+        and activation["generation"] == job.generation
+        and activation["fence_sha256"] == fence_digest == attempt.get("fence_sha256")
+        and activation["packet_sha256"] == packet_digest
+        and deadline <= execution_deadline
+        and deadline <= run_deadline
+    )
+
+
 # Arbitrary constant naming the PostgreSQL advisory lock that serializes claims.
 CLAIM_LOCK = 0x50617669746531
 
@@ -684,11 +735,10 @@ class LeaseService:
             return True
 
     def hand_back(self, job_id: str, fence: str | None = None):
-        """Hand back a running job after closing its complete Work-owner snapshot.
+        return self._close_owner(job_id, fence=fence)
 
-        A true result records the local atomic transition only. It does not prove
-        that a child or provider stopped before producing an external effect.
-        """
+    def _close_owner(self, job_id: str, fence: str | None = None, *, finish_outcome=None):
+        """Validate, lock, and rescan one complete Job/Work owner snapshot."""
         from sqlalchemy import outerjoin
 
         from .collection_transaction import owner_transaction
@@ -705,11 +755,14 @@ class LeaseService:
         )
 
         database = self.platform.db
-        # These exact executor shutdown markers can reach hand-back. Each is
-        # treated as possible dispatch; none is accepted as replay-safety proof.
         hand_back_attempt_states = {
             "preparing", "awaiting_activation", "running", "interrupted",
             "cancelled", "activation_cancelled",
+        }
+        owner_attempt_states = {
+            "preparing", "awaiting_activation", "running", "interrupted",
+            "cancelled", "activation_cancelled", "failed", "uncertain",
+            "completed", "ineligible",
         }
         def legacy_baseline_payload(link):
             return {name: link[name] for name in (
@@ -756,6 +809,8 @@ class LeaseService:
                     Job.lease_owner, Job.lease_until, Job.cancel_requested,
                 ).where(Job.id == job_id)).mappings().one_or_none()
                 if probe is None:
+                    if finish_outcome is not None:
+                        raise _HandBackOwnerUnavailable()
                     return False
                 raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
                     job_table.c.id == job_id)).scalar_one_or_none()
@@ -792,17 +847,68 @@ class LeaseService:
                 current_attempt = None
                 current_attempt_row = None
                 current_attempt_state = None
+                preappend_finish = False
                 if run is not None and probe["status"] == "running":
                     if (type(probe["attempts"]) is not int or isinstance(probe["attempts"], bool)
-                            or probe["attempts"] < 1 or not attempts
-                            or type(attempts[-1]) is not dict):
+                            or probe["attempts"] < 1):
                         raise _HandBackOwnerUnavailable()
-                    current_attempt_row = attempts[-1]
-                    current_attempt = current_attempt_row.get("id")
-                    current_attempt_state = current_attempt_row.get("state")
-                    if (current_attempt != f"{job_id}-{probe['attempts']}"
-                            or current_attempt_state not in hand_back_attempt_states):
-                        raise _HandBackOwnerUnavailable()
+                    expected_attempt = f"{job_id}-{probe['attempts']}"
+                    if attempts and type(attempts[-1]) is dict and attempts[-1].get("id") == expected_attempt:
+                        current_attempt_row = attempts[-1]
+                        current_attempt = current_attempt_row.get("id")
+                        current_attempt_state = current_attempt_row.get("state")
+                        if current_attempt_state not in owner_attempt_states:
+                            raise _HandBackOwnerUnavailable()
+                    else:
+                        error = finish_outcome[1] if finish_outcome is not None else None
+                        preappend_codes = {
+                            "repository_profile_unavailable",
+                            "repository_binding_revoked",
+                            "repository_binding_unavailable",
+                            "repository_binding_mismatch",
+                        }
+                        preappend_cancel = (
+                            finish_outcome is not None
+                            and finish_outcome[0] is None
+                            and finish_outcome[1] is None
+                            and finish_outcome[2] is True
+                            and finish_outcome[3] is False
+                            and probe["cancel_requested"] is True
+                        )
+                        # A narrow pre-append finish is safe only when no record
+                        # exists for this claimed attempt and either the producer
+                        # failed before Work creation or an authorized cancellation
+                        # request must retire the still-live lease.
+                        attempt_numbers = []
+                        prefix = f"{job_id}-"
+                        prior_terminal = {
+                            "interrupted", "cancelled", "activation_cancelled", "failed",
+                            "uncertain", "completed", "ineligible", "settled",
+                        }
+                        for attempt in attempts:
+                            attempt_id = attempt["id"]
+                            suffix = attempt_id[len(prefix):] if attempt_id.startswith(prefix) else ""
+                            if (not suffix.isascii() or not suffix.isdigit() or int(suffix) < 1
+                                    or str(int(suffix)) != suffix):
+                                raise _HandBackOwnerUnavailable()
+                            if (attempt.get("state") not in prior_terminal
+                                    or not _is_lower_hex(attempt.get("fence_sha256"), 64)):
+                                raise _HandBackOwnerUnavailable()
+                            attempt_numbers.append(int(suffix))
+                        preappend_error = (
+                            finish_outcome is not None
+                            and finish_outcome[0] is None
+                            and finish_outcome[1] is not None
+                            and finish_outcome[2] is False
+                            and finish_outcome[3] is False
+                            and type(getattr(error, "code", None)) is str
+                            and error.code in preappend_codes
+                        )
+                        if (not (preappend_error or preappend_cancel)
+                                or any(number >= probe["attempts"] for number in attempt_numbers)
+                                or attempt_numbers != sorted(set(attempt_numbers))):
+                            raise _HandBackOwnerUnavailable()
+                        preappend_finish = True
                 elif run is not None and type(probe["attempts"]) is not int:
                     raise _HandBackOwnerUnavailable()
 
@@ -987,6 +1093,10 @@ class LeaseService:
                 binding_snapshot = snapshot_rows(work_bindings)
                 legacy_snapshot = snapshot_rows(legacy_links)
 
+                if preappend_finish and (projections_all or legacy_links or legacy_batch_keys
+                        or work_reservations or work_slots or work_intents or work_bindings):
+                    raise _HandBackOwnerUnavailable()
+
                 if projections_all or legacy_batch_keys:
                     try:
                         lock_work_projection_set(session, projections_all,
@@ -1000,6 +1110,8 @@ class LeaseService:
                 locked_raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
                     job_table.c.id == job_id).with_for_update()).scalar_one_or_none()
                 if row is None:
+                    if finish_outcome is not None:
+                        raise _HandBackOwnerUnavailable()
                     return False
                 if type(locked_raw) is not str:
                     raise _HandBackOwnerUnavailable()
@@ -1051,6 +1163,8 @@ class LeaseService:
                     raise _HandBackOwnerUnavailable()
                 if (not self._eligible_job(row) or row.status != "running"
                         or row.lease_owner != self.id):
+                    if finish_outcome is not None:
+                        raise _HandBackOwnerUnavailable()
                     return False
 
                 try:
@@ -1224,7 +1338,7 @@ class LeaseService:
                                     or source_reservation is None
                                     or source_reservation.get("attempt_id") != link["original_attempt_id"]
                                     or source_reservation.get("slot_id") != link["original_slot_id"]
-                                    or source_attempt.get("state") not in {"preparing", "running", "awaiting_activation", "interrupted", "uncertain", "failed", "cancelled", "completed", "settled"}
+                                    or source_attempt.get("state") not in {"preparing", "running", "awaiting_activation", "interrupted", "uncertain", "failed", "cancelled", "activation_cancelled", "completed", "ineligible", "settled"}
                                     or link["original_attempt_id"] == current_attempt
                                     or attempt_positions.get(link["original_attempt_id"], len(attempt_positions))
                                     >= attempt_positions[current_attempt]
@@ -1249,67 +1363,214 @@ class LeaseService:
                             job_mapping = {column.name: getattr(row, column.name) for column in job_table.columns}
                             _validate_locked_legacy_binding(link, batch, registry, job_mapping, reservation, slot)
 
-                now = time.time()
-                projected_history = bool(projections_all or legacy_links)
-                if lease is not None:
+                if finish_outcome is None:
+                    now = time.time()
+                    projected_history = bool(projections_all or legacy_links)
+                    if run is not None and current_attempt_state not in hand_back_attempt_states:
+                        raise _HandBackOwnerUnavailable()
+                    if lease is not None:
+                        try:
+                            self._check_lease_finite(row, lease)
+                        except PlatformError as error:
+                            if error.code == "owner_unavailable":
+                                raise _HandBackOwnerUnavailable() from None
+                            raise
+                        expected_fence = fence if fence is not None else (
+                            None if projected_history else self.execution_fences.get(job_id)
+                        )
+                        if projected_history and (type(fence) is not str or not fence):
+                            _fail("execution_fenced", 409, "Execution reservation is no longer current")
+                        if (lease.phase != "started" or lease.fence != expected_fence
+                                or row.lease_until is None or lease.lease_until != row.lease_until
+                                or lease.execution_deadline is None or lease.lease_until <= now
+                                or lease.execution_deadline <= now):
+                            if projected_history and fence is not None and lease.fence != fence:
+                                _fail("execution_fenced", 409, "Execution reservation is no longer current")
+                            return False
+                    elif projected_history:
+                        raise _HandBackOwnerUnavailable()
+                    elif fence is not None:
+                        return False
+
+                    if projected_history:
+                        if (current_attempt is None or lease is None
+                                or current_attempt_row is None
+                                or current_attempt_state not in hand_back_attempt_states):
+                            raise _HandBackOwnerUnavailable()
+                    if (run is not None and current_attempt_row is not None and lease is not None
+                            and hashlib.sha256(lease.fence.encode("utf-8")).hexdigest()
+                            != current_attempt_row.get("fence_sha256")):
+                        raise _HandBackOwnerUnavailable()
+                    if projected_history and current:
+                        try:
+                            for projection in current:
+                                _compare_actual_work_projection(
+                                    session, scope_id=projection.scope_id,
+                                    call_id=projection.call_id, allow_cancel_requested=True,
+                                    allow_interrupted_attempt=True,
+                                    allow_preentry_cancelled_attempt=True,
+                                )
+                        except Exception:
+                            raise _HandBackOwnerUnavailable() from None
+
+                    next_projections = {}
+                    unresolved_work = False
+                    if current:
+                        for projection in current:
+                            state = (projection.intent_state, projection.reservation_state,
+                                     projection.slot_state)
+                            if state == ("known", "settled", "released"):
+                                continue
+                            if state not in {
+                                ("committed", "reserved", "held"),
+                                ("unknown", "unknown", "unknown"),
+                            }:
+                                raise _HandBackOwnerUnavailable()
+                            unresolved_work = True
+                            try:
+                                payload = _mark_work_projection_unknown_in_transaction(
+                                    database, session, projection,
+                                    job_id=job_id, attempt_id=current_attempt,
+                                )
+                            except Exception:
+                                raise _HandBackOwnerUnavailable() from None
+                            if payload is not None:
+                                next_projections[(projection.scope_id, projection.call_id)] = payload
+
+                    if row.cancel_requested:
+                        row.status, row.error_code = "cancelled", "cancelled"
+                    elif unresolved_work or not replay_safe(row.resolved):
+                        row.status, row.error_code = "blocked", "execution_uncertain"
+                    else:
+                        row.status, row.error_code, row.next_attempt_at = "retry_wait", "worker_shutdown", now
+                        if not projected_history:
+                            # The legacy decrement is allowed only after the exact
+                            # schema/JSON/relational empty-set proof above.
+                            row.attempts = max(0, row.attempts - 1)
+
+                    if next_projections:
+                        run_locked = locked_root.get("repository_run")
+                        entries = run_locked.get("program_ledger_projections_v1") if type(run_locked) is dict else None
+                        if type(entries) is not list:
+                            raise _HandBackOwnerUnavailable()
+                        run_locked["program_ledger_projections_v1"] = [
+                            next_projections.get((entry.get("scope_id"), entry.get("call_id")), entry)
+                            if type(entry) is dict else entry for entry in entries
+                        ]
+                        row.resolved = locked_root
+
+                    row.lease_owner, row.lease_until, row.updated_at = None, None, now
+                    if lease is not None:
+                        lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
+                    revoke_execution(session, row.id)
+                    if row.status in TERMINAL:
+                        row.finished_at = now
+                    self.platform.db.audit(session, self.id, "task.handed_back", row.id, {
+                        "status": row.status, "error_code": row.error_code,
+                        "work_state": "unknown_held" if unresolved_work else "unchanged",
+                    })
+                    succeeded = True
+                    succeeded_fence = lease.fence if lease is not None else None
+                else:
+                    artifact, error, cancelled, execution_completed = finish_outcome
+                    now = time.time()
+                    projected_history = bool(projections_all or legacy_links)
+                    if preappend_finish and cancelled and row.cancel_requested is not True:
+                        raise _HandBackOwnerUnavailable()
+                    if lease is None:
+                        raise _HandBackOwnerUnavailable()
                     try:
                         self._check_lease_finite(row, lease)
-                    except PlatformError as error:
-                        if error.code == "owner_unavailable":
-                            raise _HandBackOwnerUnavailable() from None
-                        raise
-                    expected_fence = fence if fence is not None else (
-                        None if projected_history else self.execution_fences.get(job_id)
-                    )
-                    if projected_history and (type(fence) is not str or not fence):
-                        _fail("execution_fenced", 409, "Execution reservation is no longer current")
-                    if (lease.phase != "started" or lease.fence != expected_fence
-                            or row.lease_until is None or lease.lease_until != row.lease_until
+                    except PlatformError:
+                        raise _HandBackOwnerUnavailable() from None
+                    if (type(fence) is not str or not fence or lease.phase != "started"
+                            or lease.fence != fence or row.lease_until is None
+                            or lease.lease_until != row.lease_until
                             or lease.execution_deadline is None or lease.lease_until <= now
                             or lease.execution_deadline <= now):
-                        if projected_history and fence is not None and lease.fence != fence:
-                            _fail("execution_fenced", 409, "Execution reservation is no longer current")
-                        return False
-                elif projected_history:
-                    raise _HandBackOwnerUnavailable()
-                elif fence is not None:
-                    return False
-
-                if projected_history:
-                    if (current_attempt is None or lease is None
-                            or current_attempt_row is None
-                            or current_attempt_state not in hand_back_attempt_states):
                         raise _HandBackOwnerUnavailable()
-                if (run is not None and current_attempt_row is not None and lease is not None
-                        and hashlib.sha256(lease.fence.encode("utf-8")).hexdigest()
-                        != current_attempt_row.get("fence_sha256")):
-                    raise _HandBackOwnerUnavailable()
-                if projected_history and current:
-                    try:
-                        for projection in current:
-                            _compare_actual_work_projection(
-                                session, scope_id=projection.scope_id,
-                                call_id=projection.call_id, allow_cancel_requested=True,
-                                allow_interrupted_attempt=True,
-                                allow_preentry_cancelled_attempt=True,
-                            )
-                    except Exception:
-                        raise _HandBackOwnerUnavailable() from None
+                    if (not self._eligible_job(row) or row.status != "running"
+                            or row.lease_owner != self.id):
+                        raise _HandBackOwnerUnavailable()
+                    awaiting_activation_persist_failure = False
+                    if run is not None and not preappend_finish:
+                        if current_attempt_row is None or current_attempt is None:
+                            raise _HandBackOwnerUnavailable()
+                        fence_digest = hashlib.sha256(fence.encode("utf-8")).hexdigest()
+                        if current_attempt_row.get("fence_sha256") != fence_digest:
+                            raise _HandBackOwnerUnavailable()
+                        if artifact is not None:
+                            accepted_attempt_states = frozenset({"completed"})
+                        elif error is not None and error.code == "repository_candidate_ineligible":
+                            accepted_attempt_states = frozenset({"ineligible"})
+                        elif error is not None and error.code == "external_execution_uncertain":
+                            accepted_attempt_states = frozenset({"uncertain", "interrupted"})
+                        elif error is not None and error.code == "native_vm_activation_cancelled":
+                            accepted_attempt_states = frozenset({"activation_cancelled"})
+                        elif error is not None and error.code == "repository_binding_revoked":
+                            accepted_attempt_states = frozenset({
+                                "failed", "cancelled", "activation_cancelled",
+                            })
+                        elif (error is not None and artifact is None and not cancelled
+                              and not execution_completed and not row.cancel_requested
+                              and current_attempt_state == "awaiting_activation"
+                              and _native_activation_preentry_matches(
+                                  row, run, current_attempt_row, fence,
+                                  lease.execution_deadline)):
+                            # The executor persisted the native activation
+                            # descriptor but a later pre-entry persistence
+                            # failure prevented its terminal marker. Preserve
+                            # the original error only for this exact attempt;
+                            # this state does not authorize replay.
+                            accepted_attempt_states = frozenset({"awaiting_activation"})
+                            awaiting_activation_persist_failure = True
+                        elif (error is not None and error.code == "execution_timeout"
+                              and artifact is None and not cancelled
+                              and not execution_completed and not row.cancel_requested
+                              and current_attempt_state == "activation_cancelled"
+                              and _native_activation_preentry_matches(
+                                  row, run, current_attempt_row, fence,
+                                  lease.execution_deadline)):
+                            # A live timeout may pair with the executor's
+                            # durable pre-entry cancellation marker. The exact
+                            # lease/deadline checks above still gate closure.
+                            accepted_attempt_states = frozenset({"activation_cancelled"})
+                        elif error is not None and execution_completed is True:
+                            accepted_attempt_states = frozenset({"completed"})
+                        elif cancelled or row.cancel_requested:
+                            accepted_attempt_states = frozenset({"cancelled", "activation_cancelled"})
+                        else:
+                            accepted_attempt_states = frozenset({"failed"})
+                        if current_attempt_state not in accepted_attempt_states:
+                            raise _HandBackOwnerUnavailable()
+                    else:
+                        accepted_attempt_states = None
 
-                next_projections = {}
-                unresolved_work = False
-                if current:
+                    if projected_history and current:
+                        try:
+                            for projection in current:
+                                _compare_actual_work_projection(
+                                    session, scope_id=projection.scope_id,
+                                    call_id=projection.call_id, allow_cancel_requested=True,
+                                    finish_attempt_states=accepted_attempt_states,
+                                )
+                        except Exception:
+                            raise _HandBackOwnerUnavailable() from None
+
+                    unresolved_work = False
+                    explicit_uncertainty = bool(error and error.code == "external_execution_uncertain")
+                    next_projections = {}
                     for projection in current:
                         state = (projection.intent_state, projection.reservation_state,
                                  projection.slot_state)
                         if state == ("known", "settled", "released"):
-                            continue
-                        if state not in {
-                            ("committed", "reserved", "held"),
-                            ("unknown", "unknown", "unknown"),
-                        }:
+                            if not explicit_uncertainty:
+                                continue
+                        elif state in {("committed", "reserved", "held"),
+                                       ("unknown", "unknown", "unknown")}:
+                            unresolved_work = True
+                        else:
                             raise _HandBackOwnerUnavailable()
-                        unresolved_work = True
                         try:
                             payload = _mark_work_projection_unknown_in_transaction(
                                 database, session, projection,
@@ -1320,46 +1581,115 @@ class LeaseService:
                         if payload is not None:
                             next_projections[(projection.scope_id, projection.call_id)] = payload
 
-                if row.cancel_requested:
-                    row.status, row.error_code = "cancelled", "cancelled"
-                elif unresolved_work or not replay_safe(row.resolved):
-                    row.status, row.error_code = "blocked", "execution_uncertain"
-                else:
-                    row.status, row.error_code, row.next_attempt_at = "retry_wait", "worker_shutdown", now
-                    if not projected_history:
-                        # The legacy decrement is allowed only after the exact
-                        # schema/JSON/relational empty-set proof above.
-                        row.attempts = max(0, row.attempts - 1)
-
-                if next_projections:
-                    run_locked = locked_root.get("repository_run")
-                    entries = run_locked.get("program_ledger_projections_v1") if type(run_locked) is dict else None
-                    if type(entries) is not list:
+                    denied = None
+                    try:
+                        self.platform.authorize_existing_job(
+                            session, row, purpose="active" if artifact else "observe")
+                    except PlatformError as exc:
+                        denied = exc.code
+                    currentness_cancel_cleanup = (
+                        denied == "repository_currentness_revoked"
+                        and preappend_finish and cancelled
+                        and row.cancel_requested is True
+                    )
+                    if ((cancelled and row.cancel_requested is not True)
+                            or (denied == "repository_currentness_revoked"
+                                and (cancelled or row.cancel_requested)
+                                and not currentness_cancel_cleanup)):
+                        # Currentness loss only permits the exact validated
+                        # empty-preappend cancellation; hints or current attempts
+                        # cannot expand that exception.
                         raise _HandBackOwnerUnavailable()
-                    run_locked["program_ledger_projections_v1"] = [
-                        next_projections.get((entry.get("scope_id"), entry.get("call_id")), entry)
-                        if type(entry) is dict else entry for entry in entries
-                    ]
-                    row.resolved = locked_root
+                    if row.resolved.get("model", {}).get("connection", {}).get("kind") == "model-gateway":
+                        try:
+                            check_execution_binding(self.platform, session, row)
+                        except PlatformError:
+                            raise _HandBackOwnerUnavailable() from None
+                        from .authority import execution_authority_current
+                        if not execution_authority_current(self.platform, session, row,
+                                lease, lease.workload_id, now):
+                            raise _HandBackOwnerUnavailable()
 
-                row.lease_owner, row.lease_until, row.updated_at = None, None, now
-                if lease is not None:
+                    if artifact is not None:
+                        row.artifact_key, row.artifact_sha256 = artifact
+                    if next_projections:
+                        run_locked = locked_root.get("repository_run")
+                        entries = run_locked.get("program_ledger_projections_v1") if type(run_locked) is dict else None
+                        if type(entries) is not list:
+                            raise _HandBackOwnerUnavailable()
+                        run_locked["program_ledger_projections_v1"] = [
+                            next_projections.get((entry.get("scope_id"), entry.get("call_id")), entry)
+                            if type(entry) is dict else entry for entry in entries
+                        ]
+                        row.resolved = locked_root
+
+                    if explicit_uncertainty or unresolved_work:
+                        row.status, row.error_code = "blocked", "execution_uncertain"
+                    elif cancelled or row.cancel_requested:
+                        # Only persisted caller intent may close as cancelled.
+                        # The preappend path has already proved empty history.
+                        if denied and denied != "repository_currentness_revoked":
+                            row.status, row.error_code = "blocked", denied
+                        else:
+                            row.status, row.error_code = "cancelled", "cancelled"
+                    elif denied:
+                        row.status, row.error_code = "blocked", denied
+                    elif execution_completed and run is not None:
+                        # Do not replay a repository effect because storing its
+                        # completed result failed; this outcome preserves the
+                        # storage error without granting retry authority.
+                        row.status, row.error_code = "blocked", error.code
+                    elif awaiting_activation_persist_failure:
+                        # Retained activation metadata is not evidence that
+                        # retrying the repository run is safe, even when the
+                        # grant normally queues retryable failures.
+                        row.status, row.error_code = "blocked", error.code
+                    elif artifact is not None:
+                        row.status, row.error_code = "completed", None
+                        row.public_projection = {"receipt": row.receipt, "status": "available"}
+                        row.released_at = now
+                        self.platform.db.audit(session, self.id, "result.release_authorized", row.id, {
+                            "grant_id": row.grant_id, "generation": row.generation,
+                            "artifact_sha256": row.artifact_sha256,
+                        })
+                    elif error and error.retryable and any(
+                            not tool.get("read_only", tool["kind"] == "kubernetes-read")
+                            for tool in row.resolved.get("tools", [])):
+                        row.status, row.error_code = "blocked", "execution_uncertain"
+                    elif (error and error.retryable
+                          and row.resolved["grant"].get("on_outage", "queue") == "queue"
+                          and row.attempts < int(row.resolved["grant"].get(
+                              "max_attempts", self.platform.settings.max_attempts))):
+                        row.status, row.error_code = "retry_wait", error.code
+                        row.next_attempt_at = now + min(300, 2 ** row.attempts * 5)
+                    else:
+                        row.status, row.error_code = "failed", error.code if error else "execution_failed"
+
+                    row.lease_owner, row.lease_until, row.updated_at = None, None, now
                     lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
-                revoke_execution(session, row.id)
-                if row.status in TERMINAL:
-                    row.finished_at = now
-                self.platform.db.audit(session, self.id, "task.handed_back", row.id, {
-                    "status": row.status, "error_code": row.error_code,
-                    "work_state": "unknown_held" if unresolved_work else "unchanged",
-                })
-                succeeded = True
-                succeeded_fence = lease.fence if lease is not None else None
+                    revoke_execution(session, row.id)
+                    if row.status in TERMINAL:
+                        row.finished_at = now
+                    self.platform.db.audit(session, self.id, "task.state_changed", row.id, {
+                        "status": row.status, "error_code": row.error_code,
+                        "work_state": "unknown_held" if unresolved_work else (
+                            "uncertain_gate_inhibited" if explicit_uncertainty else "unchanged"),
+                    })
+                    succeeded = True
+                    succeeded_fence = lease.fence
+
         except PlatformError:
+            if finish_outcome is not None:
+                raise FinishRefused("execution owner state unavailable") from None
             raise
         except _HandBackOwnerUnavailable:
+            if finish_outcome is not None:
+                raise FinishRefused("execution owner state unavailable") from None
             _fail("execution_owner_state_unavailable", 503,
                   "Execution owner state is unavailable; retry the request")
         except Exception:
+            if finish_outcome is not None:
+                raise FinishRefused("execution owner state unavailable") from None
             _fail("execution_owner_state_unavailable", 503,
                   "Execution owner state is unavailable; retry the request")
 
@@ -1367,75 +1697,20 @@ class LeaseService:
             self._forget_fence(job_id, succeeded_fence)
         return succeeded
 
-    def finish(self, job_id: str, artifact: tuple[str, str] | None = None, error: RuntimeFailure | None = None, cancelled: bool = False, fence: str | None = None):
-        with self.platform.db.sessions.begin() as session:
-            self.platform.db.authority_lock(session)
-            row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one()
-            lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
-            now = time.time()
-            if not self._eligible_job(row):
-                return
-            if row.status != "running" or row.lease_owner != self.id or row.lease_until is None or row.lease_until <= now:
-                # A late process cannot publish after its lease has been reclaimed.
-                return
-            if lease is not None:
-                try:
-                    self._check_lease_finite(row, lease)
-                except PlatformError:
-                    return
-                if (lease.phase != "started" or lease.fence != (fence or self.execution_fences.get(job_id))
-                    or lease.lease_until != row.lease_until or lease.execution_deadline is None
-                    or lease.execution_deadline <= now):
-                    return
-            if lease is None and fence is not None:
-                return
-            denied = None
-            try:
-                self.platform.authorize_existing_job(session, row,
-                    purpose="active" if artifact else "observe")
-            except PlatformError as exc:
-                denied = exc.code
-            if lease is not None and row.resolved.get("model", {}).get("connection", {}).get("kind") == "model-gateway":
-                try:
-                    check_execution_binding(self.platform, session, row)
-                except PlatformError:
-                    # A stopped/revised gateway cannot publish a result from its
-                    # former binding. Leave state for explicit recovery/operator action.
-                    return
-                from .authority import execution_authority_current
-                if not execution_authority_current(self.platform, session, row, lease,
-                    lease.workload_id, now):
-                    return
-            if artifact:
-                row.artifact_key, row.artifact_sha256 = artifact
-            if denied:
-                row.status, row.error_code = "blocked", denied
-            elif error and error.code == "external_execution_uncertain":
-                # A cancelled mutable repository attempt may already have
-                # produced a commit or crossed another external effect boundary.
-                row.status, row.error_code = "blocked", "execution_uncertain"
-            elif cancelled or row.cancel_requested:
-                row.status, row.error_code = "cancelled", "cancelled"
-            elif artifact:
-                row.status, row.error_code = "completed", None
-                # Persistence happened before this transaction. The projection is built
-                # here from constants; model/tool strings cannot enter this surface.
-                row.public_projection = {"receipt": row.receipt, "status": "available"}
-                row.released_at = now
-                self.platform.db.audit(session, self.id, "result.release_authorized", row.id, {"grant_id": row.grant_id, "generation": row.generation, "artifact_sha256": row.artifact_sha256})
-            elif error and (error.retryable and any(not tool.get("read_only", tool["kind"] == "kubernetes-read") for tool in row.resolved.get("tools", []))):
-                # Whatever path discovered it, an execution whose effect is unknown waits for an operator.
-                row.status, row.error_code = "blocked", "execution_uncertain"
-            elif error and error.retryable and row.resolved["grant"].get("on_outage", "queue") == "queue" and row.attempts < int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts)):
-                row.status, row.error_code = "retry_wait", error.code
-                row.next_attempt_at = now + min(300, 2 ** row.attempts * 5)
-            else:
-                row.status, row.error_code = "failed", error.code if error else "execution_failed"
-            row.lease_owner, row.lease_until, row.updated_at = None, None, now
-            if lease is not None:
-                lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
-            revoke_execution(session, row.id)
-            self._forget_fence(row.id, lease.fence if lease is not None else None)
-            if row.status in TERMINAL:
-                row.finished_at = now
-            self.platform.db.audit(session, self.id, "task.state_changed", row.id, {"status": row.status, "error_code": row.error_code})
+    def finish(self, job_id: str, artifact: tuple[str, str] | None = None,
+               error: RuntimeFailure | None = None, cancelled: bool = False,
+               fence: str | None = None, execution_completed: bool = False):
+        """Finish a lease using hand_back's owner closure.
+
+        ``execution_completed`` only records that Worker received a result
+        before artifact storage failed. Repository Work still requires the
+        persisted current completed attempt, exact fence, and full closure.
+        """
+        if type(execution_completed) is not bool or (execution_completed and
+                (artifact is not None or error is None or cancelled
+                 or getattr(error, "code", None) in {"repository_candidate_ineligible",
+                                                       "external_execution_uncertain",
+                                                       "native_vm_activation_cancelled"})):
+            raise FinishRefused("invalid finish outcome")
+        return self._close_owner(
+            job_id, fence=fence, finish_outcome=(artifact, error, cancelled, execution_completed))
