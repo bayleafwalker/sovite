@@ -891,6 +891,35 @@ def test_hand_back_refuses_gate_policy_digest_drift_in_history_only_branch(work_
         assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
 
 
+def test_hand_back_refuses_gate_audit_sequence_above_canonical_integer_bound(work_rows):
+    db, _, _, _ = work_rows
+    if db.engine.dialect.name != "sqlite":
+        pytest.skip("PostgreSQL Integer enforces the canonical audit sequence bound")
+    _seed_retained_legacy_history(db, include_current_projection=False)
+    tables = Base.metadata.tables
+    oversized = (1 << 31)
+    with db.engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO audit_events "
+            "SELECT :oversized, created_at, actor, action, target, detail, previous_hash, hash "
+            "FROM audit_events WHERE sequence = (SELECT audit_sequence FROM program_gate_state "
+            "WHERE scope_id = 'scope')"), {"oversized": oversized})
+        connection.execute(text(
+            "UPDATE program_gate_state SET audit_sequence = :oversized WHERE scope_id = 'scope'"),
+            {"oversized": oversized})
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
+
+
 def test_hand_back_rolls_back_all_ledger_and_owner_changes_after_projection_failure(work_rows, monkeypatch):
     db, _, _, binding = work_rows
     from sovite import program_ledger

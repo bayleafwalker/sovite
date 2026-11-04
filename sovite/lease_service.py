@@ -1129,7 +1129,8 @@ class LeaseService:
                             raise _HandBackOwnerUnavailable()
                         audit_t = tables["audit_events"]
                         if (type(gate["revision"]) is not int or not 0 <= gate["revision"] <= (1 << 63) - 1
-                                or type(gate["audit_sequence"]) is not int or gate["audit_sequence"] <= 0
+                                or type(gate["audit_sequence"]) is not int
+                                or not 0 < gate["audit_sequence"] <= (1 << 31) - 1
                                 or session.execute(select(audit_t.c.sequence).where(
                                     audit_t.c.sequence == gate["audit_sequence"])).scalar_one_or_none()
                                 != gate["audit_sequence"]):
