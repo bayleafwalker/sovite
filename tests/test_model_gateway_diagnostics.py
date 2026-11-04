@@ -335,24 +335,46 @@ def test_transport_observer_failure_preserves_success_response_and_close():
 
 def test_gateway_observer_failures_preserve_errors_cancellation_success_and_close(monkeypatch):
     async def scenario():
-        def fail_category(_error):
-            raise RuntimeError("private-canary-category")
+        snapshot_calls = []
 
+        class _CountingBrokenDiagnostics(_BrokenDiagnostics):
+            def __init__(self):
+                self.add_calls = 0
+
+            def add(self, **fields):
+                self.add_calls += 1
+                return super().add(**fields)
+
+        def fail_snapshot():
+            snapshot_calls.append(True)
+            raise RuntimeError("snapshot-canary")
+
+        broken_diagnostics = _CountingBrokenDiagnostics()
         original = GatewayError("authority_unavailable")
-        gateway = _DiagnosticGateway(_FixedAuthority(error=original), _BrokenDiagnostics(),
-                                     state_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("snapshot-canary")))
+        gateway = _DiagnosticGateway(_FixedAuthority(error=original), broken_diagnostics,
+                                     state_snapshot=fail_snapshot)
         with pytest.raises(GatewayError) as failure:
             await gateway.call("authorize")
         assert failure.value is original
+        assert broken_diagnostics.add_calls == 1
+        assert snapshot_calls
         await gateway.close()
         assert gateway.authority.closed
 
-        monkeypatch.setattr("model_support._error_category", fail_category)
+        category_calls = []
+
+        def fail_error_category(_error):
+            category_calls.append(True)
+            raise RuntimeError("private-canary-category")
+
         original = GatewayError("authority_unavailable")
         gateway = _DiagnosticGateway(_FixedAuthority(error=original), _HandshakeDiagnostics())
-        with pytest.raises(GatewayError) as failure:
-            await gateway.call("authorize")
+        with monkeypatch.context() as patch:
+            patch.setattr("model_support._error_category", fail_error_category)
+            with pytest.raises(GatewayError) as failure:
+                await gateway.call("authorize")
         assert failure.value is original
+        assert category_calls
         await gateway.close()
         assert gateway.authority.closed
 
@@ -370,21 +392,40 @@ def test_gateway_observer_failures_preserve_errors_cancellation_success_and_clos
         await gateway.close()
         assert gateway.authority.closed
 
+        class _CountingBrokenNoteDiagnostics(_BrokenNoteDiagnostics):
+            def __init__(self):
+                super().__init__()
+                self.notes = 0
+
+            def note(self):
+                self.notes += 1
+                return super().note()
+
+        note_diagnostics = _CountingBrokenNoteDiagnostics()
         authority_error = GatewayError("authority_unavailable")
-        gateway = _DiagnosticGateway(_FixedAuthority(error=authority_error), _BrokenNoteDiagnostics(),
-                                     state_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("snapshot-canary")))
+        gateway = _DiagnosticGateway(_FixedAuthority(error=authority_error), note_diagnostics,
+                                     state_snapshot=fail_snapshot)
         with pytest.raises(GatewayError) as failure:
             await gateway.call("authorize")
         assert failure.value is authority_error
+        assert note_diagnostics.notes == 1
         await gateway.close()
         assert gateway.authority.closed
 
-        monkeypatch.setattr("model_support._safe_cause_category", fail_category)
+        cause_calls = []
+
+        def fail_cause_category(_error):
+            cause_calls.append(True)
+            raise RuntimeError("private-canary-category")
+
         original = GatewayError("authority_unavailable")
         gateway = _DiagnosticGateway(_FixedAuthority(error=original), _HandshakeDiagnostics())
-        with pytest.raises(GatewayError) as failure:
-            await gateway.call("authorize")
+        with monkeypatch.context() as patch:
+            patch.setattr("model_support._safe_cause_category", fail_cause_category)
+            with pytest.raises(GatewayError) as failure:
+                await gateway.call("authorize")
         assert failure.value is original
+        assert cause_calls
         await gateway.close()
         assert gateway.authority.closed
 
