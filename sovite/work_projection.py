@@ -346,7 +346,9 @@ def work_projections_from_job(raw: Any, *, allow_absent: bool = False) -> tuple[
     return tuple(projections)
 
 
-def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...]) -> None:
+def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...], *,
+                             additional_work_calls=(), legacy_batch_keys=(),
+                             expected_job_id=None, include_bindings=True) -> None:
     """Prelock a multi-call Work projection set by global row class order.
 
     Per-call comparison below may repeat SELECT FOR UPDATE queries, but those
@@ -360,12 +362,23 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...])
 
     if not _owner_transaction_is_active(session):
         raise _WorkProjectionUnavailable()
-    if not projections:
-        return
-
     tables = Base.metadata.tables
-    scope_ids = sorted({item.scope_id for item in projections}, key=lambda value: value.encode("utf-8"))
-    calls = sorted({(item.scope_id, item.call_id) for item in projections},
+    additional_work_calls = tuple(additional_work_calls)
+    legacy_batch_keys = tuple(legacy_batch_keys)
+    if not projections and not additional_work_calls and not legacy_batch_keys:
+        return
+    if any(len(item) != 6 or item[4] != "work" or
+           any(type(item[i]) is not str or not item[i] for i in (0, 1, 2, 3, 5))
+           for item in additional_work_calls):
+        raise _WorkProjectionUnavailable()
+    if any(len(item) != 2 or any(type(value) is not str or not value for value in item)
+           for item in legacy_batch_keys):
+        raise _WorkProjectionUnavailable()
+    scope_ids = sorted({item.scope_id for item in projections} |
+                       {item[0] for item in additional_work_calls} |
+                       {item[0] for item in legacy_batch_keys}, key=lambda value: value.encode("utf-8"))
+    calls = sorted({(item.scope_id, item.call_id) for item in projections} |
+                   {(item[0], item[1]) for item in additional_work_calls},
                    key=lambda key: (key[0].encode("utf-8"), key[1].encode("utf-8")))
     policies = {(item.scope_id, int(item.policy_revision)) for item in projections}
 
@@ -375,15 +388,41 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...])
     # ask the comparator to acquire an earlier class after a later one.
     intent_t = tables["program_call_intents"]
     candidates = {}
+    expected_additional = {(item[0], item[1]): item for item in additional_work_calls}
     for scope_id, call_id in calls:
         candidates[(scope_id, call_id)] = session.execute(select(
-            intent_t.c.work_job_id, intent_t.c.purpose, intent_t.c.policy_revision,
+            intent_t.c.work_job_id, intent_t.c.subject_id, intent_t.c.purpose, intent_t.c.policy_revision,
         ).where(intent_t.c.scope_id == scope_id,
                 intent_t.c.call_id == call_id)).mappings().all()
     for (scope_id, _), rows in candidates.items():
         for row in rows:
+            selector = expected_additional.get((scope_id, _))
+            if selector is not None and (row["work_job_id"], row["subject_id"], row["purpose"]) != (selector[5], selector[3], selector[4]):
+                raise _WorkProjectionUnavailable()
+            if expected_job_id is not None and (row["work_job_id"], row["subject_id"], row["purpose"]) != (expected_job_id, expected_job_id, "work"):
+                raise _WorkProjectionUnavailable()
             if type(row["policy_revision"]) is int:
                 policies.add((scope_id, row["policy_revision"]))
+
+    batch_t = tables.get("program_census_batches")
+    batch_discovered, batch_links_discovered = {}, {}
+    if legacy_batch_keys:
+        if batch_t is None:
+            raise _WorkProjectionUnavailable()
+        link_t = tables.get("program_legacy_links")
+        if link_t is None:
+            raise _WorkProjectionUnavailable()
+        for key in sorted(set(legacy_batch_keys), key=lambda value: tuple(v.encode("utf-8") for v in value)):
+            batch = session.execute(select(batch_t).where(
+                batch_t.c.scope_id == key[0], batch_t.c.batch_id == key[1])).mappings().one_or_none()
+            if batch is None or type(batch["policy_revision"]) is not int:
+                raise _WorkProjectionUnavailable()
+            batch_discovered[key] = batch
+            policies.add((key[0], batch["policy_revision"]))
+            links = session.execute(select(link_t).where(
+                link_t.c.scope_id == key[0], link_t.c.batch_id == key[1])).mappings().all()
+            links.sort(key=lambda row: row["link_id"].encode("utf-8") if type(row["link_id"]) is str else b"\xff")
+            batch_links_discovered[key] = links
 
     def key_order(key):
         return tuple(value.encode("utf-8") if type(value) is str else value for value in key)
@@ -409,7 +448,11 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...])
     slot_t = tables["program_slots"]
     receipt_t = tables["program_call_receipts"]
     evidence_t = tables["program_overflow_evidence"]
-    binding_t = tables["program_work_projection_bindings"]
+    binding_t = tables.get("program_work_projection_bindings")
+    if include_bindings and binding_t is None:
+        raise _WorkProjectionUnavailable()
+    if not include_bindings and projections:
+        raise _WorkProjectionUnavailable()
 
     lock_keys(scope_t, (scope_t.c.id,), ((scope_id,) for scope_id in scope_ids))
     gate_rows = lock_keys(gate_t, (gate_t.c.scope_id,),
@@ -417,9 +460,16 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...])
     policies.update((row["scope_id"], row["policy_revision"]) for row in gate_rows.values()
                     if row is not None and type(row["policy_revision"]) is int)
     lock_keys(policy_t, (policy_t.c.scope_id, policy_t.c.revision), policies)
+    if batch_t is not None:
+        locked_batches = lock_keys(batch_t, (batch_t.c.scope_id, batch_t.c.batch_id), legacy_batch_keys)
+        if any(locked_batches[key] != batch_discovered.get(key) for key in legacy_batch_keys):
+            raise _WorkProjectionUnavailable()
     registry_keys = {(item.scope_id, item.subject_id, item.purpose) for item in projections}
     subject_keys = {(item.scope_id, item.subject_id) for item in projections}
     job_ids = {item.work_job_id for item in projections}
+    registry_keys.update((item[0], item[3], "work") for item in additional_work_calls)
+    subject_keys.update((item[0], item[3]) for item in additional_work_calls)
+    job_ids.update(item[5] for item in additional_work_calls)
     for (scope_id, _), rows in candidates.items():
         for row in rows:
             canonical_job = row["work_job_id"]
@@ -447,8 +497,13 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...])
     slot_matches = {}
     slot_keys = set()
     for scope_id, call_id in calls:
-        slot_id = next(item.slot_id for item in projections
-                       if item.scope_id == scope_id and item.call_id == call_id)
+        projected = next((item.slot_id for item in projections
+                          if item.scope_id == scope_id and item.call_id == call_id), None)
+        extra = expected_additional.get((scope_id, call_id))
+        slot_ids = {value for value in (projected, extra[2] if extra else None) if value is not None}
+        if len(slot_ids) != 1:
+            raise _WorkProjectionUnavailable()
+        slot_id = next(iter(slot_ids))
         matching = session.execute(select(slot_t.c.scope_id, slot_t.c.slot_id).where(
             slot_t.c.scope_id == scope_id,
             or_(slot_t.c.call_id == call_id, slot_t.c.slot_id == slot_id),
@@ -465,7 +520,20 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...])
         if {(row.scope_id, row.slot_id) for row in reread} != keys:
             raise _WorkProjectionUnavailable()
 
-    lock_keys(intent_t, (intent_t.c.scope_id, intent_t.c.call_id), calls)
+    locked_intents = lock_keys(intent_t, (intent_t.c.scope_id, intent_t.c.call_id), calls)
+    for key, expected in candidates.items():
+        actual = locked_intents.get(key)
+        rows = expected
+        if len(rows) > 1 or (rows and actual is None):
+            raise _WorkProjectionUnavailable()
+        if rows and (actual["work_job_id"], actual["purpose"], actual["policy_revision"]) != (
+                rows[0]["work_job_id"], rows[0]["purpose"], rows[0]["policy_revision"]):
+            raise _WorkProjectionUnavailable()
+        selector = expected_additional.get(key)
+        if selector is not None and actual is not None and (
+                actual["work_job_id"], actual["subject_id"], actual["purpose"]) != (
+                    selector[5], selector[3], selector[4]):
+            raise _WorkProjectionUnavailable()
 
     # Optional rows are keyed from the call predicate so all existing rows are
     # locked in exact key order; their cardinality and contents are validated
@@ -481,7 +549,28 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...])
                 evidence_t.c.scope_id == scope_id, evidence_t.c.call_id == call_id)).all())
     lock_keys(receipt_t, (receipt_t.c.scope_id, receipt_t.c.call_id, receipt_t.c.receipt_id), receipt_keys)
     lock_keys(evidence_t, (evidence_t.c.scope_id, evidence_t.c.evidence_id), evidence_keys)
-    lock_keys(binding_t, (binding_t.c.scope_id, binding_t.c.call_id), calls)
+    if include_bindings:
+        lock_keys(binding_t, (binding_t.c.scope_id, binding_t.c.call_id), calls)
+    if legacy_batch_keys:
+        link_t = tables["program_legacy_links"]
+        locked_link_keys = set()
+        for key, links in batch_links_discovered.items():
+            locked_link_keys.update((key[0], key[1], row["link_id"]) for row in links)
+        locked_links = {}
+        for key in sorted(locked_link_keys, key=lambda value: tuple(v.encode("utf-8") for v in value)):
+            rows = session.execute(select(link_t).where(
+                link_t.c.scope_id == key[0], link_t.c.batch_id == key[1],
+                link_t.c.link_id == key[2]).with_for_update()).mappings().all()
+            if len(rows) != 1:
+                raise _WorkProjectionUnavailable()
+            locked_links[key] = rows[0]
+        for batch_key, discovered in batch_links_discovered.items():
+            reread = session.execute(select(link_t).where(
+                link_t.c.scope_id == batch_key[0], link_t.c.batch_id == batch_key[1])).mappings().all()
+            reread.sort(key=lambda row: row["link_id"].encode("utf-8") if type(row["link_id"]) is str else b"\xff")
+            if reread != discovered or any(locked_links.get((batch_key[0], batch_key[1], row["link_id"])) != row
+                                           for row in discovered):
+                raise _WorkProjectionUnavailable()
 
 
 def _compare_actual_rows(session, *, scope_id: str, call_id: str,

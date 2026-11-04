@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Text, cast, inspect, select, text
+from sqlalchemy import Text, and_, cast, inspect, or_, select, text
 
 from .adapters import RuntimeFailure
 from .authority import check_execution_binding, issue_execution, refresh_execution, revoke_execution, sweep_terminal_authority
@@ -689,11 +689,13 @@ class LeaseService:
         A true result records the local atomic transition only. It does not prove
         that a child or provider stopped before producing an external effect.
         """
-        from sqlalchemy import and_, outerjoin
+        from sqlalchemy import outerjoin
 
         from .collection_transaction import owner_transaction
-        from .db import Base, MIGRATIONS
+        from .db import Base, MIGRATIONS, digest
         from .program_ledger import _mark_work_projection_unknown_in_transaction
+        from .program_ledger import _is_lower_hex, _validate_locked_legacy_binding
+        from .program_ledger_core import _baseline_payload
         from .repository_runs import RUN_SCHEMA
         from .work_projection import (
             WorkProjectionError,
@@ -839,15 +841,17 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                     work_intents = session.execute(select(
                         intent_t.c.scope_id, intent_t.c.call_id,
-                        intent_t.c.subject_id, intent_t.c.purpose,
+                        intent_t.c.subject_id, intent_t.c.purpose, intent_t.c.work_job_id,
                         intent_t.c.work_attempt_id,
-                    ).where(intent_t.c.work_job_id == job_id)).mappings().all()
-                    legacy_links = session.execute(select(
-                        legacy_t.c.scope_id, legacy_t.c.batch_id,
-                        legacy_t.c.link_id, legacy_t.c.original_attempt_id,
-                        legacy_t.c.original_call_id, legacy_t.c.original_slot_id,
-                    ).where(legacy_t.c.job_id == job_id)).mappings().all()
+                    ).where(or_(
+                        intent_t.c.work_job_id == job_id,
+                        and_(intent_t.c.subject_id == job_id,
+                             intent_t.c.purpose == "work"),
+                    ))).mappings().all()
+                    legacy_links = session.execute(select(legacy_t).where(
+                        legacy_t.c.job_id == job_id)).mappings().all()
                     if any(row["purpose"] != "work" or row["subject_id"] != job_id
+                           or row["work_job_id"] != job_id
                            or type(row["work_attempt_id"]) is not str for row in work_intents):
                         raise _HandBackOwnerUnavailable()
 
@@ -857,8 +861,37 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                     work_bindings = session.execute(select(
                         binding_t.c.scope_id, binding_t.c.call_id,
-                        binding_t.c.work_job_id, binding_t.c.attempt_id,
-                    ).where(binding_t.c.work_job_id == job_id)).mappings().all()
+                        binding_t.c.work_job_id, binding_t.c.subject_id,
+                        binding_t.c.purpose, binding_t.c.attempt_id,
+                    ).where(or_(
+                        binding_t.c.work_job_id == job_id,
+                        and_(binding_t.c.subject_id == job_id,
+                             binding_t.c.purpose == "work"),
+                    ))).mappings().all()
+                    if any(row["work_job_id"] != job_id or row["subject_id"] != job_id
+                           or row["purpose"] != "work"
+                           or type(row["attempt_id"]) is not str for row in work_bindings):
+                        raise _HandBackOwnerUnavailable()
+
+                legacy_batch_keys = {(link["scope_id"], link["batch_id"]) for link in legacy_links}
+                historical_calls = []
+                seen_source_calls, seen_source_slots, seen_target_calls, seen_target_slots = set(), set(), set(), set()
+                for link in legacy_links:
+                    if (link["job_id"] != job_id or link["subject_id"] != job_id
+                            or not all(type(link[name]) is str and link[name] for name in (
+                                "scope_id", "batch_id", "link_id", "call_id", "slot_id",
+                                "original_attempt_id", "original_call_id", "original_slot_id"))):
+                        raise _HandBackOwnerUnavailable()
+                    source_call = (link["job_id"], link["original_call_id"])
+                    source_slot = (link["job_id"], link["original_slot_id"])
+                    target_call, target_slot = (link["scope_id"], link["call_id"]), (link["scope_id"], link["slot_id"])
+                    if (source_call in seen_source_calls or source_slot in seen_source_slots
+                            or target_call in seen_target_calls or target_slot in seen_target_slots):
+                        raise _HandBackOwnerUnavailable()
+                    seen_source_calls.add(source_call); seen_source_slots.add(source_slot)
+                    seen_target_calls.add(target_call); seen_target_slots.add(target_slot)
+                    historical_calls.append((link["scope_id"], link["call_id"], link["slot_id"],
+                                             link["subject_id"], "work", job_id))
 
                 projection_keys = {
                     (item.scope_id, item.call_id, item.attempt_id)
@@ -875,16 +908,39 @@ class LeaseService:
                         (row["scope_id"], row["call_id"], row["work_attempt_id"])
                         for row in work_intents
                     }
+                    historical_target_keys = {(item[0], item[1]) for item in historical_calls}
+                    historical_intent_keys = {
+                        (row["scope_id"], row["call_id"], row["work_attempt_id"]) for row in work_intents
+                        if (row["scope_id"], row["call_id"]) in historical_target_keys
+                    }
+                    allowed_keys = projection_keys | historical_intent_keys
                     if (len(binding_keys) != len(work_bindings)
                             or len(intent_keys) != len(work_intents)
-                            or binding_keys != projection_keys or intent_keys != projection_keys):
+                            or binding_keys != projection_keys or intent_keys != allowed_keys):
                         raise _HandBackOwnerUnavailable()
-                elif projections_all or work_intents or work_bindings:
+                    original_by_target = {(item[0], item[1]): next(
+                        link["original_attempt_id"] for link in legacy_links
+                        if (link["scope_id"], link["call_id"]) == (item[0], item[1]))
+                        for item in historical_calls}
+                else:
+                    history_intent_keys = {(row["scope_id"], row["call_id"]) for row in work_intents}
+                    if (projections_all or work_bindings
+                            or history_intent_keys - {(item[0], item[1]) for item in historical_calls}):
+                        raise _HandBackOwnerUnavailable()
+                original_by_target = {(item[0], item[1]): next(
+                    link["original_attempt_id"] for link in legacy_links
+                    if (link["scope_id"], link["call_id"]) == (item[0], item[1]))
+                    for item in historical_calls}
+                if any((row["scope_id"], row["call_id"]) in original_by_target
+                       and row["work_attempt_id"] != original_by_target[(row["scope_id"], row["call_id"])]
+                       for row in work_intents):
                     raise _HandBackOwnerUnavailable()
 
                 if schema_version >= 8:
                     expected_calls = {(item.scope_id, item.call_id) for item in projections_all}
                     expected_slots = {(item.scope_id, item.slot_id, item.call_id) for item in projections_all}
+                    legacy_call_keys = {(link["scope_id"], link["call_id"]) for link in legacy_links}
+                    legacy_slot_keys = {(link["scope_id"], link["slot_id"], link["call_id"]) for link in legacy_links}
                     reservation_calls = {
                         (row["scope_id"], row["call_id"]) for row in work_reservations
                     }
@@ -893,10 +949,9 @@ class LeaseService:
                     }
                     if (len(reservation_calls) != len(work_reservations)
                             or len(slot_keys) != len(work_slots)
-                            or reservation_calls != expected_calls or slot_keys != expected_slots):
+                            or reservation_calls != expected_calls | legacy_call_keys
+                            or slot_keys != expected_slots | legacy_slot_keys):
                         raise _HandBackOwnerUnavailable()
-                if legacy_links:
-                    raise _HandBackOwnerUnavailable()
 
                 current = tuple(
                     item for item in projections_all
@@ -919,11 +974,19 @@ class LeaseService:
                             or binding_current != current_keys or intent_current != current_keys):
                         raise _HandBackOwnerUnavailable()
 
-                if projections_all:
+                if projections_all or legacy_batch_keys:
                     try:
-                        lock_work_projection_set(session, projections_all)
+                        lock_work_projection_set(session, projections_all,
+                            additional_work_calls=tuple(historical_calls),
+                            legacy_batch_keys=tuple(legacy_batch_keys), expected_job_id=job_id,
+                            include_bindings=schema_version >= 10)
                     except Exception:
                         raise _HandBackOwnerUnavailable() from None
+                    if legacy_links:
+                        reread_legacy = session.execute(select(legacy_t).where(
+                            legacy_t.c.job_id == job_id)).mappings().all()
+                        if reread_legacy != legacy_links:
+                            raise _HandBackOwnerUnavailable()
 
                 row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
                 lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
@@ -952,8 +1015,127 @@ class LeaseService:
                 if locked_all != projections_all:
                     raise _HandBackOwnerUnavailable()
 
+                if legacy_links:
+                    link_t = tables["program_legacy_links"]
+                    batch_t = tables["program_census_batches"]
+                    policy_t = tables["program_policy_revisions"]
+                    registry_t = tables["program_subject_registry"]
+                    reservation_t = tables["program_reservations"]
+                    slot_t = tables["program_slots"]
+                    attempt_suffix = int(current_attempt.rsplit("-", 1)[1]) if current_attempt else None
+                    if run is None or attempt_suffix is None:
+                        raise _HandBackOwnerUnavailable()
+                    source_attempts = run.get("attempts")
+                    source_reservations = run.get("budget_reservations")
+                    source_slots = run.get("active_slots")
+                    if any(type(value) is not list for value in (source_attempts, source_reservations, source_slots)):
+                        raise _HandBackOwnerUnavailable()
+                    for field, rows, key in (("attempts", source_attempts, "id"),
+                                             ("budget_reservations", source_reservations, "call_id")):
+                        ids = [item.get(key) if type(item) is dict else None for item in rows]
+                        if any(type(value) is not str for value in ids) or len(ids) != len(set(ids)):
+                            raise _HandBackOwnerUnavailable()
+                    if (any(type(value) is not str for value in source_slots)
+                            or len(source_slots) != len(set(source_slots))):
+                        raise _HandBackOwnerUnavailable()
+                    attempt_map = {item["id"]: item for item in source_attempts}
+                    reservation_map = {item["call_id"]: item for item in source_reservations}
+                    source_keys, source_call_keys, source_slot_keys, target_calls, target_slots = set(), set(), set(), set(), set()
+                    for batch_key in sorted(legacy_batch_keys):
+                        batch = session.execute(select(batch_t).where(
+                            batch_t.c.scope_id == batch_key[0], batch_t.c.batch_id == batch_key[1])).mappings().one_or_none()
+                        links = session.execute(select(link_t).where(
+                            link_t.c.scope_id == batch_key[0], link_t.c.batch_id == batch_key[1])).mappings().all()
+                        links.sort(key=lambda item: item["link_id"].encode("utf-8"))
+                        if (batch is None or batch["state"] != "complete"
+                                or type(batch["source_count"]) is not int or batch["source_count"] != len(links)
+                                or batch["mapped_count"] != batch["source_count"] or batch["unmatched_count"] != 0
+                                or batch["policy_revision"] <= 0 or type(batch["snapshot_digest"]) is not str
+                                or digest([_baseline_payload(item) for item in links]) != batch["snapshot_digest"]):
+                            raise _HandBackOwnerUnavailable()
+                        policy = session.execute(select(policy_t).where(
+                            policy_t.c.scope_id == batch_key[0],
+                            policy_t.c.revision == batch["policy_revision"])).mappings().one_or_none()
+                        if policy is None or policy["policy_digest"] != batch["policy_digest"]:
+                            raise _HandBackOwnerUnavailable()
+                        totals = {name: 0 for name in ("reserved_usd_micro", "settled_usd_micro", "unknown_usd_micro",
+                            "reserved_allowance_micro", "settled_allowance_micro", "unknown_allowance_micro", "held_slots", "unknown_slots")}
+                        for item in links:
+                            if (any(type(item[name]) is not str or not 1 <= len(item[name]) <= (64 if name == "job_id" else 96)
+                                    or any(not "!" <= char <= "~" for char in item[name])
+                                    for name in ("scope_id", "batch_id", "link_id", "job_id", "original_attempt_id",
+                                                 "original_call_id", "original_slot_id", "subject_id", "call_id", "slot_id"))
+                                    or not _is_lower_hex(item["original_digest"], 64)
+                                    or digest(_baseline_payload(item)) != item["original_digest"]):
+                                raise _HandBackOwnerUnavailable()
+                            identity = (item["job_id"], item["original_attempt_id"], item["original_call_id"], item["original_slot_id"])
+                            source_call = (item["job_id"], item["original_call_id"])
+                            source_slot = (item["job_id"], item["original_slot_id"])
+                            target_call = (item["scope_id"], item["call_id"])
+                            target_slot = (item["scope_id"], item["slot_id"])
+                            if (identity in source_keys or source_call in source_call_keys or source_slot in source_slot_keys
+                                    or target_call in target_calls or target_slot in target_slots):
+                                raise _HandBackOwnerUnavailable()
+                            source_keys.add(identity); source_call_keys.add(source_call); source_slot_keys.add(source_slot)
+                            target_calls.add(target_call); target_slots.add(target_slot)
+                            reserve_usd, reserve_allowance = item["baseline_reserved_usd_micro"], item["baseline_reserved_allowance_micro"]
+                            actual_usd, actual_allowance = item["baseline_actual_usd_micro"], item["baseline_actual_allowance_micro"]
+                            if (type(reserve_usd) is not int or type(reserve_allowance) is not int
+                                    or reserve_usd < 0 or reserve_allowance < 0
+                                    or ((actual_usd is None) != (actual_allowance is None))
+                                    or any(type(value) is not int or value < 0 for value in (actual_usd, actual_allowance) if value is not None)):
+                                raise _HandBackOwnerUnavailable()
+                            if (item["baseline_state"], item["baseline_slot_state"], actual_usd is None) == ("reserved", "held", True):
+                                totals["reserved_usd_micro"] += reserve_usd
+                                totals["reserved_allowance_micro"] += reserve_allowance
+                                totals["held_slots"] += 1
+                            elif (item["baseline_state"], item["baseline_slot_state"], actual_usd is None) == ("settled", "released", False):
+                                totals["settled_usd_micro"] += actual_usd
+                                totals["settled_allowance_micro"] += actual_allowance
+                            elif item["baseline_state"] == "unknown" and item["baseline_slot_state"] == "unknown":
+                                totals["unknown_usd_micro"] += reserve_usd if actual_usd is None else max(reserve_usd, actual_usd)
+                                totals["unknown_allowance_micro"] += reserve_allowance if actual_allowance is None else max(reserve_allowance, actual_allowance)
+                                totals["unknown_slots"] += 1
+                            else:
+                                raise _HandBackOwnerUnavailable()
+                        if any(type(batch[name]) is not int or batch[name] != value for name, value in totals.items()):
+                            raise _HandBackOwnerUnavailable()
+                        if any((item["scope_id"], item["call_id"]) in {
+                                (projection.scope_id, projection.call_id) for projection in current
+                            } or (item["scope_id"], item["slot_id"]) in {
+                                (projection.scope_id, projection.slot_id) for projection in current
+                            } for item in links):
+                            raise _HandBackOwnerUnavailable()
+                        for link in (item for item in links if item["job_id"] == job_id):
+                            source_attempt = attempt_map.get(link["original_attempt_id"])
+                            source_reservation = reservation_map.get(link["original_call_id"])
+                            if (source_attempt is None or source_attempt.get("id") != link["original_attempt_id"]
+                                    or source_reservation is None
+                                    or source_reservation.get("attempt_id") != link["original_attempt_id"]
+                                    or source_reservation.get("slot_id") != link["original_slot_id"]
+                                    or source_attempt.get("state") not in {"preparing", "running", "awaiting_activation", "interrupted", "uncertain", "failed", "cancelled", "completed", "settled"}
+                                    or link["original_attempt_id"] == current_attempt
+                                    or not link["original_attempt_id"].startswith(job_id + "-")
+                                    or int(link["original_attempt_id"].rsplit("-", 1)[1]) >= attempt_suffix
+                                    or source_slots.count(link["original_slot_id"]) != 1
+                                    or (link["scope_id"], link["call_id"]) in {
+                                        (projection.scope_id, projection.call_id) for projection in current
+                                    } or (link["scope_id"], link["slot_id"], link["call_id"]) in {
+                                        (projection.scope_id, projection.slot_id, projection.call_id) for projection in current
+                                    }):
+                                raise _HandBackOwnerUnavailable()
+                            registry = session.execute(select(registry_t).where(
+                                registry_t.c.scope_id == link["scope_id"], registry_t.c.subject_id == job_id,
+                                registry_t.c.purpose == "work")).mappings().one_or_none()
+                            reservation = session.execute(select(reservation_t).where(
+                                reservation_t.c.scope_id == link["scope_id"], reservation_t.c.call_id == link["call_id"])).mappings().one_or_none()
+                            slot = session.execute(select(slot_t).where(
+                                slot_t.c.scope_id == link["scope_id"], slot_t.c.slot_id == link["slot_id"])).mappings().one_or_none()
+                            job_mapping = {column.name: getattr(row, column.name) for column in job_table.columns}
+                            _validate_locked_legacy_binding(link, batch, registry, job_mapping, reservation, slot)
+
                 now = time.time()
-                projected_history = bool(projections_all)
+                projected_history = bool(projections_all or legacy_links)
                 if lease is not None:
                     try:
                         self._check_lease_finite(row, lease)
