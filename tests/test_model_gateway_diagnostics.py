@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import time
 
 import httpx
 import pytest
@@ -107,7 +108,7 @@ def test_real_authority_success_records_only_safe_diagnostics(authority_env):
     asyncio.run(scenario())
 
 
-def test_authority_failure_note_correlates_safe_live_owner_state(authority_env):
+def test_authority_failure_note_marks_owner_state_unobserved(authority_env):
     async def scenario():
         async with connected(authority_env) as env:
             async def unavailable(_action, **_fields):
@@ -118,13 +119,9 @@ def test_authority_failure_note_correlates_safe_live_owner_state(authority_env):
                 await env.gateway.call("authorize", request={"canary": "private-canary"})
             notes = "\n".join(getattr(failure.value, "__notes__", ()))
             assert "cause_category:timeout" in notes
-            assert "job_status:running" in notes
-            assert "lease_phase:started" in notes
-            assert "lease_fence_matches_claim:true" in notes
-            assert "lease_live:true" in notes
-            assert "deadline_live:true" in notes
-            assert "helper_phase:idle" in notes
-            assert "helper_active:false" in notes
+            assert "owner_state:not_observed" in notes
+            assert "job_status" not in notes
+            assert "lease_" not in notes
             assert "private-canary" not in notes
 
     asyncio.run(scenario())
@@ -210,6 +207,53 @@ def test_transport_diagnostics_do_not_consume_response_body():
         finally:
             await observed.aclose()
         assert inner.closed
+
+    asyncio.run(scenario())
+
+
+def test_gateway_error_observer_never_attempts_blocking_db_snapshot(authority_env, monkeypatch):
+    async def scenario():
+        database_reads = []
+
+        def blocking_database_read(*_args, **_kwargs):
+            database_reads.append(True)
+            time.sleep(0.25)
+            raise AssertionError("diagnostic observer attempted database access")
+
+        async with connected(authority_env) as env:
+            monkeypatch.setattr(env.platform.db, "sessions", blocking_database_read)
+            original = GatewayError("authority_unavailable")
+
+            async def fail_authority(_action, **_fields):
+                await asyncio.sleep(0.005)
+                raise original
+
+            monkeypatch.setattr(env.gateway.authority, "call", fail_authority)
+            heartbeat = {"ticks": 0}
+            stopped = asyncio.Event()
+
+            async def beat():
+                while not stopped.is_set():
+                    heartbeat["ticks"] += 1
+                    await asyncio.sleep(0.001)
+
+            heartbeat_task = asyncio.create_task(beat())
+            started = time.monotonic()
+            try:
+                with pytest.raises(GatewayError) as failure:
+                    await asyncio.wait_for(env.gateway.call("authorize"), timeout=0.05)
+                elapsed = time.monotonic() - started
+                assert failure.value is original
+                assert elapsed < 0.05
+                assert database_reads == []
+                assert heartbeat["ticks"] > 0
+                assert any(event.get("owner_state") == "not_observed"
+                           for event in env.authority_diagnostics.events)
+            finally:
+                stopped.set()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+        assert all(task.done() for task in env.engine.handlers)
 
     asyncio.run(scenario())
 
@@ -335,8 +379,6 @@ def test_transport_observer_failure_preserves_success_response_and_close():
 
 def test_gateway_observer_failures_preserve_errors_cancellation_success_and_close(monkeypatch):
     async def scenario():
-        snapshot_calls = []
-
         class _CountingBrokenDiagnostics(_BrokenDiagnostics):
             def __init__(self):
                 self.add_calls = 0
@@ -345,19 +387,13 @@ def test_gateway_observer_failures_preserve_errors_cancellation_success_and_clos
                 self.add_calls += 1
                 return super().add(**fields)
 
-        def fail_snapshot():
-            snapshot_calls.append(True)
-            raise RuntimeError("snapshot-canary")
-
         broken_diagnostics = _CountingBrokenDiagnostics()
         original = GatewayError("authority_unavailable")
-        gateway = _DiagnosticGateway(_FixedAuthority(error=original), broken_diagnostics,
-                                     state_snapshot=fail_snapshot)
+        gateway = _DiagnosticGateway(_FixedAuthority(error=original), broken_diagnostics)
         with pytest.raises(GatewayError) as failure:
             await gateway.call("authorize")
         assert failure.value is original
         assert broken_diagnostics.add_calls == 1
-        assert snapshot_calls
         await gateway.close()
         assert gateway.authority.closed
 
@@ -403,8 +439,7 @@ def test_gateway_observer_failures_preserve_errors_cancellation_success_and_clos
 
         note_diagnostics = _CountingBrokenNoteDiagnostics()
         authority_error = GatewayError("authority_unavailable")
-        gateway = _DiagnosticGateway(_FixedAuthority(error=authority_error), note_diagnostics,
-                                     state_snapshot=fail_snapshot)
+        gateway = _DiagnosticGateway(_FixedAuthority(error=authority_error), note_diagnostics)
         with pytest.raises(GatewayError) as failure:
             await gateway.call("authorize")
         assert failure.value is authority_error

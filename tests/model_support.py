@@ -26,7 +26,6 @@ from sovite.gateway.client import AuthorityClient
 from sovite.gateway.runtime import Gateway
 from sovite.gateway.client import GatewayError
 from sovite.service import Platform
-from sovite.db import Job, WorkerExecutionLease
 from sovite.settings import Settings
 from sovite.worker import Worker
 
@@ -54,14 +53,10 @@ class _HandshakeDiagnostics:
                                "database_operational_error", "invalid_response", "cancelled",
                                "other", "unknown", "none"},
             "status": {"2xx", "422", "4xx", "5xx", "other"},
-            "job_status": {"queued", "running", "blocked", "finished", "failed", "other", "missing"},
-            "lease_phase": {"reserved", "started", "finished", "released", "missing", "other"},
-            "helper_phase": {"idle", "invoked", "streaming", "cancelling", "closed", "missing", "other"},
+            "owner_state": {"not_observed"},
             "predicates": {"unavailable"},
         }
-        booleans = {"tls_present", "tls13", "subprotocol_ok", "no_extensions", "path_ok",
-                    "lease_fence_matches_claim", "lease_live",
-                    "deadline_live", "cancel_requested", "helper_active", "state_available"}
+        booleans = {"tls_present", "tls13", "subprotocol_ok", "no_extensions", "path_ok"}
         safe = {key: value for key, value in fields.items()
                 if (key in booleans and type(value) is bool)
                 or (key in allowed and type(value) is str and value in allowed[key])
@@ -180,10 +175,9 @@ class _DiagnosticASGITransport(httpx.AsyncBaseTransport):
 
 class _DiagnosticGateway(Gateway):
     """Call the real gateway while retaining only fixed diagnostic categories."""
-    def __init__(self, authority, diagnostics, state_snapshot=None):
+    def __init__(self, authority, diagnostics):
         super().__init__(authority)
         self.diagnostics = diagnostics
-        self.state_snapshot = state_snapshot
 
     async def call(self, action, **fields):
         recorded = type(action) is str and action in {"start", "open", "hello", "touch", "fence", "authorize", "renew"}
@@ -198,12 +192,8 @@ class _DiagnosticGateway(Gateway):
             if recorded:
                 def observe_failure():
                     event = {"action": action, "stage": "authority", "outcome": "error",
-                             "category": _error_category(error), "cause_category": _safe_cause_category(error)}
-                    if self.state_snapshot is not None and action in {"authorize", "renew"}:
-                        try:
-                            event.update(self.state_snapshot())
-                        except Exception:
-                            event["state_available"] = False
+                             "category": _error_category(error), "cause_category": _safe_cause_category(error),
+                             "owner_state": "not_observed"}
                     self.diagnostics.add(**event)
                     if action in {"authorize", "renew"} and isinstance(error, GatewayError):
                         error.add_note(self.diagnostics.note())
@@ -276,31 +266,7 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
     client = AuthorityClient('http://control.test', env.settings.authority_token, transport=transport)
     helper_holder = {"value": None}
 
-    def state_snapshot():
-        now = time.time()
-        with env.platform.db.sessions() as session:
-            job = session.get(Job, env.job.id)
-            lease = session.get(WorkerExecutionLease, env.job.id)
-            job_status = job.status if job is not None and job.status in {"queued", "running", "blocked", "finished", "failed"} else "other" if job is not None else "missing"
-            lease_phase = lease.phase if lease is not None and lease.phase in {"reserved", "started", "finished", "released"} else "other" if lease is not None else "missing"
-            helper = helper_holder["value"]
-            helper_session = getattr(helper, "session", None)
-            helper_phase = getattr(helper_session, "phase", None)
-            if helper_phase not in {"idle", "invoked", "streaming", "cancelling", "closed"}:
-                helper_phase = "other" if helper_phase is not None else "missing"
-            return {
-                "state_available": True,
-                "job_status": job_status,
-                "cancel_requested": bool(job.cancel_requested) if job is not None else False,
-                "lease_phase": lease_phase,
-                "lease_fence_matches_claim": bool(lease is not None and lease.fence == env.job.execution_fence),
-                "lease_live": bool(lease is not None and job is not None and lease.lease_until > now and job.lease_until == lease.lease_until),
-                "deadline_live": bool(lease is not None and lease.execution_deadline is not None and lease.execution_deadline > now),
-                "helper_phase": helper_phase,
-                "helper_active": bool(helper_session is not None and helper_session.active is not None),
-            }
-
-    gateway = _DiagnosticGateway(client, diagnostics, state_snapshot)
+    gateway = _DiagnosticGateway(client, diagnostics)
     await gateway.start()
     async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
         settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
