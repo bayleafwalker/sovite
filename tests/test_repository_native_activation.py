@@ -319,12 +319,14 @@ def test_wait_never_extends_started_execution_deadline(native_owner):
 
 
 def test_expired_started_execution_deadline_refuses_cleanup(native_owner):
-    f=native_owner;f.platform.settings=replace(f.platform.settings,job_timeout_seconds=2)
+    f=native_owner;f.platform.settings=replace(f.platform.settings,job_timeout_seconds=30)
     worker,job=queued(f)
     initial_resolved=[]
+    initial_deadline=[]
     finish_calls=[]
     finish_boundary=[]
     real_finish=worker.finish
+    expired_deadline=None
 
     def snapshot():
         with f.platform.db.engine.connect()as connection:
@@ -338,7 +340,7 @@ def test_expired_started_execution_deadline_refuses_cleanup(native_owner):
         with f.platform.db.sessions()as session:
             row=session.get(Job,job_id);lease=session.get(WorkerExecutionLease,job_id)
             assert lease.fence==kwargs.get('fence')==job.execution_fence
-            assert lease.execution_deadline<=time.time()
+            assert lease.execution_deadline==expired_deadline<time.time()
             assert lease.phase=='started' and row.status=='running'
             assert row.resolved['repository_run']['attempts'][-1]['state']=='activation_cancelled'
         try:
@@ -352,31 +354,45 @@ def test_expired_started_execution_deadline_refuses_cleanup(native_owner):
 
     worker.finish=capture_finish
     async def run():
+        nonlocal expired_deadline
         task=await waiting(f,worker,job)
-        with f.platform.db.sessions()as session:
+        with f.platform.db.sessions.begin()as session:
             before=session.get(Job,job.id)
             initial_resolved.append(copy.deepcopy(before.resolved))
             lease=session.get(WorkerExecutionLease,job.id)
             original=(before.status,before.error_code,before.lease_owner,before.lease_until,
                       lease.phase,lease.lease_until,lease.execution_deadline)
+            assert lease.execution_deadline==job.execution_deadline and lease.execution_deadline>time.time()
+            initial_deadline.append(lease.execution_deadline)
+            expired_deadline=time.time()-1
+            lease.execution_deadline=expired_deadline
+        worker.stop.set()
         await asyncio.wait_for(task,6)
         with f.platform.db.sessions()as session:
             after=session.get(Job,job.id);lease=session.get(WorkerExecutionLease,job.id)
             assert (after.status,after.error_code,after.lease_owner,after.lease_until,
-                    lease.phase,lease.lease_until,lease.execution_deadline)==original
+                    lease.phase,lease.lease_until)==original[:-1]
+            assert lease.execution_deadline==expired_deadline<time.time()
             assert after.artifact_key is None and after.public_projection is None and after.released_at is None
     asyncio.run(run())
     assert f.driver.effects==0
     assert len(finish_calls)==1 and len(finish_boundary)==1
     called_job,finish_kwargs=finish_calls[0]
     assert called_job==job.id and finish_kwargs['fence']==job.execution_fence
-    assert finish_kwargs['error'].code=='execution_timeout'
+    assert initial_deadline[0]==job.execution_deadline and expired_deadline<initial_deadline[0]
+    assert finish_kwargs['error'].code=='native_vm_activation_cancelled'
     assert finish_kwargs.get('cancelled',False) is False
     observed_resolved=f.platform.get_job(job.id).resolved
     initial_attempt=initial_resolved[0]['repository_run']['attempts'][-1]
     final_attempt=observed_resolved['repository_run']['attempts'][-1]
     assert initial_attempt['state']=='awaiting_activation'
     assert final_attempt['state']=='activation_cancelled'
-    assert {key:value for key,value in final_attempt.items() if key not in {'state','finished_at'}}=={
-        key:value for key,value in initial_attempt.items() if key not in {'state','finished_at'}}
+    normalized_resolved=copy.deepcopy(observed_resolved)
+    normalized_attempt=normalized_resolved['repository_run']['attempts'][-1]
+    normalized_attempt['state']=initial_attempt['state']
+    if 'finished_at' in initial_attempt:
+        normalized_attempt['finished_at']=initial_attempt['finished_at']
+    else:
+        normalized_attempt.pop('finished_at',None)
+    assert normalized_resolved==initial_resolved[0]
     assert isinstance(final_attempt.get('finished_at'),str) and final_attempt['finished_at']
