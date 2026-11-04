@@ -2193,7 +2193,7 @@ def test_finish_accepts_only_explicit_post_execution_store_error(work_rows):
     with db.sessions() as session:
         job = session.get(Job, "job")
         lease = session.execute(select(Base.metadata.tables["worker_execution_leases"])).mappings().one()
-        assert (job.status, job.error_code) == ("failed", "storage_adapter_failure")
+        assert (job.status, job.error_code) == ("blocked", "storage_adapter_failure")
         assert job.artifact_key is None and job.public_projection is None and job.released_at is None
         assert lease["phase"] == "finished"
 
@@ -2283,9 +2283,88 @@ def test_worker_storage_runtime_failure_finishes_completed_attempt_without_relea
     with db.sessions() as session:
         row = session.get(Job, "job")
         lease = session.execute(select(Base.metadata.tables["worker_execution_leases"])).mappings().one()
-        assert (row.status, row.error_code) == ("failed", "storage_adapter_failure")
+        assert (row.status, row.error_code) == ("blocked", "storage_adapter_failure")
         assert row.artifact_key is None and row.public_projection is None and row.released_at is None
         assert lease["phase"] == "finished"
+
+
+def test_retryable_storage_failure_blocks_instead_of_replaying_completed_repository_attempt(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
+    _set_hand_back_attempt_state(db, "completed")
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        resolved = json.loads(json.dumps(job.resolved))
+        resolved["grant"] = {"on_outage": "queue", "max_attempts": 3}
+        resolved["tools"] = []
+        job.resolved = resolved
+        prior_next_attempt_at = job.next_attempt_at
+
+    assert _finish_service(db).finish(
+        "job", error=RuntimeFailure("storage_adapter_failure", retryable=True),
+        fence="2" * 32, execution_completed=True) is True
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.error_code) == ("blocked", "storage_adapter_failure")
+        assert job.next_attempt_at == prior_next_attempt_at and job.attempts == 1
+        assert job.artifact_key is None and job.public_projection is None and job.released_at is None
+
+
+def test_worker_completed_hint_keeps_permitted_legacy_retry_without_repository_marker(work_rows, monkeypatch):
+    db, _, _, _ = work_rows
+    _clear_work_history(db)
+    with db.sessions.begin() as session:
+        job_row = session.get(Job, "job")
+        job_row.resolved = {
+            "grant": {"timeout_seconds": 5, "on_outage": "queue", "max_attempts": 3},
+            "tools": [],
+        }
+
+    class Store:
+        def put(self, job_id, result):
+            raise RuntimeFailure("storage_adapter_failure", retryable=True)
+
+    class Stop:
+        def is_set(self):
+            return False
+
+        async def wait(self):
+            return False
+
+    class Runner:
+        authorization_check = None
+
+        async def run(self, resolved, task, job_id):
+            return {"answer": "read-only result"}
+
+    async def direct_to_thread(function, *args):
+        return function(*args)
+    monkeypatch.setattr(asyncio, "to_thread", direct_to_thread)
+
+    worker = Worker.__new__(Worker)
+    worker.leases = _finish_service(db)
+    worker.platform = SimpleNamespace(settings=SimpleNamespace(
+        job_timeout_seconds=5, lease_seconds=1, max_attempts=3), store=Store())
+    worker.runner = Runner()
+    worker.repository_run_executor = None
+    worker.stop = Stop()
+    worker.heartbeat = lambda job_id=None: None
+    worker.renew = lambda job_id, fence=None: True
+    job = SimpleNamespace(
+        id="job", task="synthetic", execution_fence="2" * 32,
+        execution_deadline=time.time() + 300,
+        resolved={"grant": {"timeout_seconds": 5, "on_outage": "queue", "max_attempts": 3},
+                  "tools": []},
+    )
+
+    asyncio.run(worker.execute(job))
+
+    with db.sessions() as session:
+        row = session.get(Job, "job")
+        assert (row.status, row.error_code) == ("retry_wait", "storage_adapter_failure")
+        assert row.attempts == 1 and row.next_attempt_at > time.time()
+        assert row.artifact_key is None and row.public_projection is None and row.released_at is None
 
 
 @pytest.mark.parametrize("attempt_state", ["failed", "cancelled", "activation_cancelled"])
@@ -2386,6 +2465,22 @@ def test_finish_allows_verified_empty_work_preappend_error(work_rows, error_code
         assert (job.status, job.error_code) == ("failed", error_code)
         assert job.artifact_key is None and job.public_projection is None and job.released_at is None
         assert lease["phase"] == "finished"
+
+
+@pytest.mark.parametrize("extra", [
+    {"cancelled": True}, {"execution_completed": True},
+])
+def test_finish_refuses_contradictory_empty_work_preappend_hints(work_rows, extra):
+    db, _, _, _ = work_rows
+    _clear_work_history(db)
+    before = _finish_snapshot(db)
+
+    with pytest.raises(FinishRefused):
+        _finish_service(db).finish(
+            "job", error=RuntimeFailure("repository_binding_unavailable"),
+            fence="2" * 32, **extra)
+
+    assert _finish_snapshot(db) == before
 
 
 def test_finish_preappend_error_preserves_prior_attempt_history(work_rows):

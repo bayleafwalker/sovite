@@ -840,6 +840,8 @@ class LeaseService:
                                 raise _HandBackOwnerUnavailable()
                             attempt_numbers.append(int(suffix))
                         if (finish_outcome is None or finish_outcome[0] is not None
+                                or finish_outcome[2] is not False
+                                or finish_outcome[3] is not False
                                 or type(getattr(error, "code", None)) is not str
                                 or error.code not in preappend_codes
                                 or any(number >= probe["attempts"] for number in attempt_numbers)
@@ -1526,6 +1528,11 @@ class LeaseService:
                         row.status, row.error_code = "blocked", denied
                     elif cancelled or row.cancel_requested:
                         row.status, row.error_code = "cancelled", "cancelled"
+                    elif execution_completed and run is not None:
+                        # Do not replay a repository effect because storing its
+                        # completed result failed; this outcome preserves the
+                        # storage error without granting retry authority.
+                        row.status, row.error_code = "blocked", error.code
                     elif artifact is not None:
                         row.status, row.error_code = "completed", None
                         row.public_projection = {"receipt": row.receipt, "status": "available"}
@@ -1582,7 +1589,12 @@ class LeaseService:
     def finish(self, job_id: str, artifact: tuple[str, str] | None = None,
                error: RuntimeFailure | None = None, cancelled: bool = False,
                fence: str | None = None, execution_completed: bool = False):
-        """Finish a lease using the same owner closure as hand_back."""
+        """Finish a lease using hand_back's owner closure.
+
+        ``execution_completed`` only records that Worker received a result
+        before artifact storage failed. Repository Work still requires the
+        persisted current completed attempt, exact fence, and full closure.
+        """
         if type(execution_completed) is not bool or (execution_completed and
                 (artifact is not None or error is None or cancelled
                  or getattr(error, "code", None) in {"repository_candidate_ineligible",
