@@ -253,6 +253,13 @@ class _WorkProjectionBusy(_WorkProjectionUnavailable):
     """A recovery candidate's exact Job or lease row was skipped as locked."""
 
 
+class _WorkProjectionOperationFailure(RuntimeError):
+    """A redacted unexpected failure that recovery must treat as global."""
+
+    def __init__(self):
+        super().__init__("Work projection operation failed")
+
+
 _CANONICAL_ROWS_AGREE = "canonical_rows_agree"
 _BINDING_TABLE = "program_work_projection_bindings"
 _RECOVERY_ATTEMPT_STATES = frozenset({
@@ -1051,6 +1058,7 @@ def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
     caller or require the expired lease to be live; recovery validates final
     expiry and identity separately after the full closure is locked.
     """
+    recovery_mode = recovery_attempt_states is not None or recovery_expected_owner is not None
     try:
         return _compare_actual_rows(session, scope_id=scope_id, call_id=call_id,
                                     allow_cancel_requested=allow_cancel_requested,
@@ -1062,6 +1070,10 @@ def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
     except _WorkProjectionUnavailable:
         raise
     except Exception:
+        if recovery_mode:
+            # Keep the operational failure distinct from candidate-local row
+            # refusal, without leaking SQL, payload, or exception text.
+            raise _WorkProjectionOperationFailure() from None
         # Do not expose raw Job JSON, provider/custody data, SQL details, or
         # database errors through this dormant comparison boundary.
         raise _WorkProjectionUnavailable() from None

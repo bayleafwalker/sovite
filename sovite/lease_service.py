@@ -26,6 +26,10 @@ class _HandBackOwnerUnavailable(RuntimeError):
     """A complete Job/Work owner snapshot could not be established."""
 
 
+class _RecoverySweepIncomplete(RuntimeError):
+    """Bounded recovery pass has more candidates."""
+
+
 class FinishRefused(RuntimeError):
     """A finish owner decision was unavailable; execution must not be reclassified."""
 
@@ -632,12 +636,14 @@ class LeaseService:
         """Recover expired owners; global failures prevent a subsequent claim."""
         try:
             return self._recover_expired_sweep()
+        except _RecoverySweepIncomplete:
+            raise _RecoverySweepIncomplete("recovery sweep incomplete") from None
         except Exception:
             try:
                 logging.getLogger(__name__).warning("recovery_scan status=unavailable")
             except Exception:
                 pass
-            raise
+            raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503) from None
 
     def _recover_expired_sweep(self):
         """Recover bounded expired owner snapshots without borrowing a live fence."""
@@ -741,7 +747,7 @@ class LeaseService:
             logging.getLogger(__name__).warning("recovery_scan status=limit counts=%s", counts)
         except Exception:
             pass
-        raise RuntimeError("recovery sweep incomplete")
+        raise _RecoverySweepIncomplete("recovery sweep incomplete")
 
     def claim(self) -> Job | None:
         self.recover_expired()
@@ -1202,8 +1208,14 @@ class LeaseService:
                             include_bindings=schema_version >= 10,
                             nonblocking_owner_ids=(job_id,) if recovery_session is not None else ())
                     except _WorkProjectionBusy:
-                        raise
+                        if recovery_session is not None:
+                            raise
+                        raise _HandBackOwnerUnavailable() from None
+                    except _WorkProjectionUnavailable:
+                        raise _HandBackOwnerUnavailable() from None
                     except Exception:
+                        if recovery_session is not None:
+                            raise
                         raise _HandBackOwnerUnavailable() from None
                 row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
                 lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
@@ -1461,7 +1473,10 @@ class LeaseService:
                             slot = session.execute(select(slot_t).where(
                                 slot_t.c.scope_id == link["scope_id"], slot_t.c.slot_id == link["slot_id"])).mappings().one_or_none()
                             job_mapping = {column.name: getattr(row, column.name) for column in job_table.columns}
-                            _validate_locked_legacy_binding(link, batch, registry, job_mapping, reservation, slot)
+                            try:
+                                _validate_locked_legacy_binding(link, batch, registry, job_mapping, reservation, slot)
+                            except ValueError:
+                                raise _HandBackOwnerUnavailable() from None
 
                 if recovery_session is not None:
                     now = time.time()
@@ -1472,7 +1487,9 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                     try:
                         self._check_lease_finite(row, lease)
-                    except PlatformError:
+                    except PlatformError as error:
+                        if error.code != "owner_unavailable":
+                            raise
                         raise _HandBackOwnerUnavailable() from None
                     if (row.resolved.get("compute", {}).get("id") != self.platform.settings.compute_id
                             or type(row.lease_until) not in (int, float)
@@ -1506,6 +1523,8 @@ class LeaseService:
                                 recovery_attempt_states=recovery_states,
                                 recovery_expected_owner=row.lease_owner,
                             )
+                        except _WorkProjectionBusy:
+                            raise
                         except _WorkProjectionUnavailable:
                             raise _HandBackOwnerUnavailable() from None
                     unresolved_work = False

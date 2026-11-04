@@ -12,6 +12,7 @@ from sovite.db import Database, Job
 from sovite.lease_service import LeaseService, _HandBackOwnerUnavailable
 from sovite.recovery_cursor import read_cursor
 from sovite.collection_transaction import owner_transaction
+from sovite.service import PlatformError
 from sovite.work_projection import _WorkProjectionBusy
 
 
@@ -171,8 +172,10 @@ def test_global_sweep_failure_prevents_reserve(tmp_path, monkeypatch):
                             lambda *_: (_ for _ in ()).throw(RuntimeError("audit unavailable")))
         reserved = []
         monkeypatch.setattr(service, "reserve", lambda **_: reserved.append(True))
-        with pytest.raises(RuntimeError, match="audit unavailable"):
+        with pytest.raises(PlatformError) as error:
             service.claim()
+        assert error.value.code == "owner_unavailable"
+        assert "audit unavailable" not in str(error.value)
         assert reserved == []
     finally:
         db.engine.dispose()
