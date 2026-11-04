@@ -133,6 +133,18 @@ def _status_category(status):
     return "other"
 
 
+def _best_effort_observation(callback):
+    """Diagnostic failures must not replace the observed operation outcome."""
+    try:
+        callback()
+    except asyncio.CancelledError:
+        # The callback is synchronous observer code. Even if it raises
+        # CancelledError, it must not replace the transport/gateway outcome.
+        return
+    except Exception:
+        return
+
+
 class _DiagnosticASGITransport(httpx.AsyncBaseTransport):
     """Pass through ASGI requests while retaining bounded, body-free diagnostics."""
     def __init__(self, transport, diagnostics):
@@ -147,18 +159,19 @@ class _DiagnosticASGITransport(httpx.AsyncBaseTransport):
         try:
             response = await self.transport.handle_async_request(request)
         except asyncio.CancelledError:
-            self.diagnostics.add(action=action, stage="authority", outcome="cancelled",
-                                 category="cancelled", duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000))))
+            _best_effort_observation(lambda: self.diagnostics.add(
+                action=action, stage="authority", outcome="cancelled", category="cancelled",
+                duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
             raise
         except Exception as error:
-            self.diagnostics.add(action=action, stage="authority", outcome="error",
-                                 category=_safe_exception_category(error),
-                                 duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000))))
+            _best_effort_observation(lambda: self.diagnostics.add(
+                action=action, stage="authority", outcome="error", category=_safe_exception_category(error),
+                duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
             raise
-        self.diagnostics.add(action=action, stage="authority",
-                             outcome="ok" if response.status_code == 200 else "error",
-                             status=_status_category(response.status_code),
-                             duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000))))
+        _best_effort_observation(lambda: self.diagnostics.add(
+            action=action, stage="authority", outcome="ok" if response.status_code == 200 else "error",
+            status=_status_category(response.status_code),
+            duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
         return response
 
     async def aclose(self):
@@ -178,36 +191,44 @@ class _DiagnosticGateway(Gateway):
             result = await super().call(action, **fields)
         except asyncio.CancelledError:
             if recorded:
-                self.diagnostics.add(action=action, stage="authority", outcome="cancelled", category="cancelled")
+                _best_effort_observation(lambda: self.diagnostics.add(
+                    action=action, stage="authority", outcome="cancelled", category="cancelled"))
             raise
         except Exception as error:
             if recorded:
-                event = {"action": action, "stage": "authority", "outcome": "error",
-                         "category": _error_category(error), "cause_category": _safe_cause_category(error)}
-                if self.state_snapshot is not None and action in {"authorize", "renew"}:
-                    try:
-                        event.update(self.state_snapshot())
-                    except Exception:
-                        event["state_available"] = False
-                self.diagnostics.add(**event)
-                if action in {"authorize", "renew"} and isinstance(error, GatewayError):
-                    error.add_note(self.diagnostics.note())
+                def observe_failure():
+                    event = {"action": action, "stage": "authority", "outcome": "error",
+                             "category": _error_category(error), "cause_category": _safe_cause_category(error)}
+                    if self.state_snapshot is not None and action in {"authorize", "renew"}:
+                        try:
+                            event.update(self.state_snapshot())
+                        except Exception:
+                            event["state_available"] = False
+                    self.diagnostics.add(**event)
+                    if action in {"authorize", "renew"} and isinstance(error, GatewayError):
+                        error.add_note(self.diagnostics.note())
+
+                _best_effort_observation(observe_failure)
             raise
         if recorded:
-            event = {"action": action, "stage": "authority", "outcome": "ok"}
-            self.diagnostics.add(**event)
+            _best_effort_observation(lambda: self.diagnostics.add(
+                action=action, stage="authority", outcome="ok"))
         return result
 
     async def connect(self, socket):
-        try:
-            tls = socket.transport.get_extra_info("ssl_object")
-            self.diagnostics.add(stage="connect", tls_present=tls is not None,
-                tls13=bool(tls and tls.version() == "TLSv1.3"),
-                subprotocol_ok=socket.subprotocol == SUBPROTOCOL,
-                no_extensions=not bool(socket.protocol.extensions),
-                path_ok=socket.request.path == "/connector")
-        except Exception:
-            self.diagnostics.add(stage="connect", predicates="unavailable")
+        def observe_connect():
+            try:
+                tls = socket.transport.get_extra_info("ssl_object")
+                fields = {"tls_present": tls is not None,
+                          "tls13": bool(tls and tls.version() == "TLSv1.3"),
+                          "subprotocol_ok": socket.subprotocol == SUBPROTOCOL,
+                          "no_extensions": not bool(socket.protocol.extensions),
+                          "path_ok": socket.request.path == "/connector"}
+            except Exception:
+                fields = {"predicates": "unavailable"}
+            self.diagnostics.add(stage="connect", **fields)
+
+        _best_effort_observation(observe_connect)
         return await super().connect(socket)
 
 
@@ -240,7 +261,7 @@ def authority_env(database, tmp_path, v2_bundle):
 
 
 @asynccontextmanager
-async def connected(env, *, stall=False, helper_type=PilotHelper):
+async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_factory=_HandshakeDiagnostics):
     tls, key = certificates(env.path)
     provision_enrollment(env.platform, enrollment_id=ASSERTION['enrollment_id'], binding_id=env.model['id'],
                          installation_id=ASSERTION['installation_id'], role=env.role['id'], certificate=(env.path / 'helper.pem').read_bytes())
@@ -250,7 +271,7 @@ async def connected(env, *, stall=False, helper_type=PilotHelper):
     metadata.update(binding_id=env.model['id'], enrollment_role=env.role['id'], cancellation='disconnect-only')
     (env.path / 'identity.json').write_text(json.dumps(metadata))
     (env.path / 'model.gguf').write_bytes(b'weights')
-    diagnostics = _HandshakeDiagnostics()
+    diagnostics = diagnostics_factory()
     transport = _DiagnosticASGITransport(httpx.ASGITransport(app=env.app), diagnostics)
     client = AuthorityClient('http://control.test', env.settings.authority_token, transport=transport)
     helper_holder = {"value": None}
@@ -296,9 +317,19 @@ async def connected(env, *, stall=False, helper_type=PilotHelper):
                         if task.done():
                             task.result()
                         await asyncio.sleep(.01)
+            except asyncio.CancelledError as error:
+                def observe_setup_cancellation():
+                    diagnostics.add(stage="setup", outcome="unknown")
+                    error.add_note(diagnostics.note())
+
+                _best_effort_observation(observe_setup_cancellation)
+                raise
             except Exception as error:
-                diagnostics.add(stage="setup", outcome="unknown")
-                error.add_note(diagnostics.note())
+                def observe_setup_failure():
+                    diagnostics.add(stage="setup", outcome="unknown")
+                    error.add_note(diagnostics.note())
+
+                _best_effort_observation(observe_setup_failure)
                 raise
             env.gateway, env.helper, env.engine, env.helper_settings = gateway, helper, engine, settings
             env.authority_diagnostics = diagnostics

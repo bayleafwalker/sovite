@@ -46,6 +46,46 @@ class _ScriptedTransport(httpx.AsyncBaseTransport):
         self.closed = True
 
 
+class _ReturningTransport(httpx.AsyncBaseTransport):
+    def __init__(self, response):
+        self.response = response
+        self.closed = False
+
+    async def handle_async_request(self, _request):
+        return self.response
+
+    async def aclose(self):
+        self.closed = True
+
+
+class _BrokenDiagnostics:
+    def add(self, **_fields):
+        raise RuntimeError("observer-private-canary-add")
+
+    def note(self):
+        raise RuntimeError("observer-private-canary-note")
+
+
+class _BrokenNoteDiagnostics(_HandshakeDiagnostics):
+    def note(self):
+        raise RuntimeError("observer-private-canary-note")
+
+
+class _FixedAuthority:
+    def __init__(self, *, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.closed = False
+
+    async def call(self, _action, **_fields):
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def close(self):
+        self.closed = True
+
+
 def _private_request():
     return httpx.Request("POST", "http://control.test/internal/authority/authorize", json={"canary": "private-canary"})
 
@@ -235,5 +275,155 @@ def test_early_helper_failure_attaches_only_sanitized_setup_note(authority_env):
         assert "outcome:unknown" in notes
         assert "private-canary-helper-error" not in notes
         assert _EarlyFailureHelper.instances[-1].task.done()
+
+    asyncio.run(scenario())
+
+
+def test_transport_observer_failure_preserves_original_error_and_cancellation(monkeypatch):
+    async def scenario():
+        original_error = httpx.ConnectError("private-canary-transport")
+        inner = _ScriptedTransport(error=original_error)
+        observed = _DiagnosticASGITransport(inner, _BrokenDiagnostics())
+        with pytest.raises(httpx.ConnectError) as failure:
+            await observed.handle_async_request(_private_request())
+        assert failure.value is original_error
+        await observed.aclose()
+        assert inner.closed
+
+        original_cancel = asyncio.CancelledError("private-canary-cancel")
+        inner = _ScriptedTransport(error=original_cancel)
+        observed = _DiagnosticASGITransport(inner, _BrokenDiagnostics())
+        with pytest.raises(asyncio.CancelledError) as failure:
+            await observed.handle_async_request(_private_request())
+        assert failure.value is original_cancel
+        await observed.aclose()
+        assert inner.closed
+
+        def fail_category(_error):
+            raise RuntimeError("observer-private-canary-category")
+
+        monkeypatch.setattr("model_support._safe_exception_category", fail_category)
+        original_error = httpx.ConnectError("private-canary-classifier")
+        inner = _ScriptedTransport(error=original_error)
+        observed = _DiagnosticASGITransport(inner, _HandshakeDiagnostics())
+        with pytest.raises(httpx.ConnectError) as failure:
+            await observed.handle_async_request(_private_request())
+        assert failure.value is original_error
+        await observed.aclose()
+        assert inner.closed
+
+    asyncio.run(scenario())
+
+
+def test_transport_observer_failure_preserves_success_response_and_close():
+    async def scenario():
+        request = _private_request()
+        body = b"private-canary-response-body"
+        response = httpx.Response(200, content=body, request=request)
+        inner = _ReturningTransport(response)
+        observed = _DiagnosticASGITransport(inner, _BrokenDiagnostics())
+        try:
+            result = await observed.handle_async_request(request)
+            assert result is response
+            assert await result.aread() == body
+        finally:
+            await observed.aclose()
+        assert inner.closed
+
+    asyncio.run(scenario())
+
+
+def test_gateway_observer_failures_preserve_errors_cancellation_success_and_close(monkeypatch):
+    async def scenario():
+        def fail_category(_error):
+            raise RuntimeError("private-canary-category")
+
+        original = GatewayError("authority_unavailable")
+        gateway = _DiagnosticGateway(_FixedAuthority(error=original), _BrokenDiagnostics(),
+                                     state_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("snapshot-canary")))
+        with pytest.raises(GatewayError) as failure:
+            await gateway.call("authorize")
+        assert failure.value is original
+        await gateway.close()
+        assert gateway.authority.closed
+
+        monkeypatch.setattr("model_support._error_category", fail_category)
+        original = GatewayError("authority_unavailable")
+        gateway = _DiagnosticGateway(_FixedAuthority(error=original), _HandshakeDiagnostics())
+        with pytest.raises(GatewayError) as failure:
+            await gateway.call("authorize")
+        assert failure.value is original
+        await gateway.close()
+        assert gateway.authority.closed
+
+        original_cancel = asyncio.CancelledError("private-canary-gateway-cancel")
+        gateway = _DiagnosticGateway(_FixedAuthority(error=original_cancel), _BrokenDiagnostics())
+        with pytest.raises(asyncio.CancelledError) as failure:
+            await gateway.call("authorize")
+        assert failure.value is original_cancel
+        await gateway.close()
+        assert gateway.authority.closed
+
+        result = object()
+        gateway = _DiagnosticGateway(_FixedAuthority(result=result), _BrokenDiagnostics())
+        assert await gateway.call("authorize") is result
+        await gateway.close()
+        assert gateway.authority.closed
+
+        authority_error = GatewayError("authority_unavailable")
+        gateway = _DiagnosticGateway(_FixedAuthority(error=authority_error), _BrokenNoteDiagnostics(),
+                                     state_snapshot=lambda: (_ for _ in ()).throw(RuntimeError("snapshot-canary")))
+        with pytest.raises(GatewayError) as failure:
+            await gateway.call("authorize")
+        assert failure.value is authority_error
+        await gateway.close()
+        assert gateway.authority.closed
+
+        monkeypatch.setattr("model_support._safe_cause_category", fail_category)
+        original = GatewayError("authority_unavailable")
+        gateway = _DiagnosticGateway(_FixedAuthority(error=original), _HandshakeDiagnostics())
+        with pytest.raises(GatewayError) as failure:
+            await gateway.call("authorize")
+        assert failure.value is original
+        await gateway.close()
+        assert gateway.authority.closed
+
+    asyncio.run(scenario())
+
+
+def test_broken_diagnostics_do_not_mask_connected_setup_failure(authority_env):
+    class _EarlyFailureHelper:
+        instances = []
+
+        def __init__(self, _settings):
+            self.session = None
+            self.task = None
+            self.error = RuntimeError("private-canary-setup")
+            self.instances.append(self)
+
+        async def run(self):
+            self.task = asyncio.current_task()
+            await asyncio.sleep(0)
+            raise self.error
+
+    async def scenario():
+        with pytest.raises(RuntimeError) as failure:
+            async with connected(authority_env, helper_type=_EarlyFailureHelper,
+                                 diagnostics_factory=_BrokenDiagnostics):
+                raise AssertionError("early failing helper unexpectedly connected")
+        instance = _EarlyFailureHelper.instances[-1]
+        assert failure.value is instance.error
+        assert instance.task.done()
+
+    asyncio.run(scenario())
+
+
+def test_broken_diagnostics_do_not_mask_real_authority_success_or_cleanup(authority_env):
+    async def scenario():
+        async with connected(authority_env, diagnostics_factory=_BrokenDiagnostics) as env:
+            request = await infer(env)
+            result = await consume(request)
+            assert b"[DONE]" in result
+            assert env.engine.calls
 
     asyncio.run(scenario())
