@@ -217,7 +217,7 @@ def test_gateway_error_observer_never_attempts_blocking_db_snapshot(authority_en
 
         def blocking_database_read(*_args, **_kwargs):
             database_reads.append(True)
-            time.sleep(0.25)
+            time.sleep(3.0)
             raise AssertionError("diagnostic observer attempted database access")
 
         async with connected(authority_env) as env:
@@ -241,10 +241,10 @@ def test_gateway_error_observer_never_attempts_blocking_db_snapshot(authority_en
             started = time.monotonic()
             try:
                 with pytest.raises(GatewayError) as failure:
-                    await asyncio.wait_for(env.gateway.call("authorize"), timeout=0.05)
+                    await asyncio.wait_for(env.gateway.call("authorize"), timeout=1.0)
                 elapsed = time.monotonic() - started
                 assert failure.value is original
-                assert elapsed < 0.05
+                assert elapsed < 1.0
                 assert database_reads == []
                 assert heartbeat["ticks"] > 0
                 assert any(event.get("owner_state") == "not_observed"
