@@ -462,6 +462,17 @@ def _hand_back_service(db, *, captured_fence=None):
     )
 
 
+def _set_hand_back_attempt_state(db, state):
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        resolved = json.loads(json.dumps(job.resolved))
+    resolved["repository_run"]["attempts"][-1]["state"] = state
+    with db.sessions.begin() as session:
+        session.execute(_job_resolved_update(db), {
+            "resolved": json.dumps(resolved, separators=(",", ":")), "job_id": "job",
+        })
+
+
 def test_hand_back_holds_possible_dispatch_and_inhibits_gate_atomically(work_rows):
     db, original, _, binding = work_rows
     service = _hand_back_service(db)
@@ -498,6 +509,66 @@ def test_hand_back_holds_possible_dispatch_and_inhibits_gate_atomically(work_row
         assert binding_row[field] == (int(original[field]) if field == "policy_revision"
                                       else original[field])
     assert db.verify_audit()["valid"]
+
+
+@pytest.mark.parametrize("attempt_state", ["interrupted", "cancelled", "activation_cancelled"])
+def test_hand_back_conservatively_holds_nonactive_shutdown_attempt(work_rows, attempt_state):
+    db, _, _, binding = work_rows
+    _set_hand_back_attempt_state(db, attempt_state)
+
+    with owner_transaction(db) as session:
+        with pytest.raises(_WorkProjectionUnavailable):
+            _compare_actual_work_projection(session, scope_id="scope", call_id="call")
+        if attempt_state == "interrupted":
+            assert _compare_actual_work_projection(
+                session, scope_id="scope", call_id="call", allow_interrupted_attempt=True,
+            ) == "canonical_rows_agree"
+        else:
+            assert _compare_actual_work_projection(
+                session, scope_id="scope", call_id="call", allow_preentry_cancelled_attempt=True,
+            ) == "canonical_rows_agree"
+
+    assert _hand_back_service(db).hand_back("job", fence="2" * 32) is True
+
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        reservation = session.execute(select(tables["program_reservations"])).mappings().one()
+        slot = session.execute(select(tables["program_slots"])).mappings().one()
+        intent = session.execute(select(tables["program_call_intents"])).mappings().one()
+        gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+        binding_row = session.execute(select(binding)).mappings().one()
+        projection = job.resolved["repository_run"]["program_ledger_projections_v1"][0]
+
+    assert (job.status, job.error_code, job.attempts) == ("blocked", "execution_uncertain", 1)
+    assert job.resolved["repository_run"]["attempts"][-1]["state"] == attempt_state
+    assert (reservation["state"], slot["state"], intent["state"]) == ("unknown", "unknown", "unknown")
+    assert gate["mode"] == "inhibited"
+    assert (projection["intent_state"], projection["reservation_state"], projection["slot_state"]) == (
+        "unknown", "unknown", "unknown",
+    )
+    assert binding_row["projection_revision"] == 2
+    assert db.verify_audit()["valid"]
+
+
+@pytest.mark.parametrize("attempt_state", ["completed", "failed", "uncertain"])
+def test_hand_back_does_not_admit_other_nonactive_attempt_states(work_rows, attempt_state):
+    db, _, _, _ = work_rows
+    _set_hand_back_attempt_state(db, attempt_state)
+    tables = Base.metadata.tables
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        before = (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved)
+        audits = session.scalar(select(text("count(*)")).select_from(tables["audit_events"]))
+
+    with pytest.raises(PlatformError) as caught:
+        _hand_back_service(db).hand_back("job", fence="2" * 32)
+    assert caught.value.code == "execution_owner_state_unavailable"
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        assert (job.status, job.attempts, job.lease_owner, job.lease_until, job.resolved) == before
+        assert session.scalar(select(text("count(*)")).select_from(tables["audit_events"])) == audits
 
 
 @pytest.mark.parametrize("captured_fence", [None, "", "3" * 32])

@@ -695,7 +695,6 @@ class LeaseService:
         from .db import Base, MIGRATIONS, digest
         from .program_ledger import _mark_work_projection_unknown_in_transaction
         from .program_ledger import _is_lower_hex, _validate_locked_legacy_binding
-        from .program_ledger_core import _baseline_payload
         from .repository_runs import RUN_SCHEMA
         from .work_projection import (
             WorkProjectionError,
@@ -706,6 +705,21 @@ class LeaseService:
         )
 
         database = self.platform.db
+        # These exact executor shutdown markers can reach hand-back. Each is
+        # treated as possible dispatch; none is accepted as replay-safety proof.
+        hand_back_attempt_states = {
+            "preparing", "awaiting_activation", "running", "interrupted",
+            "cancelled", "activation_cancelled",
+        }
+        def legacy_baseline_payload(link):
+            return {name: link[name] for name in (
+                "scope_id", "batch_id", "link_id", "job_id", "original_attempt_id",
+                "original_call_id", "original_slot_id", "subject_id", "call_id", "slot_id",
+                "baseline_state", "baseline_slot_state", "baseline_reserved_usd_micro",
+                "baseline_reserved_allowance_micro", "baseline_actual_usd_micro",
+                "baseline_actual_allowance_micro",
+            )}
+
         succeeded = False
         succeeded_fence = None
         try:
@@ -787,7 +801,7 @@ class LeaseService:
                     current_attempt = current_attempt_row.get("id")
                     current_attempt_state = current_attempt_row.get("state")
                     if (current_attempt != f"{job_id}-{probe['attempts']}"
-                            or current_attempt_state not in {"preparing", "awaiting_activation", "running"}):
+                            or current_attempt_state not in hand_back_attempt_states):
                         raise _HandBackOwnerUnavailable()
                 elif run is not None and type(probe["attempts"]) is not int:
                     raise _HandBackOwnerUnavailable()
@@ -1103,7 +1117,7 @@ class LeaseService:
                                 or not _is_lower_hex(batch["snapshot_digest"], 64)
                                 or not _is_lower_hex(batch["fence_digest"], 64)
                                 or type(batch["owner_epoch"]) is not int or batch["owner_epoch"] < 0
-                                or digest([_baseline_payload(item) for item in links]) != batch["snapshot_digest"]):
+                                or digest([legacy_baseline_payload(item) for item in links]) != batch["snapshot_digest"]):
                             raise _HandBackOwnerUnavailable()
                         policy = session.execute(select(policy_t).where(
                             policy_t.c.scope_id == batch_key[0],
@@ -1163,7 +1177,7 @@ class LeaseService:
                                     for name in ("scope_id", "batch_id", "link_id", "job_id", "original_attempt_id",
                                                  "original_call_id", "original_slot_id", "subject_id", "call_id", "slot_id"))
                                     or not _is_lower_hex(item["original_digest"], 64)
-                                    or digest(_baseline_payload(item)) != item["original_digest"]):
+                                    or digest(legacy_baseline_payload(item)) != item["original_digest"]):
                                 raise _HandBackOwnerUnavailable()
                             identity = (item["job_id"], item["original_attempt_id"], item["original_call_id"], item["original_slot_id"])
                             source_call = (item["job_id"], item["original_call_id"])
@@ -1264,19 +1278,23 @@ class LeaseService:
                 if projected_history:
                     if (current_attempt is None or lease is None
                             or current_attempt_row is None
-                            or current_attempt_state not in {"preparing", "awaiting_activation", "running"}
-                            or hashlib.sha256(lease.fence.encode("utf-8")).hexdigest()
-                            != current_attempt_row.get("fence_sha256")):
+                            or current_attempt_state not in hand_back_attempt_states):
                         raise _HandBackOwnerUnavailable()
-                    if current:
-                        try:
-                            for projection in current:
-                                _compare_actual_work_projection(
-                                    session, scope_id=projection.scope_id,
-                                    call_id=projection.call_id, allow_cancel_requested=True,
-                                )
-                        except Exception:
-                            raise _HandBackOwnerUnavailable() from None
+                if (run is not None and current_attempt_row is not None and lease is not None
+                        and hashlib.sha256(lease.fence.encode("utf-8")).hexdigest()
+                        != current_attempt_row.get("fence_sha256")):
+                    raise _HandBackOwnerUnavailable()
+                if projected_history and current:
+                    try:
+                        for projection in current:
+                            _compare_actual_work_projection(
+                                session, scope_id=projection.scope_id,
+                                call_id=projection.call_id, allow_cancel_requested=True,
+                                allow_interrupted_attempt=True,
+                                allow_preentry_cancelled_attempt=True,
+                            )
+                    except Exception:
+                        raise _HandBackOwnerUnavailable() from None
 
                 next_projections = {}
                 unresolved_work = False

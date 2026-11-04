@@ -574,7 +574,9 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
 
 
 def _compare_actual_rows(session, *, scope_id: str, call_id: str,
-                         allow_cancel_requested: bool = False) -> str:
+                         allow_cancel_requested: bool = False,
+                         allow_interrupted_attempt: bool = False,
+                         allow_preentry_cancelled_attempt: bool = False) -> str:
     """Implementation for the private owner-transaction-only comparator."""
     from sqlalchemy import MetaData, Table, and_, cast, func, inspect, or_, select, Text, LargeBinary
 
@@ -784,8 +786,15 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
         "workload_id": lease["workload_id"], "instance_id": lease["instance_id"],
         "generation": lease["generation"], "fence_sha256": fence_digest,
     })
+    attempt_state = matching[0].get("state") if len(matching) == 1 else None
+    active_attempt_states = {"preparing", "running", "awaiting_activation"}
+    hand_back_attempt_state = (
+        allow_interrupted_attempt and attempt_state == "interrupted"
+        or allow_preentry_cancelled_attempt and attempt_state in {"cancelled", "activation_cancelled"}
+    )
     if (len(matching) != 1 or attempts[-1] is not matching[0]
-            or matching[0].get("state") not in {"preparing", "running", "awaiting_activation"}
+            or not (attempt_state in active_attempt_states
+                    or hand_back_attempt_state)
             or matching[0].get("fence_sha256") != fence_digest
             or expected_lease_digest != projection.lease_digest
             or intent["work_lease_digest"] != expected_lease_digest):
@@ -952,7 +961,9 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
 
 
 def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
-                                    allow_cancel_requested: bool = False) -> str:
+                                    allow_cancel_requested: bool = False,
+                                    allow_interrupted_attempt: bool = False,
+                                    allow_preentry_cancelled_attempt: bool = False) -> str:
     """Compare one actual Work call within an existing owner transaction.
 
     This private comparator accepts selectors, never caller-provided rows or
@@ -964,7 +975,9 @@ def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
     """
     try:
         return _compare_actual_rows(session, scope_id=scope_id, call_id=call_id,
-                                    allow_cancel_requested=allow_cancel_requested)
+                                    allow_cancel_requested=allow_cancel_requested,
+                                    allow_interrupted_attempt=allow_interrupted_attempt,
+                                    allow_preentry_cancelled_attempt=allow_preentry_cancelled_attempt)
     except _WorkProjectionUnavailable:
         raise
     except Exception:
