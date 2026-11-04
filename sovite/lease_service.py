@@ -1494,9 +1494,10 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                     awaiting_activation_persist_failure = False
                     if run is not None and not preappend_finish:
-                        if cancelled and not row.cancel_requested:
-                            # A Worker cancellation hint is not authority on its
-                            # own; repository cleanup needs persisted intent.
+                        if cancelled or row.cancel_requested:
+                            # Repository cancellation cleanup is permitted only
+                            # for a requested cancellation before any attempt
+                            # record or Work/history has been created.
                             raise _HandBackOwnerUnavailable()
                         if current_attempt_row is None or current_attempt is None:
                             raise _HandBackOwnerUnavailable()

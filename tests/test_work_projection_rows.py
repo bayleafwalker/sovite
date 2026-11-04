@@ -2159,21 +2159,20 @@ def test_finish_ineligible_is_nonrelease(work_rows):
         assert job.public_projection is None and job.released_at is None
 
 
-def test_finish_preentry_cancel_preserves_known_projection(work_rows):
+@pytest.mark.parametrize("cancel_requested", [False, True])
+def test_finish_preentry_cancel_requires_empty_history(work_rows, cancel_requested):
     db, _, _, _ = work_rows
     _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
     _set_hand_back_attempt_state(db, "activation_cancelled")
+    if cancel_requested:
+        with db.sessions.begin() as session:
+            session.get(Job, "job").cancel_requested = True
+    before = _finish_snapshot(db)
 
-    assert _finish_service(db).finish("job", cancelled=True, fence="2" * 32) is True
+    with pytest.raises(FinishRefused):
+        _finish_service(db).finish("job", cancelled=True, fence="2" * 32)
 
-    with db.sessions() as session:
-        job = session.get(Job, "job")
-        gate = session.execute(select(Base.metadata.tables["program_gate_state"])).mappings().one()
-        reservation = session.execute(select(Base.metadata.tables["program_reservations"])).mappings().one()
-        assert (job.status, job.error_code) == ("cancelled", "cancelled")
-        assert gate["mode"] == "disabled"
-        assert reservation["state"] == "settled"
-        assert job.public_projection is None
+    assert _finish_snapshot(db) == before
 
 
 def test_finish_unsettled_artifact_is_held_and_not_released(work_rows):
