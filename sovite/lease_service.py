@@ -643,14 +643,6 @@ class LeaseService:
                 try:
                     self._authorize_current(session, job, now)
                 except PlatformError as exc:
-                    # A stored workflow or binding may be well formed but no
-                    # longer match current authority. Leave it untouched and
-                    # let later candidates proceed; it grants no dispatch.
-                    if (exc.status, exc.code) in {
-                        (409, "revision_superseded"), (409, "workflow_binding_mismatch"),
-                        (409, "transfer_mismatch"), (409, "repository_repair_unavailable"),
-                    }:
-                        continue
                     # Existing-job lineage can become ineligible after enqueue.
                     # These owner-declared history denials are distinct from an
                     # unavailable/corrupt current owner and may block dispatch.

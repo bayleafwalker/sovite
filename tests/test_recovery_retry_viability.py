@@ -18,6 +18,7 @@ from sovite.lease_service import (
     _validate_recovery_retry_recipe,
 )
 from sovite.policy import bundle_generation
+from sovite.service import PlatformError
 from sovite.workflows import compile_workflow
 from test_execution_leases import owner, submit  # noqa: F401
 from test_migrations import database  # noqa: F401
@@ -158,7 +159,7 @@ def test_malformed_retry_recipe_is_held_and_does_not_hide_later_reservation(owne
         assert session.get(Job, later.id).status == "running"
 
 
-def test_stale_workflow_generation_is_left_untouched_while_later_job_reserves(owner):
+def test_stale_workflow_generation_returns_typed_denial_without_false_idle(owner):
     stale = submit(owner, key="retry-stale-workflow")
     later = submit(owner, key="retry-stale-workflow-later")
     binding = _binding(owner)
@@ -171,16 +172,21 @@ def test_stale_workflow_generation_is_left_untouched_while_later_job_reserves(ow
         # The synthetic binding is producer-compiled and structurally sound, but
         # it belongs to another installed generation.
     owner.clock[0] = max(owner.clock[0], time.time() + 1)
-    reservation = owner.service.reserve(
-        principal=owner.principal, instance_id=owner.instance,
-        operation_id="retry-stale-workflow-pull",
-    )
-    assert reservation["state"] == "reserved" and reservation["job"]["job_id"] == later.id
+    with pytest.raises(PlatformError) as caught:
+        owner.service.reserve(
+            principal=owner.principal, instance_id=owner.instance,
+            operation_id="retry-stale-workflow-pull",
+        )
+    assert (caught.value.code, caught.value.status) == ("revision_superseded", 409)
     with owner.platform.db.sessions() as session:
         unchanged = session.get(Job, stale.id)
         assert unchanged.status == "queued"
         assert unchanged.resolved == stale_resolved
         assert unchanged.updated_at == original_updated_at
+        later_unchanged = session.get(Job, later.id)
+        assert later_unchanged.status == "queued"
+        assert later_unchanged.lease_owner is None
+        assert session.get(WorkerExecutionLease, later.id) is None
 
 
 @pytest.mark.parametrize("owner", ["gateway"], indirect=True)
