@@ -182,8 +182,10 @@ def test_cursor_json_cas_on_owned_postgresql():
         db.migrate()
         with owner_transaction(db) as session:
             initial = read_cursor(session, "compute", False)
-            assert advance_cursor(session, initial, "job-1")
-            assert not advance_cursor(session, initial, "job-2")
+            assert advance_cursor(session, initial, "job-1", phase="forward",
+                                  scan_started_at=1.0, wrap_until_job_id=None)
+            assert not advance_cursor(session, initial, "job-2", phase="forward",
+                                      scan_started_at=1.0, wrap_until_job_id=None)
         with owner_transaction(db) as session:
             assert read_cursor(session, "compute", False).last_job_id == "job-1"
     finally:

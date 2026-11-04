@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Text, and_, cast, inspect, or_, select, text
+from sqlalchemy import Text, and_, cast, func, inspect, or_, select, text
 
 from .adapters import RuntimeFailure
 from .authority import check_execution_binding, issue_execution, refresh_execution, revoke_execution, sweep_terminal_authority
@@ -330,6 +330,29 @@ class LeaseService:
             "fence": lease.fence, "lease_until": lease.lease_until, "task": job.task,
             "recipe": self._agent_http_recipe(job)}}
 
+    def _guard_fresh_reservation(self, session, compute_id):
+        from .recovery_cursor import peek_cursor
+        try:
+            cursor = peek_cursor(session, compute_id, self.repository_worker_only)
+            if cursor is not None and cursor.phase != "idle":
+                _fail("owner_unavailable", 503, "Execution owner state is unavailable")
+            now = time.time()
+            if cursor is not None and cursor.covered_through is not None and cursor.covered_through > now:
+                _fail("owner_unavailable", 503, "Execution owner state is unavailable")
+            query = self._eligible_query(select(Job.id).where(
+                Job.status == "running", Job.lease_until < now,
+                or_(Job.resolved["compute"]["id"].as_string() == compute_id,
+                    Job.resolved["compute"]["id"].as_string().is_(None))))
+            if cursor is not None and cursor.covered_through is not None:
+                query = query.where(or_(Job.created_at >= cursor.covered_through,
+                                        Job.lease_until >= cursor.covered_through))
+            if session.execute(query.limit(1)).scalar_one_or_none() is not None:
+                _fail("owner_unavailable", 503, "Execution owner state is unavailable")
+        except PlatformError:
+            raise
+        except Exception:
+            raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503) from None
+
     def reserve(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str,
                 external_profile: str | None = None) -> dict:
         """One caller-scoped reservation; no attempt, bearer or execution deadline."""
@@ -450,6 +473,8 @@ class LeaseService:
                 limit = model.get("max_concurrency")
                 if limit and running[model.get("id")] >= limit:
                     continue
+                self._guard_fresh_reservation(session, principal.compute_id)
+                now = time.time()
                 fence = uuid.uuid4().hex
                 lease_until = now + self.platform.settings.lease_seconds
                 lease = WorkerExecutionLease(job_id=job.id, workload_id=principal.workload_id,
@@ -659,6 +684,45 @@ class LeaseService:
             if database.engine.dialect.name == "postgresql":
                 session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CLAIM_LOCK})
 
+        def scoped(query):
+            return self._eligible_query(query).where(or_(
+                Job.resolved["compute"]["id"].as_string() == self.platform.settings.compute_id,
+                Job.resolved["compute"]["id"].as_string().is_(None)))
+
+        def eligible_after(session, cursor):
+            statement = scoped(select(Job.id).where(
+                Job.status == "running", Job.lease_until < cursor.scan_started_at))
+            if cursor.phase == "forward":
+                if cursor.forward_upper_id is None:
+                    return None
+                statement = statement.where(Job.id <= cursor.forward_upper_id)
+                if cursor.fair_pointer_job_id is not None:
+                    statement = statement.where(Job.id > cursor.fair_pointer_job_id)
+            else:
+                statement = statement.where(Job.id <= cursor.fair_pointer_job_id)
+            if cursor.last_job_id is not None:
+                statement = statement.where(Job.id > cursor.last_job_id)
+            return session.execute(statement.order_by(Job.id).limit(1)).scalar_one_or_none()
+
+        def save_cursor(session, cursor, **changes):
+            values = {name: getattr(cursor, name) for name in (
+                "phase", "last_job_id", "fair_pointer_job_id", "forward_upper_id",
+                "scan_started_at", "covered_through")}
+            values.update(changes)
+            if not advance_cursor(session, cursor, **values):
+                raise RuntimeError("recovery cursor changed")
+            return read_cursor(session, cursor.compute_id, cursor.repository_worker_only)
+
+        def complete_or_wrap(session, cursor):
+            if cursor.phase == "forward" and cursor.fair_pointer_job_id is not None:
+                save_cursor(session, cursor, phase="wrap", last_job_id=None)
+                return False
+            save_cursor(session, cursor, phase="idle", last_job_id=None,
+                        fair_pointer_job_id=cursor.forward_upper_id,
+                        forward_upper_id=None, covered_through=cursor.scan_started_at,
+                        scan_started_at=None)
+            return True
+
         # Global schema/audit/terminal authority failures must abort the claim.
         with owner_transaction(database) as session:
             coordinate(session)
@@ -679,6 +743,7 @@ class LeaseService:
 
         while counts["examined"] < 1000:
             cursor = None
+            initial_cursor = None
             candidate_id = None
             retired_fence = None
             outcome = "changed"
@@ -687,14 +752,15 @@ class LeaseService:
                     coordinate(session)
                     cursor = read_cursor(session, self.platform.settings.compute_id,
                                          self.repository_worker_only)
-                    statement = self._eligible_query(select(Job.id).where(
-                        Job.status == "running", Job.lease_until < time.time()))
-                    if cursor.last_job_id is not None:
-                        statement = statement.where(Job.id > cursor.last_job_id)
-                    candidate_id = session.execute(statement.order_by(Job.id).limit(1)).scalar_one_or_none()
+                    if cursor.phase == "idle":
+                        initial_cursor = cursor
+                        scan_started_at = time.time()
+                        upper = session.execute(scoped(select(func.max(Job.id)))).scalar_one()
+                        cursor = save_cursor(session, cursor, phase="forward", last_job_id=None,
+                                             scan_started_at=scan_started_at, forward_upper_id=upper)
+                    candidate_id = eligible_after(session, cursor)
                     if candidate_id is None:
-                        if not advance_cursor(session, cursor, None):
-                            raise RuntimeError("recovery cursor changed")
+                        outcome = "complete" if complete_or_wrap(session, cursor) else "wrap"
                     else:
                         counts["examined"] += 1
                         if self._close_owner(candidate_id, recovery_session=session):
@@ -703,9 +769,11 @@ class LeaseService:
                                 raise RuntimeError("recovered lease unavailable")
                             retired_fence = locked_lease.fence
                             outcome = "retired"
-                        if not advance_cursor(session, cursor, candidate_id):
-                            raise RuntimeError("recovery cursor changed")
+                        save_cursor(session, cursor, last_job_id=candidate_id)
                 if candidate_id is None:
+                    if outcome == "wrap":
+                        outcome = "changed"
+                        continue
                     try:
                         logging.getLogger(__name__).info("recovery_scan status=complete counts=%s", counts)
                     except Exception:
@@ -722,31 +790,28 @@ class LeaseService:
                     coordinate(session)
                     latest = read_cursor(session, self.platform.settings.compute_id,
                                          self.repository_worker_only)
-                    if latest.value != cursor.value or not advance_cursor(session, latest, candidate_id):
+                    if initial_cursor is not None:
+                        if latest.value != initial_cursor.value:
+                            raise RuntimeError("recovery cursor changed") from None
+                        latest = save_cursor(session, latest, phase=cursor.phase,
+                                             last_job_id=cursor.last_job_id,
+                                             fair_pointer_job_id=cursor.fair_pointer_job_id,
+                                             forward_upper_id=cursor.forward_upper_id,
+                                             scan_started_at=cursor.scan_started_at,
+                                             covered_through=cursor.covered_through)
+                    if latest.value != cursor.value:
                         raise RuntimeError("recovery cursor changed") from None
+                    save_cursor(session, latest, last_job_id=candidate_id)
                 counts["busy" if isinstance(exc, _WorkProjectionBusy) else "invalid"] += 1
-        # Distinguish exactly-at-cap completion from a genuinely incomplete pass.
+        # Complete empty tail phases without spending a candidate budget.
         with owner_transaction(database) as session:
             coordinate(session)
             cursor = read_cursor(session, self.platform.settings.compute_id,
                                  self.repository_worker_only)
-            statement = self._eligible_query(select(Job.id).where(
-                Job.status == "running", Job.lease_until < time.time()))
-            if cursor.last_job_id is not None:
-                statement = statement.where(Job.id > cursor.last_job_id)
-            remaining = session.execute(statement.order_by(Job.id).limit(1)).scalar_one_or_none()
-            if remaining is None and not advance_cursor(session, cursor, None):
-                raise RuntimeError("recovery cursor changed")
-        if remaining is None:
-            try:
-                logging.getLogger(__name__).info("recovery_scan status=complete counts=%s", counts)
-            except Exception:
-                pass
-            return counts
-        try:
-            logging.getLogger(__name__).warning("recovery_scan status=limit counts=%s", counts)
-        except Exception:
-            pass
+            while eligible_after(session, cursor) is None:
+                if complete_or_wrap(session, cursor):
+                    return counts
+                cursor = read_cursor(session, cursor.compute_id, cursor.repository_worker_only)
         raise _RecoverySweepIncomplete("recovery sweep incomplete")
 
     def claim(self) -> Job | None:

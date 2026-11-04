@@ -1,24 +1,22 @@
-"""Durable scan coordination for expired-owner recovery.
+"""Durable, scoped progress for bounded expired-owner scans.
 
-The cursor records only scan progress. It does not classify an owner, prove
-settlement, authorize a retry, or imply that an external executor stopped.
-All operations are transaction-scoped and require ``owner_transaction``.
+A completed horizon is a scan cutoff, never evidence of external settlement.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
-
-CURSOR_SCHEMA = "sovite-recovery-cursor/v1"
+CURSOR_SCHEMA = "sovite-recovery-cursor/v2"
 CURSOR_PREFIX = "recover_cursor:"
 
 
 class RecoveryCursorUnavailable(RuntimeError):
-    """Cursor storage or its scope/value contract is unavailable."""
+    """Cursor state cannot be trusted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,144 +24,141 @@ class RecoveryCursor:
     key: str
     compute_id: str
     repository_worker_only: bool
+    phase: str
     last_job_id: str | None
+    fair_pointer_job_id: str | None
+    forward_upper_id: str | None
+    scan_started_at: float | None
+    covered_through: float | None
     value: Mapping[str, Any]
 
 
-def _validate_scope(compute_id: Any, repository_worker_only: Any) -> tuple[str, bool]:
-    if type(compute_id) is not str or not compute_id or "\x00" in compute_id \
-            or type(repository_worker_only) is not bool:
-        raise RecoveryCursorUnavailable()
-    try:
-        if len(compute_id.encode("utf-8")) > 160:
-            raise RecoveryCursorUnavailable()
-    except UnicodeError:
-        raise RecoveryCursorUnavailable() from None
-    return compute_id, repository_worker_only
-
-
-def _validate_job_id(job_id: Any) -> str | None:
-    if job_id is None:
-        return None
-    if type(job_id) is not str or not job_id or "\x00" in job_id:
-        raise RecoveryCursorUnavailable()
-    try:
-        if len(job_id.encode("utf-8")) > 64:
-            raise RecoveryCursorUnavailable()
-    except UnicodeError:
-        raise RecoveryCursorUnavailable() from None
-    return job_id
-
-
-def cursor_key(compute_id: str, repository_worker_only: bool) -> str:
-    """Return the 79-character metadata key for one exact sweep scope."""
-    compute_id, repository_worker_only = _validate_scope(compute_id, repository_worker_only)
-    identity = json.dumps(
-        {"compute_id": compute_id, "repository_worker_only": repository_worker_only},
-        ensure_ascii=True, sort_keys=True, separators=(",", ":"),
-    ).encode("ascii")
-    key = CURSOR_PREFIX + hashlib.sha256(identity).hexdigest()
-    if len(key) != 79:
-        raise RecoveryCursorUnavailable()
-    return key
-
-
-def _cursor_value(compute_id: str, repository_worker_only: bool,
-                  last_job_id: str | None) -> dict[str, Any]:
-    return {
-        "schema_version": CURSOR_SCHEMA,
-        "compute_id": compute_id,
-        "repository_worker_only": repository_worker_only,
-        "last_job_id": _validate_job_id(last_job_id),
-    }
-
-
-def _unavailable() -> RecoveryCursorUnavailable:
+def _unavailable():
     return RecoveryCursorUnavailable("expired-owner cursor is unavailable")
 
 
-def _require_owner_transaction(session) -> None:
-    from .collection_transaction import _owner_transaction_is_active
+def _scope(compute_id, repository_worker_only):
+    if type(compute_id) is not str or not compute_id or "\x00" in compute_id or type(repository_worker_only) is not bool:
+        raise _unavailable()
+    try:
+        if len(compute_id.encode("utf-8")) > 160:
+            raise _unavailable()
+    except UnicodeError:
+        raise _unavailable() from None
+    return compute_id, repository_worker_only
 
+
+def _job_id(value):
+    if value is None:
+        return None
+    if type(value) is not str or not value or "\x00" in value:
+        raise _unavailable()
+    try:
+        if len(value.encode("utf-8")) > 64:
+            raise _unavailable()
+    except UnicodeError:
+        raise _unavailable() from None
+    return value
+
+
+def _timestamp(value):
+    if value is None:
+        return None
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise _unavailable()
+    return float(value)
+
+
+def cursor_key(compute_id, repository_worker_only):
+    compute_id, repository_worker_only = _scope(compute_id, repository_worker_only)
+    identity = json.dumps({"compute_id": compute_id, "repository_worker_only": repository_worker_only},
+                          ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+    return CURSOR_PREFIX + hashlib.sha256(identity).hexdigest()
+
+
+def _value(compute_id, repository_worker_only, *, phase="idle", last_job_id=None,
+           fair_pointer_job_id=None, forward_upper_id=None, scan_started_at=None, covered_through=None):
+    _scope(compute_id, repository_worker_only)
+    last_job_id, fair_pointer_job_id, forward_upper_id = map(_job_id, (last_job_id, fair_pointer_job_id, forward_upper_id))
+    scan_started_at, covered_through = _timestamp(scan_started_at), _timestamp(covered_through)
+    if phase not in {"idle", "forward", "wrap"}:
+        raise _unavailable()
+    if phase == "idle":
+        if last_job_id is not None or forward_upper_id is not None or scan_started_at is not None:
+            raise _unavailable()
+    elif scan_started_at is None or (phase == "wrap" and fair_pointer_job_id is None):
+        raise _unavailable()
+    if scan_started_at is not None and covered_through is not None and covered_through > scan_started_at:
+        raise _unavailable()
+    if phase == "forward" and last_job_id is not None and (forward_upper_id is None or last_job_id > forward_upper_id):
+        raise _unavailable()
+    if phase == "wrap" and last_job_id is not None and last_job_id > fair_pointer_job_id:
+        raise _unavailable()
+    return {"schema_version": CURSOR_SCHEMA, "compute_id": compute_id,
+            "repository_worker_only": repository_worker_only, "phase": phase,
+            "last_job_id": last_job_id, "fair_pointer_job_id": fair_pointer_job_id,
+            "forward_upper_id": forward_upper_id, "scan_started_at": scan_started_at,
+            "covered_through": covered_through}
+
+
+def _decode(key, compute_id, repository_worker_only, value):
+    if type(value) is not dict or set(value) != {"schema_version", "compute_id", "repository_worker_only", "phase", "last_job_id", "fair_pointer_job_id", "forward_upper_id", "scan_started_at", "covered_through"}:
+        raise _unavailable()
+    if value["schema_version"] != CURSOR_SCHEMA or value["compute_id"] != compute_id or type(value["repository_worker_only"]) is not bool or value["repository_worker_only"] is not repository_worker_only:
+        raise _unavailable()
+    canonical = _value(compute_id, repository_worker_only, **{k: value[k] for k in ("phase", "last_job_id", "fair_pointer_job_id", "forward_upper_id", "scan_started_at", "covered_through")})
+    if value != canonical:
+        raise _unavailable()
+    return RecoveryCursor(key, compute_id, repository_worker_only, *(canonical[k] for k in ("phase", "last_job_id", "fair_pointer_job_id", "forward_upper_id", "scan_started_at", "covered_through")), MappingProxyType(canonical))
+
+
+def peek_cursor(session, compute_id, repository_worker_only):
+    """Read only: missing cursor means no completed horizon; never initialize."""
+    from .db import MetadataRow
+    key = cursor_key(compute_id, repository_worker_only)
+    row = session.get(MetadataRow, key)
+    return None if row is None else _decode(key, compute_id, repository_worker_only, row.value)
+
+
+def _require_owner_transaction(session):
+    from .collection_transaction import _owner_transaction_is_active
     if not _owner_transaction_is_active(session):
         raise _unavailable()
 
 
-def _decode(key: str, compute_id: str, repository_worker_only: bool,
-            value: Any) -> RecoveryCursor:
-    expected = {"schema_version", "compute_id", "repository_worker_only", "last_job_id"}
-    if type(value) is not dict or set(value) != expected:
-        raise _unavailable()
-    if (value.get("schema_version") != CURSOR_SCHEMA
-            or value.get("compute_id") != compute_id
-            or type(value.get("repository_worker_only")) is not bool
-            or value.get("repository_worker_only") is not repository_worker_only):
-        raise _unavailable()
-    try:
-        last_job_id = _validate_job_id(value.get("last_job_id"))
-    except (UnicodeError, TypeError):
-        raise _unavailable() from None
-    canonical = _cursor_value(compute_id, repository_worker_only, last_job_id)
-    if value != canonical:
-        raise _unavailable()
-    return RecoveryCursor(
-        key, compute_id, repository_worker_only, last_job_id,
-        MappingProxyType(canonical),
-    )
-
-
-def read_cursor(session, compute_id: str, repository_worker_only: bool) -> RecoveryCursor:
-    """Read and lock a cursor, initializing only an actually absent row.
-
-    Caller must already hold the owner transaction and PostgreSQL claim
-    advisory lock. Malformed or mis-scoped values fail closed; they are never
-    silently reset to a new scan.
-    """
-    _require_owner_transaction(session)
-    compute_id, repository_worker_only = _validate_scope(compute_id, repository_worker_only)
+def read_cursor(session, compute_id, repository_worker_only):
     from .db import MetadataRow
     from sqlalchemy import select
-
+    _require_owner_transaction(session)
     key = cursor_key(compute_id, repository_worker_only)
     row = session.execute(select(MetadataRow).where(MetadataRow.key == key).with_for_update()).scalar_one_or_none()
     if row is None:
-        value = _cursor_value(compute_id, repository_worker_only, None)
-        row = MetadataRow(key=key, value=value)
+        row = MetadataRow(key=key, value=_value(compute_id, repository_worker_only))
         session.add(row)
         session.flush()
     return _decode(key, compute_id, repository_worker_only, row.value)
 
 
-def advance_cursor(session, cursor: RecoveryCursor, last_job_id: str | None) -> bool:
-    """Compare-and-advance one locked cursor value; return False on CAS miss.
-
-    A successful update remains part of the caller's transaction. Unexpected
-    row counts or database failures propagate so the caller cannot mistake a
-    global control failure for a candidate-local refusal.
-    """
-    _require_owner_transaction(session)
-    if not isinstance(cursor, RecoveryCursor):
-        raise _unavailable()
-    compute_id, repository_worker_only = _validate_scope(
-        cursor.compute_id, cursor.repository_worker_only,
-    )
-    key = cursor_key(compute_id, repository_worker_only)
-    if cursor.key != key:
-        raise _unavailable()
-    validated_cursor = _decode(key, compute_id, repository_worker_only, dict(cursor.value))
-    if validated_cursor.last_job_id != _validate_job_id(cursor.last_job_id):
-        raise _unavailable()
+def advance_cursor(session, cursor, *, phase, last_job_id, fair_pointer_job_id,
+                   forward_upper_id, scan_started_at, covered_through):
     from .db import MetadataRow
     from sqlalchemy import select, update
-
-    row = session.execute(select(MetadataRow).where(MetadataRow.key == key).with_for_update()).scalar_one_or_none()
+    _require_owner_transaction(session)
+    if not isinstance(cursor, RecoveryCursor) or cursor.key != cursor_key(cursor.compute_id, cursor.repository_worker_only):
+        raise _unavailable()
+    expected = _decode(cursor.key, cursor.compute_id, cursor.repository_worker_only, dict(cursor.value))
+    if expected != cursor:
+        raise _unavailable()
+    row = session.execute(select(MetadataRow).where(MetadataRow.key == cursor.key).with_for_update()).scalar_one_or_none()
     if row is None:
         raise _unavailable()
-    actual = _decode(key, compute_id, repository_worker_only, row.value)
-    if actual.value != validated_cursor.value:
+    actual = _decode(cursor.key, cursor.compute_id, cursor.repository_worker_only, row.value)
+    if actual.value != cursor.value:
         return False
-    target = _cursor_value(compute_id, repository_worker_only, last_job_id)
-    result = session.execute(update(MetadataRow).where(MetadataRow.key == key).values(value=target))
+    target = _value(cursor.compute_id, cursor.repository_worker_only, phase=phase, last_job_id=last_job_id,
+                    fair_pointer_job_id=fair_pointer_job_id, forward_upper_id=forward_upper_id,
+                    scan_started_at=scan_started_at, covered_through=covered_through)
+    result = session.execute(update(MetadataRow).where(MetadataRow.key == cursor.key).values(value=target))
     if result.rowcount != 1:
         raise _unavailable()
     return True
