@@ -112,12 +112,36 @@ def _decode(key, compute_id, repository_worker_only, value):
     return RecoveryCursor(key, compute_id, repository_worker_only, *(canonical[k] for k in ("phase", "last_job_id", "fair_pointer_job_id", "forward_upper_id", "scan_started_at", "covered_through")), MappingProxyType(canonical))
 
 
-def peek_cursor(session, compute_id, repository_worker_only):
-    """Read only: missing cursor means no completed horizon; never initialize."""
+def _strict_json(raw):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise _unavailable()
+            result[key] = value
+        return result
+    try:
+        if type(raw) is not str:
+            raise _unavailable()
+        return json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, TypeError, RecursionError):
+        raise _unavailable() from None
+
+
+def _raw_cursor(session, key, compute_id, repository_worker_only, *, lock):
     from .db import MetadataRow
+    from sqlalchemy import Text, cast, select
+    statement = select(cast(MetadataRow.value, Text)).where(MetadataRow.key == key)
+    if lock:
+        statement = statement.with_for_update()
+    row = session.execute(statement).one_or_none()
+    return None if row is None else _decode(key, compute_id, repository_worker_only, _strict_json(row[0]))
+
+
+def peek_cursor(session, compute_id, repository_worker_only):
+    """Read raw JSON without mutation; an absent cursor has no covered horizon."""
     key = cursor_key(compute_id, repository_worker_only)
-    row = session.get(MetadataRow, key)
-    return None if row is None else _decode(key, compute_id, repository_worker_only, row.value)
+    return _raw_cursor(session, key, compute_id, repository_worker_only, lock=False)
 
 
 def _require_owner_transaction(session):
@@ -128,31 +152,31 @@ def _require_owner_transaction(session):
 
 def read_cursor(session, compute_id, repository_worker_only):
     from .db import MetadataRow
-    from sqlalchemy import select
     _require_owner_transaction(session)
     key = cursor_key(compute_id, repository_worker_only)
-    row = session.execute(select(MetadataRow).where(MetadataRow.key == key).with_for_update()).scalar_one_or_none()
-    if row is None:
-        row = MetadataRow(key=key, value=_value(compute_id, repository_worker_only))
-        session.add(row)
+    current = _raw_cursor(session, key, compute_id, repository_worker_only, lock=True)
+    if current is None:
+        session.add(MetadataRow(key=key, value=_value(compute_id, repository_worker_only)))
         session.flush()
-    return _decode(key, compute_id, repository_worker_only, row.value)
+        current = _raw_cursor(session, key, compute_id, repository_worker_only, lock=True)
+        if current is None:
+            raise _unavailable()
+    return current
 
 
 def advance_cursor(session, cursor, *, phase, last_job_id, fair_pointer_job_id,
                    forward_upper_id, scan_started_at, covered_through):
     from .db import MetadataRow
-    from sqlalchemy import select, update
+    from sqlalchemy import update
     _require_owner_transaction(session)
     if not isinstance(cursor, RecoveryCursor) or cursor.key != cursor_key(cursor.compute_id, cursor.repository_worker_only):
         raise _unavailable()
     expected = _decode(cursor.key, cursor.compute_id, cursor.repository_worker_only, dict(cursor.value))
     if expected != cursor:
         raise _unavailable()
-    row = session.execute(select(MetadataRow).where(MetadataRow.key == cursor.key).with_for_update()).scalar_one_or_none()
-    if row is None:
+    actual = _raw_cursor(session, cursor.key, cursor.compute_id, cursor.repository_worker_only, lock=True)
+    if actual is None:
         raise _unavailable()
-    actual = _decode(cursor.key, cursor.compute_id, cursor.repository_worker_only, row.value)
     if actual.value != cursor.value:
         return False
     target = _value(cursor.compute_id, cursor.repository_worker_only, phase=phase, last_job_id=last_job_id,

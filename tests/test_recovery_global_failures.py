@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select, update
 
 from sovite.db import Base, Job, MetadataRow, WorkerExecutionLease
-from sovite.lease_service import LeaseService, execution_owner_key
+from sovite.lease_service import ExecutionPrincipal, LeaseService, execution_owner_key
 from sovite.recovery_cursor import cursor_key
 from sovite.service import PlatformError
 from test_work_projection_rows import _finish_snapshot, work_rows
@@ -33,13 +33,10 @@ def test_unexpected_recovery_helper_failure_rolls_back_and_blocks_claim(
     # this service fixture intentionally does not configure sweep retention.
     monkeypatch.setattr(lease_module, "sweep_terminal_authority", lambda *_: None)
     service = LeaseService(
-        SimpleNamespace(db=db, settings=SimpleNamespace(
+        SimpleNamespace(db=db, active=lambda _session: None, settings=SimpleNamespace(
             compute_id="fixture", execution_workload_identity="workload", max_attempts=3)),
         execution_owner_key(workload_id="workload", instance_id="instance"), {},
     )
-    reserve_calls = []
-    monkeypatch.setattr(service, "bind_trusted_worker", lambda **_: None)
-    monkeypatch.setattr(service, "reserve", lambda **_: (reserve_calls.append(True) or {"state": "not_reserved"}))
     before = _finish_snapshot(db)
     injected = {
         "reached": False,
@@ -128,14 +125,14 @@ def test_unexpected_recovery_helper_failure_rolls_back_and_blocks_claim(
         monkeypatch.setattr(sqlalchemy, "Table", fail_binding_reflection)
 
     with pytest.raises(PlatformError) as error:
-        service.claim()
+        service.reserve(principal=ExecutionPrincipal("workload", "fixture"),
+                        instance_id="instance", operation_id="pull-global-failure")
     assert error.value.code == "owner_unavailable"
     assert injected["reached"] is True, injected
     if failure_site in {"receipt_query", "binding_reflection"}:
         assert injected["recovery_comparator_entered"] is True
     assert "synthetic-private" not in "".join(traceback.format_exception(error.value))
     assert error.value.__suppress_context__ is True
-    assert reserve_calls == []
     assert _finish_snapshot(db) == before
     key = cursor_key("fixture", False)
     with db.sessions() as session:

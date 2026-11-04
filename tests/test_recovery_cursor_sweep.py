@@ -8,11 +8,12 @@ from threading import Event, Thread
 pytest_plugins = ("test_execution_leases", "test_work_projection_rows")
 
 from sovite.collection_transaction import owner_transaction
-from sovite.db import Database, Job, MetadataRow
-from sovite.db import WorkerExecutionLease
+from sovite.db import Database, Job, MetadataRow, WorkerExecutionLease, WorkerExecutionOperation
 from sovite.lease_service import LeaseService
 from sovite.work_projection import _WorkProjectionBusy
-from sovite.recovery_cursor import advance_cursor, cursor_key, read_cursor
+from sovite.recovery_cursor import (
+    RecoveryCursorUnavailable, advance_cursor, cursor_key, peek_cursor, read_cursor,
+)
 from sovite.service import PlatformError
 from sovite.lease_service import _HandBackOwnerUnavailable
 from test_execution_leases import owner, submit  # noqa: F401
@@ -305,22 +306,12 @@ def test_wrap_cap_restarts_after_refused_rows_and_reaches_later_candidate(tmp_pa
         db.engine.dispose()
 
 
-@pytest.mark.parametrize("cursor_kind", ["incomplete", "malformed", "future"])
-def test_reserve_fails_closed_on_incomplete_or_untrusted_cursor(owner, monkeypatch, cursor_kind):
+@pytest.mark.parametrize("cursor_kind", ["malformed", "future"])
+def test_reserve_fails_closed_on_untrusted_cursor(owner, monkeypatch, cursor_kind):
     job = submit(owner, key=f"cursor-{cursor_kind}")
     now = owner.clock[0]
     key = cursor_key(owner.principal.compute_id, False)
-    if cursor_kind == "incomplete":
-        with owner.platform.db.sessions.begin() as session:
-            session.add(MetadataRow(key=key, value={
-                "schema_version": "sovite-recovery-cursor/v2",
-                "compute_id": owner.principal.compute_id,
-                "repository_worker_only": False,
-                "phase": "forward", "last_job_id": None,
-                "fair_pointer_job_id": None, "forward_upper_id": job.id,
-                "scan_started_at": now, "covered_through": None,
-            }))
-    elif cursor_kind == "malformed":
+    if cursor_kind == "malformed":
         with owner.platform.db.sessions.begin() as session:
             session.add(MetadataRow(key=key, value={"schema_version": "wrong"}))
     else:
@@ -339,7 +330,27 @@ def test_reserve_fails_closed_on_incomplete_or_untrusted_cursor(owner, monkeypat
     assert snapshot(owner.platform) == before
 
 
-def test_reserve_guard_catches_row_expiring_after_completed_horizon(owner, monkeypatch):
+def test_direct_reserve_resumes_persisted_incomplete_cycle(owner):
+    queued = submit(owner, key="cursor-incomplete-resume")
+    now = owner.clock[0]
+    with owner.platform.db.sessions.begin() as session:
+        session.add(MetadataRow(key=cursor_key(owner.principal.compute_id, False), value={
+            "schema_version": "sovite-recovery-cursor/v2",
+            "compute_id": owner.principal.compute_id,
+            "repository_worker_only": False,
+            "phase": "forward", "last_job_id": None,
+            "fair_pointer_job_id": None, "forward_upper_id": queued.id,
+            "scan_started_at": now, "covered_through": None,
+        }))
+    result = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                   operation_id="pull-incomplete-resume")
+    assert result["state"] == "reserved" and result["job"]["job_id"] == queued.id
+    with owner.platform.db.sessions() as session:
+        cursor = peek_cursor(session, owner.principal.compute_id, False)
+        assert cursor.phase == "idle" and cursor.covered_through == now
+
+
+def test_reserve_recovers_row_expiring_after_completed_horizon_during_lock_wait(owner, monkeypatch):
     earlier = submit(owner, key="cursor-old-running")
     horizon = owner.clock[0]
     with owner.platform.db.sessions.begin() as session:
@@ -354,6 +365,15 @@ def test_reserve_guard_catches_row_expiring_after_completed_horizon(owner, monke
                               fair_pointer_job_id=earlier.id, forward_upper_id=None,
                               scan_started_at=None, covered_through=horizon)
     owner.clock[0] = horizon + 4
+    recovery_results = []
+    original_recover = owner.service.recover_expired
+
+    def observe_recovery():
+        counts = original_recover()
+        recovery_results.append(counts)
+        return counts
+
+    monkeypatch.setattr(owner.service, "recover_expired", observe_recovery)
     original_authority_lock = owner.platform.db.authority_lock
 
     def expire_while_waiting_for_owner_lock(session):
@@ -363,14 +383,19 @@ def test_reserve_guard_catches_row_expiring_after_completed_horizon(owner, monke
     monkeypatch.setattr(owner.platform.db, "authority_lock", expire_while_waiting_for_owner_lock)
     from test_execution_leases import snapshot
     before = snapshot(owner.platform)
-    with pytest.raises(PlatformError) as error:
-        owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
-                              operation_id="pull-after-horizon-expiry")
-    assert error.value.code == "owner_unavailable"
+    result = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                   operation_id="pull-after-horizon-expiry")
+    assert result["state"] == "reserved" and result["job"]["job_id"] == queued.id
     after = snapshot(owner.platform)
-    assert after["jobs"] == before["jobs"]
-    assert after["worker_execution_leases"] == before["worker_execution_leases"]
-    assert any(row["id"] == queued.id and row["status"] == "queued" for row in after["jobs"])
+    prior = next(row for row in before["jobs"] if row["id"] == earlier.id)
+    recovered = next(row for row in after["jobs"] if row["id"] == earlier.id)
+    assert prior["status"] == "running"
+    assert recovered["status"] == "running"  # synthetic row deliberately has no lease
+    assert recovery_results and recovery_results[0]["invalid"] == 1
+    with owner.platform.db.sessions() as session:
+        cursor = peek_cursor(session, owner.principal.compute_id, False)
+        assert cursor.phase == "idle" and cursor.covered_through >= horizon + 6
+    assert any(row["id"] == queued.id and row["status"] == "running" for row in after["jobs"])
 
 
 @pytest.mark.parametrize("database", ["postgresql"], indirect=True)
@@ -398,6 +423,15 @@ def test_postgres_reserve_rechecks_expiry_after_blocked_authority_lock(owner, mo
     original_authority_lock = owner.platform.db.authority_lock
     monkeypatch.setattr(owner.platform.db, "authority_lock", lambda session: (
         lock_entered.set(), original_authority_lock(session), lock_acquired.set()))
+    recovery_results = []
+    original_recover = owner.service.recover_expired
+
+    def observe_recovery():
+        counts = original_recover()
+        recovery_results.append(counts)
+        return counts
+
+    monkeypatch.setattr(owner.service, "recover_expired", observe_recovery)
     result = {}
 
     def reserve():
@@ -418,17 +452,22 @@ def test_postgres_reserve_rechecks_expiry_after_blocked_authority_lock(owner, mo
         owner.clock[0] = horizon + 6
         holder.commit()
         assert done.wait(5), "reserve did not finish after releasing owner lock"
-        assert isinstance(result.get("error"), PlatformError)
-        assert result["error"].code == "owner_unavailable"
+        assert "error" not in result
+        assert result["value"]["state"] == "reserved"
+        assert result["value"]["job"]["job_id"] == queued.id
+        assert recovery_results and recovery_results[0]["invalid"] == 1
         with owner.platform.db.sessions() as session:
-            assert session.get(Job, queued.id).status == "queued"
+            assert session.get(Job, queued.id).status == "running"
+            assert session.get(Job, expired.id).status == "running"
+            cursor = peek_cursor(session, owner.principal.compute_id, False)
+            assert cursor.phase == "idle" and cursor.covered_through >= horizon + 6
     finally:
         holder.rollback()
         holder.close()
         worker.join(5)
 
 
-def test_missing_cursor_still_checks_all_expired_rows_before_reserve(owner):
+def test_missing_cursor_reserve_recovers_expired_row_before_fresh_reservation(owner, monkeypatch):
     expired = submit(owner, key="cursor-missing-expired")
     with owner.platform.db.sessions.begin() as session:
         session.execute(update(Job).where(Job.id == expired.id).values(
@@ -436,15 +475,24 @@ def test_missing_cursor_still_checks_all_expired_rows_before_reserve(owner):
             resolved={"compute": {"id": owner.principal.compute_id},
                       "model": {"id": "older-model"}}))
     queued = submit(owner, key="cursor-missing-queued")
-    from test_execution_leases import snapshot
-    before = snapshot(owner.platform)
-    with pytest.raises(PlatformError) as error:
-        owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
-                              operation_id="pull-without-checkpoint")
-    assert error.value.code == "owner_unavailable"
-    after = snapshot(owner.platform)
-    assert after["jobs"] == before["jobs"]
-    assert any(row["id"] == queued.id and row["status"] == "queued" for row in after["jobs"])
+    recovery_results = []
+    original_recover = owner.service.recover_expired
+
+    def observe_recovery():
+        counts = original_recover()
+        recovery_results.append(counts)
+        return counts
+
+    monkeypatch.setattr(owner.service, "recover_expired", observe_recovery)
+    result = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                   operation_id="pull-without-checkpoint")
+    assert result["state"] == "reserved" and result["job"]["job_id"] == queued.id
+    assert recovery_results[0]["examined"] == 1
+    assert recovery_results[0]["invalid"] == 1
+    with owner.platform.db.sessions() as session:
+        assert session.get(Job, expired.id).status == "running"
+        cursor = peek_cursor(session, owner.principal.compute_id, False)
+        assert cursor.phase == "idle"
 
 
 def test_no_expired_owner_allows_bootstrap_reservation_without_cursor(owner):
@@ -528,18 +576,276 @@ def test_claim_closes_expired_work_unknown_before_reserve(work_rows, monkeypatch
         execution_owner_key(workload_id="workload", instance_id="instance"), {})
     monkeypatch.setattr(service, "bind_trusted_worker", lambda **_: None)
     observed = []
-    original_reserve = service.reserve
+    original_reserve_once = service._reserve_once
 
-    def reserve_after_recovery(**_kwargs):
-        tables = Base.metadata.tables
-        with db.sessions() as session:
-            job_row = session.get(Job, "job")
-            reservation = session.execute(select(tables["program_reservations"])).mappings().one()
-            slot = session.execute(select(tables["program_slots"])).mappings().one()
-            gate = session.execute(select(tables["program_gate_state"])).mappings().one()
-        observed.append((job_row.status, reservation["state"], slot["state"], gate["mode"]))
-        return original_reserve(**_kwargs)
+    def reserve_after_recovery(**kwargs):
+        if kwargs.get("recovery_done"):
+            tables = Base.metadata.tables
+            with db.sessions() as session:
+                job_row = session.get(Job, "job")
+                reservation = session.execute(select(tables["program_reservations"])).mappings().one()
+                slot = session.execute(select(tables["program_slots"])).mappings().one()
+                gate = session.execute(select(tables["program_gate_state"])).mappings().one()
+            observed.append((job_row.status, reservation["state"], slot["state"], gate["mode"]))
+        return original_reserve_once(**kwargs)
 
-    monkeypatch.setattr(service, "reserve", reserve_after_recovery)
+    monkeypatch.setattr(service, "_reserve_once", reserve_after_recovery)
     assert service.claim() is None
     assert observed == [("blocked", "unknown", "unknown", "inhibited")]
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+def test_direct_reserve_then_real_pull_resumes_partial_cycle_and_replays_nonce(owner, monkeypatch):
+    """Direct reserve and HTTP pull resume persisted progress without a local claim."""
+    from dataclasses import replace
+    from test_worker_remote_boundary import admit_agent_http_owner, TOKEN
+    from sovite.lease_service import LeaseService
+    from sovite.api import create_app
+    from sovite.execution_api import Pull
+
+    admit_agent_http_owner(owner)
+    queued = owner.platform.submit(
+        "native-code-review", "synthetic bounded recovery pull", "operations",
+        "submit-expired-sweep-pull", input_class="C2",
+    )
+    now = owner.clock[0]
+    expired_id = "zzzz-expired-before-pull"
+    with owner.platform.db.sessions.begin() as session:
+        session.add(Job(
+            id=expired_id, receipt="expired-receipt-before-pull",
+            idempotency_key="expired-key-before-pull",
+            request_digest="d" * 80, caller=queued.caller, grant_id=queued.grant_id,
+            generation=queued.generation,
+            resolved={"compute": {"id": owner.principal.compute_id},
+                      "model": {"id": "prior-model"}},
+            task="synthetic expired job without a current lease", status="running",
+            lease_owner="expired-owner", lease_until=now - 1,
+            created_at=now - 100, updated_at=now - 1, attempts=1,
+        ))
+    # Model a process restart after a bounded wrap scan already persisted its
+    # cursor. The final candidate is still ahead of the cursor.
+    with owner_transaction(owner.platform.db) as session:
+        cursor = read_cursor(session, owner.principal.compute_id, False)
+        assert advance_cursor(
+            session, cursor, phase="wrap", last_job_id="zzzz",
+            fair_pointer_job_id=expired_id, forward_upper_id=expired_id,
+            scan_started_at=now, covered_through=now - 10,
+        )
+
+    # Prove that callers do not need to pass through the local Worker.claim path.
+    monkeypatch.setattr(LeaseService, "claim",
+                        lambda *_args, **_kwargs: pytest.fail("local claim must not be used"))
+    events = []
+    original_authority_lock = owner.platform.db.authority_lock
+
+    def record_authority_lock(session):
+        events.append("authority")
+        return original_authority_lock(session)
+
+    monkeypatch.setattr(owner.platform.db, "authority_lock", record_authority_lock)
+    if owner.platform.db.engine.dialect.name == "postgresql":
+        from sqlalchemy.orm import Session
+        original_execute = Session.execute
+
+        def record_advisory_lock(session, statement, *args, **kwargs):
+            if "pg_advisory_xact_lock" in str(statement).lower():
+                events.append("claim_advisory")
+            return original_execute(session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(Session, "execute", record_advisory_lock)
+
+    operation_id = "pull-expired-progress"
+    first_reservation = owner.service.reserve(
+        principal=owner.principal, instance_id=owner.instance,
+        operation_id=operation_id, external_profile="agent-http-v1",
+    )
+    assert first_reservation["state"] == "reserved"
+    assert first_reservation["job"]["job_id"] == queued.id
+    assert "authority" in events
+    if owner.platform.db.engine.dialect.name == "postgresql":
+        assert events[:2] == ["authority", "claim_advisory"]
+    with owner.platform.db.sessions() as session:
+        cursor = peek_cursor(session, owner.principal.compute_id, False)
+        assert cursor.phase == "idle"
+        assert cursor.last_job_id is None
+        assert session.get(Job, queued.id).status == "running"
+        assert session.get(Job, expired_id).status == "running"
+        assert session.scalar(select(WorkerExecutionOperation).where(
+            WorkerExecutionOperation.operation_id == operation_id)) is not None
+
+    # Replace the service object to model a remote-only process restart. The
+    # HTTP route constructs its own LeaseService and resumes from stored state.
+    owner.service = LeaseService(owner.platform, "restarted-remote-test", {})
+    settings = replace(
+        owner.platform.settings,
+        execution_tokens={"actual-workload": TOKEN},
+    )
+    app = create_app(settings=settings, platform=owner.platform)
+    pull = next(route.endpoint for route in app.routes
+                if getattr(route, "path", None) == "/internal/execution/v1/pull")
+    body = {"instance_id": owner.instance, "operation_id": operation_id}
+    # Call the installed endpoint itself to exercise its request validation,
+    # reservation service and response projection without TestClient's known
+    # async-loop wait in this environment.
+    reservation = pull(Pull(**body), principal=owner.principal)
+    assert reservation == first_reservation
+    with owner.platform.db.sessions() as session:
+        cursor = peek_cursor(session, owner.principal.compute_id, False)
+        assert cursor.phase == "idle"
+        assert cursor.last_job_id is None
+        assert cursor.covered_through == now
+
+    replay = pull(Pull(**body), principal=owner.principal)
+    assert replay == reservation
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+@pytest.mark.parametrize("compute_case", [
+    "local", "number", "boolean", "object", "array", "missing", "foreign",
+])
+def test_direct_reserve_classifies_unknown_compute_as_local_and_foreign_string_as_other(
+    owner, compute_case, monkeypatch,
+):
+    """Only an explicit foreign JSON string is outside recovery scope."""
+    queued = submit(owner, key=f"compute-classification-queue-{compute_case}")
+    now = owner.clock[0]
+    if compute_case == "local":
+        compute = {"id": owner.principal.compute_id}
+    elif compute_case == "number":
+        compute = {"id": 123}
+    elif compute_case == "boolean":
+        compute = {"id": False}
+    elif compute_case == "object":
+        compute = {"id": {"untrusted": "value"}}
+    elif compute_case == "array":
+        compute = {"id": ["untrusted"]}
+    elif compute_case == "missing":
+        compute = None
+    else:
+        compute = {"id": "another-valid-compute"}
+    resolved = {"model": {"id": "prior-model"}}
+    if compute is not None:
+        resolved["compute"] = compute
+    expired_id = f"a-expired-compute-{compute_case}"
+    with owner.platform.db.sessions.begin() as session:
+        session.add(Job(
+            id=expired_id, receipt=f"receipt-{compute_case}",
+            idempotency_key=f"key-{compute_case}", request_digest="e" * 80,
+            caller=queued.caller, grant_id=queued.grant_id, generation=queued.generation,
+            resolved=resolved, task="synthetic malformed compute owner", status="running",
+            lease_owner="expired-owner", lease_until=now - 1,
+            created_at=now - 100, updated_at=now - 1, attempts=1,
+        ))
+
+    recovery_results = []
+    original_recover = owner.service.recover_expired
+
+    def observe_real_recovery():
+        counts = original_recover()
+        recovery_results.append(counts)
+        return counts
+
+    monkeypatch.setattr(owner.service, "recover_expired", observe_real_recovery)
+    result = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                   operation_id=f"pull-compute-{compute_case}")
+    assert result["state"] == "reserved" and result["job"]["job_id"] == queued.id
+    if compute_case == "foreign":
+        assert recovery_results == []
+        with owner.platform.db.sessions() as session:
+            assert peek_cursor(session, owner.principal.compute_id, False) is None
+    else:
+        assert len(recovery_results) == 1
+        assert recovery_results[0]["examined"] == 1
+        assert recovery_results[0]["invalid"] == 1
+        with owner.platform.db.sessions() as session:
+            assert session.get(Job, expired_id).status == "running"
+            cursor = peek_cursor(session, owner.principal.compute_id, False)
+            assert cursor is not None and cursor.phase == "idle"
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+@pytest.mark.parametrize("duplicate_field", ["phase", "covered_through"])
+def test_duplicate_raw_cursor_keys_fail_closed_in_peek_cas_reaper_and_reserve(
+    owner, duplicate_field,
+):
+    """Duplicate JSON keys remain visible to strict cursor checks on each backend."""
+    queued = submit(owner, key=f"duplicate-cursor-{duplicate_field}")
+    key = cursor_key(owner.principal.compute_id, False)
+    with owner_transaction(owner.platform.db) as session:
+        valid_cursor = read_cursor(session, owner.principal.compute_id, False)
+
+    common = (
+        '{"schema_version":"sovite-recovery-cursor/v2",'
+        f'"compute_id":"{owner.principal.compute_id}",'
+        '"repository_worker_only":false,'
+    )
+    tail = (
+        ',"last_job_id":null,"fair_pointer_job_id":null,'
+        '"forward_upper_id":null,"scan_started_at":null'
+    )
+    if duplicate_field == "phase":
+        raw = common + '"phase":"forward","phase":"idle"' + tail + ',"covered_through":null}'
+        duplicate_key = '"phase"'
+    else:
+        raw = common + '"phase":"idle"' + tail + ',"covered_through":null,"covered_through":0}'
+        duplicate_key = '"covered_through"'
+
+    db = owner.platform.db
+    metadata_table = ("\"platform_metadata\"" if db.schema is None
+                      else f'"{db.schema}"."platform_metadata"')
+    with db.sessions.begin() as session:
+        if db.engine.dialect.name == "postgresql":
+            session.execute(text(
+                f"UPDATE {metadata_table} SET value = CAST(:raw AS JSON) WHERE key = :key"
+            ), {"raw": raw, "key": key})
+        else:
+            session.execute(text(
+                f"UPDATE {metadata_table} SET value = :raw WHERE key = :key"
+            ), {"raw": raw, "key": key})
+
+    with db.sessions() as session:
+        if db.engine.dialect.name == "postgresql":
+            storage_type = session.execute(text(
+                f"SELECT pg_typeof(value)::text FROM {metadata_table} WHERE key = :key"
+            ), {"key": key}).scalar_one()
+            assert storage_type == "json"
+        else:
+            columns = session.execute(text("PRAGMA table_info(platform_metadata)")).mappings().all()
+            storage_type = next(row["type"] for row in columns if row["name"] == "value")
+            assert storage_type.upper() == "JSON"
+        raw_stored = session.execute(text(
+            f"SELECT CAST(value AS TEXT) FROM {metadata_table} WHERE key = :key"
+        ), {"key": key}).scalar_one()
+        assert raw_stored.count(duplicate_key) == 2
+        with pytest.raises(RecoveryCursorUnavailable):
+            peek_cursor(session, owner.principal.compute_id, False)
+
+    with pytest.raises(RecoveryCursorUnavailable):
+        with owner_transaction(db) as session:
+            assert advance_cursor(
+                session, valid_cursor, phase="idle", last_job_id=None,
+                fair_pointer_job_id=None, forward_upper_id=None,
+                scan_started_at=None, covered_through=1.0,
+            )
+
+    with pytest.raises(PlatformError) as sweep_error:
+        owner.service.recover_expired()
+    assert sweep_error.value.code == "owner_unavailable"
+    assert raw_stored not in str(sweep_error.value)
+
+    from test_execution_leases import snapshot
+    before = snapshot(owner.platform)
+    with pytest.raises(PlatformError) as reserve_error:
+        owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                              operation_id=f"pull-{duplicate_field}")
+    assert reserve_error.value.code == "owner_unavailable"
+    assert raw_stored not in str(reserve_error.value)
+    after = snapshot(owner.platform)
+    assert after["jobs"] == before["jobs"]
+    assert after["worker_execution_operations"] == before["worker_execution_operations"]
+    with db.sessions() as session:
+        still_raw = session.execute(text(
+            f"SELECT CAST(value AS TEXT) FROM {metadata_table} WHERE key = :key"
+        ), {"key": key}).scalar_one()
+        assert still_raw.count(duplicate_key) == 2
+    assert queued.status == "queued"

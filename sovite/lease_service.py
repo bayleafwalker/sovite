@@ -30,6 +30,10 @@ class _RecoverySweepIncomplete(RuntimeError):
     """Bounded recovery pass has more candidates."""
 
 
+class _FreshReservationNeedsRecovery(RuntimeError):
+    """Internal transaction boundary before a fresh reservation."""
+
+
 class FinishRefused(RuntimeError):
     """A finish owner decision was unavailable; execution must not be reclassified."""
 
@@ -330,24 +334,43 @@ class LeaseService:
             "fence": lease.fence, "lease_until": lease.lease_until, "task": job.task,
             "recipe": self._agent_http_recipe(job)}}
 
-    def _guard_fresh_reservation(self, session, compute_id):
+    def _recovery_scope(self, session, query, compute_id):
+        """Exclude only an explicitly foreign JSON string; unknown types stay in scope."""
+        value = Job.resolved["compute"]["id"]
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            kind = func.json_type(Job.resolved, "$.compute.id")
+            string_kind = "text"
+        elif dialect == "postgresql":
+            kind = func.json_typeof(value)
+            string_kind = "string"
+        else:
+            raise RuntimeError("unsupported recovery database")
+        return self._eligible_query(query).where(or_(
+            kind.is_(None), kind != string_kind, value.as_string() == compute_id))
+
+    def _guard_fresh_reservation(self, session, compute_id, *, request_recovery=False):
         from .recovery_cursor import peek_cursor
         try:
             cursor = peek_cursor(session, compute_id, self.repository_worker_only)
             if cursor is not None and cursor.phase != "idle":
+                if request_recovery:
+                    raise _FreshReservationNeedsRecovery()
                 _fail("owner_unavailable", 503, "Execution owner state is unavailable")
             now = time.time()
             if cursor is not None and cursor.covered_through is not None and cursor.covered_through > now:
                 _fail("owner_unavailable", 503, "Execution owner state is unavailable")
-            query = self._eligible_query(select(Job.id).where(
-                Job.status == "running", Job.lease_until < now,
-                or_(Job.resolved["compute"]["id"].as_string() == compute_id,
-                    Job.resolved["compute"]["id"].as_string().is_(None))))
-            if cursor is not None and cursor.covered_through is not None:
+            query = self._recovery_scope(session, select(Job.id).where(
+                Job.status == "running", Job.lease_until < now), compute_id)
+            if not request_recovery and cursor is not None and cursor.covered_through is not None:
                 query = query.where(or_(Job.created_at >= cursor.covered_through,
                                         Job.lease_until >= cursor.covered_through))
             if session.execute(query.limit(1)).scalar_one_or_none() is not None:
+                if request_recovery:
+                    raise _FreshReservationNeedsRecovery()
                 _fail("owner_unavailable", 503, "Execution owner state is unavailable")
+        except _FreshReservationNeedsRecovery:
+            raise
         except PlatformError:
             raise
         except Exception:
@@ -355,6 +378,22 @@ class LeaseService:
 
     def reserve(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str,
                 external_profile: str | None = None) -> dict:
+        """Replay a prior reservation or run bounded recovery before a fresh one."""
+        try:
+            return self._reserve_once(principal=principal, instance_id=instance_id,
+                                      operation_id=operation_id, external_profile=external_profile,
+                                      recovery_done=False)
+        except _FreshReservationNeedsRecovery:
+            try:
+                self.recover_expired()
+            except _RecoverySweepIncomplete:
+                raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503) from None
+            return self._reserve_once(principal=principal, instance_id=instance_id,
+                                      operation_id=operation_id, external_profile=external_profile,
+                                      recovery_done=True)
+
+    def _reserve_once(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str,
+                      external_profile: str | None, recovery_done: bool) -> dict:
         """One caller-scoped reservation; no attempt, bearer or execution deadline."""
         _validate_principal(principal); _validate_instance(instance_id); _validate_operation(operation_id)
         if external_profile not in {None, "agent-http-v1"}:
@@ -408,6 +447,8 @@ class LeaseService:
 
             if principal.compute_id != self.platform.settings.compute_id:
                 _fail("execution_scope_denied", 403, "Execution owner scope is not permitted")
+            if not recovery_done:
+                self._guard_fresh_reservation(session, principal.compute_id, request_recovery=True)
 
             candidates = session.scalars(self._eligible_query(select(Job).where(
                 Job.status.in_(("queued", "retry_wait")), Job.next_attempt_at <= now,
@@ -684,13 +725,11 @@ class LeaseService:
             if database.engine.dialect.name == "postgresql":
                 session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CLAIM_LOCK})
 
-        def scoped(query):
-            return self._eligible_query(query).where(or_(
-                Job.resolved["compute"]["id"].as_string() == self.platform.settings.compute_id,
-                Job.resolved["compute"]["id"].as_string().is_(None)))
+        def scoped(session, query):
+            return self._recovery_scope(session, query, self.platform.settings.compute_id)
 
         def eligible_after(session, cursor):
-            statement = scoped(select(Job.id).where(
+            statement = scoped(session, select(Job.id).where(
                 Job.status == "running", Job.lease_until < cursor.scan_started_at))
             if cursor.phase == "forward":
                 if cursor.forward_upper_id is None:
@@ -755,7 +794,7 @@ class LeaseService:
                     if cursor.phase == "idle":
                         initial_cursor = cursor
                         scan_started_at = time.time()
-                        upper = session.execute(scoped(select(func.max(Job.id)))).scalar_one()
+                        upper = session.execute(scoped(session, select(func.max(Job.id)))).scalar_one()
                         cursor = save_cursor(session, cursor, phase="forward", last_job_id=None,
                                              scan_started_at=scan_started_at, forward_upper_id=upper)
                     candidate_id = eligible_after(session, cursor)
@@ -815,7 +854,6 @@ class LeaseService:
         raise _RecoverySweepIncomplete("recovery sweep incomplete")
 
     def claim(self) -> Job | None:
-        self.recover_expired()
         principal = ExecutionPrincipal(self.platform.settings.execution_workload_identity,
                                        self.platform.settings.compute_id)
         instance_id = hashlib.sha256(self.id.encode("utf-8")).hexdigest()
