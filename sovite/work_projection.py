@@ -390,9 +390,8 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
     candidates = {}
     expected_additional = {(item[0], item[1]): item for item in additional_work_calls}
     for scope_id, call_id in calls:
-        candidates[(scope_id, call_id)] = session.execute(select(
-            intent_t.c.work_job_id, intent_t.c.subject_id, intent_t.c.purpose, intent_t.c.policy_revision,
-        ).where(intent_t.c.scope_id == scope_id,
+        candidates[(scope_id, call_id)] = session.execute(select(intent_t).where(
+                intent_t.c.scope_id == scope_id,
                 intent_t.c.call_id == call_id)).mappings().all()
     for (scope_id, _), rows in candidates.items():
         for row in rows:
@@ -400,6 +399,8 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
             if selector is not None and (row["work_job_id"], row["subject_id"], row["purpose"]) != (selector[5], selector[3], selector[4]):
                 raise _WorkProjectionUnavailable()
             if expected_job_id is not None and (row["work_job_id"], row["subject_id"], row["purpose"]) != (expected_job_id, expected_job_id, "work"):
+                raise _WorkProjectionUnavailable()
+            if expected_job_id is not None and type(row["policy_revision"]) is not int:
                 raise _WorkProjectionUnavailable()
             if type(row["policy_revision"]) is int:
                 policies.add((scope_id, row["policy_revision"]))
@@ -524,10 +525,9 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
     for key, expected in candidates.items():
         actual = locked_intents.get(key)
         rows = expected
-        if len(rows) > 1 or (rows and actual is None):
+        if len(rows) > 1 or bool(rows) != (actual is not None):
             raise _WorkProjectionUnavailable()
-        if rows and (actual["work_job_id"], actual["purpose"], actual["policy_revision"]) != (
-                rows[0]["work_job_id"], rows[0]["purpose"], rows[0]["policy_revision"]):
+        if rows and dict(actual) != dict(rows[0]):
             raise _WorkProjectionUnavailable()
         selector = expected_additional.get(key)
         if selector is not None and actual is not None and (

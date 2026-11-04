@@ -812,13 +812,10 @@ class LeaseService:
                     slot_t = tables.get("program_slots")
                     if reservation_t is None or subject_t is None or slot_t is None:
                         raise _HandBackOwnerUnavailable()
-                    work_reservations = session.execute(select(
-                        reservation_t.c.scope_id, reservation_t.c.call_id,
-                        reservation_t.c.subject_id, reservation_t.c.purpose,
-                    ).where(reservation_t.c.subject_id == job_id)).mappings().all()
+                    work_reservations = session.execute(select(reservation_t).where(
+                        reservation_t.c.subject_id == job_id)).mappings().all()
                     joined_slots = session.execute(select(
-                        slot_t.c.scope_id, slot_t.c.slot_id, slot_t.c.call_id,
-                        slot_t.c.subject_id, subject_t.c.purpose.label("subject_purpose"),
+                        slot_t, subject_t.c.purpose.label("subject_purpose"),
                     ).select_from(outerjoin(slot_t, subject_t, and_(
                         slot_t.c.scope_id == subject_t.c.scope_id,
                         slot_t.c.subject_id == subject_t.c.subject_id,
@@ -839,17 +836,14 @@ class LeaseService:
                     legacy_t = tables.get("program_legacy_links")
                     if intent_t is None or legacy_t is None:
                         raise _HandBackOwnerUnavailable()
-                    work_intents = session.execute(select(
-                        intent_t.c.scope_id, intent_t.c.call_id,
-                        intent_t.c.subject_id, intent_t.c.purpose, intent_t.c.work_job_id,
-                        intent_t.c.work_attempt_id,
-                    ).where(or_(
+                    work_intents = session.execute(select(intent_t).where(or_(
                         intent_t.c.work_job_id == job_id,
                         and_(intent_t.c.subject_id == job_id,
                              intent_t.c.purpose == "work"),
                     ))).mappings().all()
                     legacy_links = session.execute(select(legacy_t).where(
-                        legacy_t.c.job_id == job_id)).mappings().all()
+                        or_(legacy_t.c.job_id == job_id,
+                            legacy_t.c.subject_id == job_id))).mappings().all()
                     if any(row["purpose"] != "work" or row["subject_id"] != job_id
                            or row["work_job_id"] != job_id
                            or type(row["work_attempt_id"]) is not str for row in work_intents):
@@ -859,11 +853,7 @@ class LeaseService:
                     binding_t = tables.get("program_work_projection_bindings")
                     if binding_t is None:
                         raise _HandBackOwnerUnavailable()
-                    work_bindings = session.execute(select(
-                        binding_t.c.scope_id, binding_t.c.call_id,
-                        binding_t.c.work_job_id, binding_t.c.subject_id,
-                        binding_t.c.purpose, binding_t.c.attempt_id,
-                    ).where(or_(
+                    work_bindings = session.execute(select(binding_t).where(or_(
                         binding_t.c.work_job_id == job_id,
                         and_(binding_t.c.subject_id == job_id,
                              binding_t.c.purpose == "work"),
@@ -974,6 +964,15 @@ class LeaseService:
                             or binding_current != current_keys or intent_current != current_keys):
                         raise _HandBackOwnerUnavailable()
 
+                def snapshot_rows(rows):
+                    return tuple(sorted((dict(item) for item in rows), key=lambda item: repr(sorted(item.items()))))
+
+                reservation_snapshot = snapshot_rows(work_reservations)
+                slot_snapshot = snapshot_rows(work_slots)
+                intent_snapshot = snapshot_rows(work_intents)
+                binding_snapshot = snapshot_rows(work_bindings)
+                legacy_snapshot = snapshot_rows(legacy_links)
+
                 if projections_all or legacy_batch_keys:
                     try:
                         lock_work_projection_set(session, projections_all,
@@ -982,11 +981,44 @@ class LeaseService:
                             include_bindings=schema_version >= 10)
                     except Exception:
                         raise _HandBackOwnerUnavailable() from None
-                    if legacy_links:
-                        reread_legacy = session.execute(select(legacy_t).where(
-                            legacy_t.c.job_id == job_id)).mappings().all()
-                        if reread_legacy != legacy_links:
-                            raise _HandBackOwnerUnavailable()
+                if schema_version >= 8:
+                    fresh_reservations = session.execute(select(reservation_t).where(
+                        reservation_t.c.subject_id == job_id)).mappings().all()
+                    if any(item["purpose"] not in {"work", "collection"} for item in fresh_reservations):
+                        raise _HandBackOwnerUnavailable()
+                    fresh_reservations = [item for item in fresh_reservations if item["purpose"] == "work"]
+                    fresh_slots = session.execute(select(
+                        slot_t, subject_t.c.purpose.label("subject_purpose"),
+                    ).select_from(outerjoin(slot_t, subject_t, and_(
+                        slot_t.c.scope_id == subject_t.c.scope_id,
+                        slot_t.c.subject_id == subject_t.c.subject_id,
+                    ))).where(slot_t.c.subject_id == job_id)).mappings().all()
+                    if any(item["subject_purpose"] not in {"work", "collection"} for item in fresh_slots):
+                        raise _HandBackOwnerUnavailable()
+                    fresh_slots = [item for item in fresh_slots if item["subject_purpose"] == "work"]
+                    if (snapshot_rows(fresh_reservations) != reservation_snapshot
+                            or snapshot_rows(fresh_slots) != slot_snapshot):
+                        raise _HandBackOwnerUnavailable()
+                if schema_version >= 9:
+                    fresh_intents = session.execute(select(intent_t).where(or_(
+                        intent_t.c.work_job_id == job_id,
+                        and_(intent_t.c.subject_id == job_id,
+                             intent_t.c.purpose == "work"),
+                    ))).mappings().all()
+                    fresh_legacy = session.execute(select(legacy_t).where(
+                        or_(legacy_t.c.job_id == job_id,
+                            legacy_t.c.subject_id == job_id))).mappings().all()
+                    if (snapshot_rows(fresh_intents) != intent_snapshot
+                            or snapshot_rows(fresh_legacy) != legacy_snapshot):
+                        raise _HandBackOwnerUnavailable()
+                if schema_version >= 10:
+                    fresh_bindings = session.execute(select(binding_t).where(or_(
+                        binding_t.c.work_job_id == job_id,
+                        and_(binding_t.c.subject_id == job_id,
+                             binding_t.c.purpose == "work"),
+                    ))).mappings().all()
+                    if snapshot_rows(fresh_bindings) != binding_snapshot:
+                        raise _HandBackOwnerUnavailable()
 
                 row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
                 lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
@@ -1022,8 +1054,7 @@ class LeaseService:
                     registry_t = tables["program_subject_registry"]
                     reservation_t = tables["program_reservations"]
                     slot_t = tables["program_slots"]
-                    attempt_suffix = int(current_attempt.rsplit("-", 1)[1]) if current_attempt else None
-                    if run is None or attempt_suffix is None:
+                    if run is None or current_attempt is None:
                         raise _HandBackOwnerUnavailable()
                     source_attempts = run.get("attempts")
                     source_reservations = run.get("budget_reservations")
@@ -1039,7 +1070,22 @@ class LeaseService:
                             or len(source_slots) != len(set(source_slots))):
                         raise _HandBackOwnerUnavailable()
                     attempt_map = {item["id"]: item for item in source_attempts}
+                    attempt_positions = {item["id"]: index for index, item in enumerate(source_attempts)}
                     reservation_map = {item["call_id"]: item for item in source_reservations}
+                    current_call_ids = {(item.scope_id, item.call_id) for item in current}
+                    current_slot_ids = {(item.scope_id, item.slot_id) for item in current}
+                    current_call_ids.update((row["scope_id"], row["call_id"]) for row in work_intents
+                                            if row["work_attempt_id"] == current_attempt)
+                    current_call_ids.update((row["scope_id"], row["call_id"]) for row in work_bindings
+                                            if row["attempt_id"] == current_attempt)
+                    current_slot_ids.update((row["scope_id"], row["slot_id"]) for row in work_bindings
+                                            if row["attempt_id"] == current_attempt)
+                    current_source_call_ids, current_source_slot_ids = set(), set()
+                    for source_reservation in source_reservations:
+                        if source_reservation.get("attempt_id") == current_attempt:
+                            current_source_call_ids.add(source_reservation["call_id"])
+                            if type(source_reservation.get("slot_id")) is str:
+                                current_source_slot_ids.add(source_reservation["slot_id"])
                     source_keys, source_call_keys, source_slot_keys, target_calls, target_slots = set(), set(), set(), set(), set()
                     for batch_key in sorted(legacy_batch_keys):
                         batch = session.execute(select(batch_t).where(
@@ -1049,14 +1095,42 @@ class LeaseService:
                         links.sort(key=lambda item: item["link_id"].encode("utf-8"))
                         if (batch is None or batch["state"] != "complete"
                                 or type(batch["source_count"]) is not int or batch["source_count"] != len(links)
-                                or batch["mapped_count"] != batch["source_count"] or batch["unmatched_count"] != 0
-                                or batch["policy_revision"] <= 0 or type(batch["snapshot_digest"]) is not str
+                                or type(batch["mapped_count"]) is not int or batch["mapped_count"] != batch["source_count"]
+                                or type(batch["unmatched_count"]) is not int or batch["unmatched_count"] != 0
+                                or type(batch["policy_revision"]) is not int or batch["policy_revision"] <= 0
+                                or not _is_lower_hex(batch["policy_digest"], 64)
+                                or not _is_lower_hex(batch["census_generation"], 32)
+                                or not _is_lower_hex(batch["snapshot_digest"], 64)
+                                or not _is_lower_hex(batch["fence_digest"], 64)
+                                or type(batch["owner_epoch"]) is not int or batch["owner_epoch"] < 0
                                 or digest([_baseline_payload(item) for item in links]) != batch["snapshot_digest"]):
                             raise _HandBackOwnerUnavailable()
                         policy = session.execute(select(policy_t).where(
                             policy_t.c.scope_id == batch_key[0],
                             policy_t.c.revision == batch["policy_revision"])).mappings().one_or_none()
                         if policy is None or policy["policy_digest"] != batch["policy_digest"]:
+                            raise _HandBackOwnerUnavailable()
+                        gate = session.execute(select(tables["program_gate_state"]).where(
+                            tables["program_gate_state"].c.scope_id == batch_key[0])).mappings().one_or_none()
+                        if (gate is None or gate["mode"] not in {"disabled", "census", "active", "inhibited"}
+                                or type(gate["policy_revision"]) is not int or gate["policy_revision"] <= 0
+                                or not _is_lower_hex(gate["policy_digest"], 64)):
+                            raise _HandBackOwnerUnavailable()
+                        cutover = (gate["cutover_batch_id"], gate["cutover_digest"], gate["cutover_generation"],
+                                   gate["cutover_fence_digest"], gate["cutover_owner_epoch"])
+                        if any(value is None for value in cutover) and any(value is not None for value in cutover):
+                            raise _HandBackOwnerUnavailable()
+                        if cutover[0] is not None and (not _is_lower_hex(cutover[1], 64)
+                                or not _is_lower_hex(cutover[2], 32) or not _is_lower_hex(cutover[3], 64)
+                                or type(cutover[4]) is not int or cutover[4] < 0):
+                            raise _HandBackOwnerUnavailable()
+                        if cutover[0] == batch_key[1] and (
+                                gate["policy_revision"] != batch["policy_revision"]
+                                or gate["policy_digest"] != batch["policy_digest"]
+                                or cutover[1] != batch["snapshot_digest"]
+                                or cutover[2] != batch["census_generation"]
+                                or cutover[3] != batch["fence_digest"]
+                                or cutover[4] != batch["owner_epoch"]):
                             raise _HandBackOwnerUnavailable()
                         totals = {name: 0 for name in ("reserved_usd_micro", "settled_usd_micro", "unknown_usd_micro",
                             "reserved_allowance_micro", "settled_allowance_micro", "unknown_allowance_micro", "held_slots", "unknown_slots")}
@@ -1115,9 +1189,15 @@ class LeaseService:
                                     or source_reservation.get("slot_id") != link["original_slot_id"]
                                     or source_attempt.get("state") not in {"preparing", "running", "awaiting_activation", "interrupted", "uncertain", "failed", "cancelled", "completed", "settled"}
                                     or link["original_attempt_id"] == current_attempt
-                                    or not link["original_attempt_id"].startswith(job_id + "-")
-                                    or int(link["original_attempt_id"].rsplit("-", 1)[1]) >= attempt_suffix
+                                    or attempt_positions.get(link["original_attempt_id"], len(attempt_positions))
+                                    >= attempt_positions[current_attempt]
                                     or source_slots.count(link["original_slot_id"]) != 1
+                                    or any(call == link["original_call_id"] for _, call in current_call_ids)
+                                    or any(slot_id == link["original_slot_id"] for _, slot_id in current_slot_ids)
+                                    or link["original_call_id"] in current_source_call_ids
+                                    or link["original_slot_id"] in current_source_slot_ids
+                                    or (link["scope_id"], link["call_id"]) in current_call_ids
+                                    or (link["scope_id"], link["slot_id"]) in current_slot_ids
                                     or (link["scope_id"], link["call_id"]) in {
                                         (projection.scope_id, projection.call_id) for projection in current
                                     } or (link["scope_id"], link["slot_id"], link["call_id"]) in {
