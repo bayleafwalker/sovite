@@ -1492,7 +1492,12 @@ class LeaseService:
                     if (not self._eligible_job(row) or row.status != "running"
                             or row.lease_owner != self.id):
                         raise _HandBackOwnerUnavailable()
+                    awaiting_activation_persist_failure = False
                     if run is not None and not preappend_finish:
+                        if cancelled and not row.cancel_requested:
+                            # A Worker cancellation hint is not authority on its
+                            # own; repository cleanup needs persisted intent.
+                            raise _HandBackOwnerUnavailable()
                         if current_attempt_row is None or current_attempt is None:
                             raise _HandBackOwnerUnavailable()
                         fence_digest = hashlib.sha256(fence.encode("utf-8")).hexdigest()
@@ -1519,8 +1524,10 @@ class LeaseService:
                             # The executor persisted the native activation
                             # descriptor but a later pre-entry persistence
                             # failure prevented its terminal marker. Preserve
-                            # the original error only for this exact attempt.
+                            # the original error only for this exact attempt;
+                            # this state does not authorize replay.
                             accepted_attempt_states = frozenset({"awaiting_activation"})
+                            awaiting_activation_persist_failure = True
                         elif (error is not None and error.code == "execution_timeout"
                               and artifact is None and not cancelled
                               and not execution_completed and not row.cancel_requested
@@ -1610,9 +1617,8 @@ class LeaseService:
                     if explicit_uncertainty or unresolved_work:
                         row.status, row.error_code = "blocked", "execution_uncertain"
                     elif cancelled or row.cancel_requested:
-                        # A persisted caller cancellation may retire a live lease
-                        # after Work currentness alone was revoked. Other role or
-                        # owner denials still prevent a cancellation outcome.
+                        # Only persisted caller intent may close as cancelled.
+                        # The preappend path has already proved empty history.
                         if denied and denied != "repository_currentness_revoked":
                             row.status, row.error_code = "blocked", denied
                         else:
@@ -1623,6 +1629,11 @@ class LeaseService:
                         # Do not replay a repository effect because storing its
                         # completed result failed; this outcome preserves the
                         # storage error without granting retry authority.
+                        row.status, row.error_code = "blocked", error.code
+                    elif awaiting_activation_persist_failure:
+                        # Retained activation metadata is not evidence that
+                        # retrying the repository run is safe, even when the
+                        # grant normally queues retryable failures.
                         row.status, row.error_code = "blocked", error.code
                     elif artifact is not None:
                         row.status, row.error_code = "completed", None

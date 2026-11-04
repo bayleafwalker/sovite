@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from sovite import api
-from sovite.db import Job
+from sovite.db import Base,Job
+from sovite.lease_service import FinishRefused
 from sovite.repository_currentness import CurrentnessError,FIELD,SCHEMA
 from sovite.repository_runs import canonical_packet_digest
 from sovite.service import PlatformError
@@ -225,6 +226,27 @@ def test_cancelled_started_worker_can_record_cleanup_after_work_revocation(guard
     assert row.public_projection is None and row.released_at is None
     with platform.db.sessions() as session:
         assert session.get(WorkerExecutionLease,claimed.id).phase=='finished'
+
+
+def test_work_revocation_without_cancel_intent_refuses_finish_without_mutation(guarded):
+    _,platform,guard,owner,value=guarded
+    result=submit(owner,value)
+    worker=Worker(platform,repository_run_executor=object())
+    claimed=worker.claim();assert claimed is not None and claimed.id==result['id']
+    guard.current=False
+    with platform.db.engine.connect() as connection:
+        before={table.name:[dict(row) for row in connection.execute(
+            select(table).order_by(*table.primary_key.columns)).mappings()]
+            for table in Base.metadata.sorted_tables}
+
+    with pytest.raises(FinishRefused):
+        worker.finish(claimed.id,cancelled=True,fence=claimed.execution_fence)
+
+    with platform.db.engine.connect() as connection:
+        after={table.name:[dict(row) for row in connection.execute(
+            select(table).order_by(*table.primary_key.columns)).mappings()]
+            for table in Base.metadata.sorted_tables}
+    assert after==before
 
 
 def test_historical_candidate_data_uses_current_data_grant_without_work_activity(prepared):

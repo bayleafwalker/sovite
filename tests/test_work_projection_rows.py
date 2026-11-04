@@ -2243,11 +2243,37 @@ def test_finish_preserves_awaiting_activation_persist_error_with_valid_metadata(
         lease = session.execute(select(Base.metadata.tables["worker_execution_leases"])).mappings().one()
         gate = session.execute(select(Base.metadata.tables["program_gate_state"])).mappings().one()
         reservation = session.execute(select(Base.metadata.tables["program_reservations"])).mappings().one()
-        assert (job.status, job.error_code) == ("failed", "fixture_persist_refused")
+        assert (job.status, job.error_code) == ("blocked", "fixture_persist_refused")
         assert job.resolved["repository_run"]["attempts"][-1]["state"] == "awaiting_activation"
         assert job.artifact_key is None and job.public_projection is None and job.released_at is None
         assert lease["phase"] == "finished"
         assert gate["mode"] == "disabled" and reservation["state"] == "settled"
+
+
+def test_finish_does_not_retry_awaiting_activation_persist_error(work_rows):
+    db, _, _, _ = work_rows
+    _seed_hand_back_known_receipt(work_rows, actual_usd="0", actual_allowance="0")
+    _set_native_awaiting_activation(db)
+    with db.sessions.begin() as session:
+        job = session.get(Job, "job")
+        prior_next_attempt_at = job.next_attempt_at
+        resolved = json.loads(json.dumps(job.resolved))
+        resolved["grant"] = {"on_outage": "queue", "max_attempts": 4}
+        resolved["tools"] = []
+        job.resolved = resolved
+
+    assert _finish_service(db).finish(
+        "job", error=RuntimeFailure("storage_adapter_failure", retryable=True),
+        fence="2" * 32) is True
+
+    with db.sessions() as session:
+        job = session.get(Job, "job")
+        lease = session.execute(select(Base.metadata.tables["worker_execution_leases"])).mappings().one()
+        assert (job.status, job.error_code) == ("blocked", "storage_adapter_failure")
+        assert job.next_attempt_at == prior_next_attempt_at
+        assert job.artifact_key is None and job.public_projection is None and job.released_at is None
+        assert job.resolved["repository_run"]["attempts"][-1]["state"] == "awaiting_activation"
+        assert lease["phase"] == "finished"
 
 
 def test_finish_holds_unresolved_work_after_awaiting_activation_persist_error(work_rows):
