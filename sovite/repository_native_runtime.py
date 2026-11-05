@@ -11,6 +11,7 @@ import hashlib
 import hmac
 from http import HTTPStatus
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -38,6 +39,29 @@ LUNA_CATALOG_SHA256='5d7ca9ab43074f4cc7dce5f350bff68912cedfb6c4426e2bd4037320637
 def need(value, code='native_runtime_unavailable'):
     if not value:
         raise RuntimeFailure(code)
+
+
+def _protocol_object(raw):
+    """Decode a bounded protocol frame without ambiguous object members."""
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate member")
+            result[key] = value
+        return result
+    def finite_float(value):
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("nonfinite")
+        return result
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_pairs, parse_float=finite_float,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise RuntimeFailure('native_executor_protocol_error') from None
+    need(type(value) is dict, 'native_executor_protocol_error')
+    return value
 
 
 def install_model_catalog(home,model):
@@ -186,7 +210,7 @@ class ExecutorRelay:
                     need(raw and len(raw) <= FRAME_LIMIT and b'\n' not in raw,
                          'native_executor_protocol_error')
                     # Validate framing without interpreting commands or paths.
-                    need(type(json.loads(raw)) is dict, 'native_executor_protocol_error')
+                    _protocol_object(raw)
                     self.process.stdin.write(raw + b'\n')
                     await self.process.stdin.drain()
             async def outgoing():
@@ -194,7 +218,7 @@ class ExecutorRelay:
                     self.check()
                     need(raw.endswith(b'\n') and len(raw) <= FRAME_LIMIT,
                          'native_executor_protocol_error')
-                    need(type(json.loads(raw)) is dict, 'native_executor_protocol_error')
+                    _protocol_object(raw)
                     await connection.send(raw[:-1].decode('utf-8'))
             operations = [asyncio.create_task(incoming()), asyncio.create_task(outgoing())]
             async with asyncio.timeout(max(0.001, self.deadline-time.time())):
@@ -354,8 +378,7 @@ class NativeAppServer:
         raw = await asyncio.wait_for(self.process.stdout.readline(),max(0.001,self.deadline-time.time()))
         need(raw,'native_supervisor_unavailable')
         need(raw.endswith(b'\n') and len(raw) <= FRAME_LIMIT, 'native_executor_protocol_error')
-        value = json.loads(raw)
-        need(type(value) is dict, 'native_executor_protocol_error')
+        value = _protocol_object(raw)
         self.check()
         if value.get('method') == 'turn/completed':
             turn = value.get('params',{}).get('turn',{})
