@@ -695,8 +695,66 @@ class LeaseService:
                 candidate_query = self._recovery_scope(session, candidate_query, principal.compute_id)
             else:
                 candidate_query = self._recovery_scope(session, candidate_query, principal.compute_id)
-            candidates = session.scalars(candidate_query.order_by(
-                Job.created_at, Job.id).limit(100).with_for_update(skip_locked=True)).all()
+            # Local worker classes share durable bounded scan progress. A retry
+            # of an idle operation returns its journal before touching this cursor.
+            # The external profile retains its existing denial/no-write contract.
+            cursor_row = None
+            cursor_value = None
+            cursor_key = None
+            if external_profile is None:
+                scope = {"compute_id": principal.compute_id,
+                         "repository_worker_only": self.repository_worker_only,
+                         "repository_run_profile": self.repository_run_profile}
+                cursor_key = "dispatch_fair:" + hashlib.sha256(
+                    json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:48]
+                cursor_record = session.execute(select(cast(MetadataRow.__table__.c.value, Text)).where(
+                    MetadataRow.key == cursor_key).with_for_update()).one_or_none()
+                if cursor_record is not None:
+                    raw_cursor = cursor_record[0]
+                    def unique_pairs(pairs):
+                        result = {}
+                        for key, value in pairs:
+                            if key in result:
+                                raise ValueError("duplicate cursor key")
+                            result[key] = value
+                        return result
+                    try:
+                        cursor_value = json.loads(raw_cursor, object_pairs_hook=unique_pairs,
+                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite cursor")))
+                    except (TypeError, ValueError, RecursionError):
+                        _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
+                    if (type(cursor_value) is not dict or set(cursor_value) != {"schema", "scope", "created_at", "id"}
+                            or cursor_value["schema"] != "sovite-dispatch-fair/v1" or cursor_value["scope"] != scope
+                            or type(cursor_value["created_at"]) not in (int, float)
+                            or not math.isfinite(cursor_value["created_at"])
+                            or type(cursor_value["id"]) is not str or not 1 <= len(cursor_value["id"]) <= 64):
+                        _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
+                    cursor_row = session.get(MetadataRow, cursor_key)
+            def save_progress(job):
+                nonlocal cursor_row
+                if cursor_key is None:
+                    return
+                if (type(job.created_at) not in (int, float) or not math.isfinite(job.created_at)
+                        or type(job.id) is not str or not 1 <= len(job.id) <= 64):
+                    _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
+                value = {"schema": "sovite-dispatch-fair/v1", "scope": scope,
+                         "created_at": job.created_at, "id": job.id}
+                if cursor_row is None:
+                    cursor_row = MetadataRow(key=cursor_key, value=value)
+                    session.add(cursor_row)
+                else:
+                    cursor_row.value = value
+            ordered = candidate_query.order_by(Job.created_at, Job.id)
+            if cursor_value is None:
+                candidates = session.scalars(ordered.limit(100).with_for_update(skip_locked=True)).all()
+            else:
+                stamp, identifier = cursor_value["created_at"], cursor_value["id"]
+                after = or_(Job.created_at > stamp, and_(Job.created_at == stamp, Job.id > identifier))
+                before = or_(Job.created_at < stamp, and_(Job.created_at == stamp, Job.id <= identifier))
+                candidates = session.scalars(ordered.where(after).limit(100).with_for_update(skip_locked=True)).all()
+                if len(candidates) < 100:
+                    candidates.extend(session.scalars(ordered.where(before).limit(
+                        100 - len(candidates)).with_for_update(skip_locked=True)).all())
             # Candidate row locks can wait too; base each new reservation on
             # owner time observed after those locks have been acquired.
             now = time.time()
@@ -790,9 +848,15 @@ class LeaseService:
                     "task_sha256": task_hash, "resolved_sha256": resolved_hash}, created_at=now, updated_at=now))
                 self.platform.db.audit(session, self.id, "task.execution_reserved", job.id,
                     {"generation": job.generation, "fence": fence, "workload_id": principal.workload_id, "instance_id": instance_id})
+                save_progress(job)
                 return copy.deepcopy(response)
             if incompatible_profile_job:
                 _fail("execution_profile_unavailable", 409, "Execution profile is not available to this worker")
+            if cursor_key is not None:
+                if len(candidates) == 100:
+                    save_progress(candidates[-1])
+                elif cursor_row is not None:
+                    session.delete(cursor_row)
             idle = {"state": "idle"}
             session.add(WorkerExecutionOperation(workload_id=principal.workload_id, instance_id=instance_id,
                 operation_id=operation_id, operation_kind="pull", request_digest=request_digest,
