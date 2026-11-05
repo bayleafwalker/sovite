@@ -249,8 +249,23 @@ class _WorkProjectionUnavailable(RuntimeError):
         super().__init__("Work projection is unavailable for canonical-row comparison")
 
 
+class _WorkProjectionBusy(_WorkProjectionUnavailable):
+    """A recovery candidate's exact Job or lease row was skipped as locked."""
+
+
+class _WorkProjectionOperationFailure(RuntimeError):
+    """A redacted unexpected failure that recovery must treat as global."""
+
+    def __init__(self):
+        super().__init__("Work projection operation failed")
+
+
 _CANONICAL_ROWS_AGREE = "canonical_rows_agree"
 _BINDING_TABLE = "program_work_projection_bindings"
+_RECOVERY_ATTEMPT_STATES = frozenset({
+    "preparing", "awaiting_activation", "running", "interrupted", "uncertain",
+    "completed", "ineligible", "failed", "cancelled", "activation_cancelled",
+})
 _BINDING_COLUMNS = frozenset({
     "scope_id", "call_id", "subject_id", "work_job_id", "attempt_id", "slot_id",
     "purpose", "policy_revision", "policy_digest", "projection_revision",
@@ -348,7 +363,8 @@ def work_projections_from_job(raw: Any, *, allow_absent: bool = False) -> tuple[
 
 def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...], *,
                              additional_work_calls=(), legacy_batch_keys=(),
-                             expected_job_id=None, include_bindings=True) -> None:
+                             expected_job_id=None, include_bindings=True,
+                             nonblocking_owner_ids=(), allow_missing_owner_lease=False) -> None:
     """Prelock a multi-call Work projection set by global row class order.
 
     Per-call comparison below may repeat SELECT FOR UPDATE queries, but those
@@ -365,7 +381,16 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
     tables = Base.metadata.tables
     additional_work_calls = tuple(additional_work_calls)
     legacy_batch_keys = tuple(legacy_batch_keys)
-    if not projections and not additional_work_calls and not legacy_batch_keys:
+    nonblocking_owner_ids = frozenset(nonblocking_owner_ids)
+    if (type(allow_missing_owner_lease) is not bool or
+            (allow_missing_owner_lease and (not nonblocking_owner_ids or projections
+                                            or additional_work_calls or legacy_batch_keys))):
+        raise _WorkProjectionUnavailable()
+    if (any(type(value) is not str or not value for value in nonblocking_owner_ids)
+            or nonblocking_owner_ids and len(nonblocking_owner_ids) != 1):
+        raise _WorkProjectionUnavailable()
+    if (not projections and not additional_work_calls and not legacy_batch_keys
+            and not nonblocking_owner_ids):
         return
     if any(len(item) != 6 or item[4] != "work" or
            any(type(item[i]) is not str or not item[i] for i in (0, 1, 2, 3, 5))
@@ -405,6 +430,15 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
             if type(row["policy_revision"]) is int:
                 policies.add((scope_id, row["policy_revision"]))
 
+    if nonblocking_owner_ids:
+        discovered_job_ids = {item.work_job_id for item in projections}
+        discovered_job_ids.update(item[5] for item in additional_work_calls)
+        for rows in candidates.values():
+            discovered_job_ids.update(row["work_job_id"] for row in rows
+                                      if type(row["work_job_id"]) is str)
+        if discovered_job_ids - nonblocking_owner_ids:
+            raise _WorkProjectionUnavailable()
+
     batch_t = tables.get("program_census_batches")
     batch_discovered, batch_links_discovered = {}, {}
     if legacy_batch_keys:
@@ -428,13 +462,18 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
     def key_order(key):
         return tuple(value.encode("utf-8") if type(value) is str else value for value in key)
 
-    def lock_keys(table, columns, keys):
+    def lock_keys(table, columns, keys, *, skip_locked=False):
         locked = {}
         for key in sorted(set(keys), key=key_order):
             predicate = and_(*(column == value for column, value in zip(columns, key)))
-            rows = session.execute(select(table).where(predicate).with_for_update()).mappings().all()
+            rows = session.execute(select(table).where(predicate).with_for_update(
+                skip_locked=skip_locked)).mappings().all()
             if len(rows) > 1:
                 raise _WorkProjectionUnavailable()
+            if skip_locked and not rows:
+                present = session.execute(select(columns[0]).where(predicate)).first()
+                if present is not None:
+                    raise _WorkProjectionBusy()
             locked[key] = rows[0] if rows else None
         return locked
 
@@ -482,13 +521,26 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
                 registry_keys.add((scope_id, canonical_job, "work"))
                 subject_keys.add((scope_id, canonical_job))
                 job_ids.add(canonical_job)
+    job_ids.update(nonblocking_owner_ids)
     lock_keys(registry_t, (registry_t.c.scope_id, registry_t.c.subject_id, registry_t.c.purpose),
               registry_keys)
     lock_keys(subject_t, (subject_t.c.scope_id, subject_t.c.subject_id), subject_keys)
 
     job_ids = sorted(job_ids, key=lambda value: value.encode("utf-8"))
-    lock_keys(job_t, (job_t.c.id,), ((job_id,) for job_id in job_ids))
-    lock_keys(lease_t, (lease_t.c.job_id,), ((job_id,) for job_id in job_ids))
+    owner_job_ids = set(job_ids) & nonblocking_owner_ids
+    if nonblocking_owner_ids and set(job_ids) != nonblocking_owner_ids:
+        # Recovery's nonblocking mode owns exactly its candidate Job. Any
+        # wider owner selector would violate the one-candidate lock boundary.
+        raise _WorkProjectionUnavailable()
+    locked_jobs = lock_keys(job_t, (job_t.c.id,), ((job_id,) for job_id in job_ids),
+                            skip_locked=bool(owner_job_ids))
+    if owner_job_ids and any(locked_jobs.get((job_id,)) is None for job_id in owner_job_ids):
+        raise _WorkProjectionUnavailable()
+    locked_leases = lock_keys(lease_t, (lease_t.c.job_id,), ((job_id,) for job_id in job_ids),
+                              skip_locked=bool(owner_job_ids))
+    if (owner_job_ids and not allow_missing_owner_lease
+            and any(locked_leases.get((job_id,)) is None for job_id in owner_job_ids)):
+        raise _WorkProjectionUnavailable()
 
     lock_keys(reservation_t, (reservation_t.c.scope_id, reservation_t.c.call_id), calls)
 
@@ -577,7 +629,9 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
                          allow_cancel_requested: bool = False,
                          allow_interrupted_attempt: bool = False,
                          allow_preentry_cancelled_attempt: bool = False,
-                         finish_attempt_states: frozenset[str] | None = None) -> str:
+                         finish_attempt_states: frozenset[str] | None = None,
+                         recovery_attempt_states: frozenset[str] | None = None,
+                         recovery_expected_owner: str | None = None) -> str:
     """Implementation for the private owner-transaction-only comparator."""
     from sqlalchemy import MetaData, Table, and_, cast, func, inspect, or_, select, Text, LargeBinary
 
@@ -585,6 +639,7 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
     from .db import Base, digest
     from .lease_service import execution_owner_key
 
+    recovery_mode = recovery_attempt_states is not None or recovery_expected_owner is not None
     if not _owner_transaction_is_active(session):
         raise _WorkProjectionUnavailable()
     if (not _projection_id(scope_id) or not _projection_id(call_id)
@@ -762,6 +817,17 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
     lease_until = lease["lease_until"]
     deadline = lease["execution_deadline"]
     job_lease_until = job["lease_until"]
+    recovery_mode = recovery_attempt_states is not None or recovery_expected_owner is not None
+    if recovery_mode and (
+            type(recovery_attempt_states) is not frozenset
+            or not recovery_attempt_states
+            or not recovery_attempt_states <= _RECOVERY_ATTEMPT_STATES
+            or type(recovery_expected_owner) is not str
+            or not recovery_expected_owner
+            or len(recovery_expected_owner) > 96
+            or "\x00" in recovery_expected_owner
+            or finish_attempt_states is not None):
+        raise _WorkProjectionUnavailable()
     if (job["status"] != "running"
             or bool(job["cancel_requested"]) and not allow_cancel_requested
             or lease["phase"] != "started" or lease["generation"] != job["generation"]
@@ -771,8 +837,9 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
             or type(lease_until) not in (int, float) or not math.isfinite(lease_until)
             or type(deadline) not in (int, float) or not math.isfinite(deadline)
             or job_lease_until != lease_until
-            or job["lease_owner"] != execution_owner_key(
-                workload_id=lease["workload_id"], instance_id=lease["instance_id"])
+            or (job["lease_owner"] != recovery_expected_owner if recovery_mode else
+                job["lease_owner"] != execution_owner_key(
+                    workload_id=lease["workload_id"], instance_id=lease["instance_id"]))
             or min(lease_until, deadline) * 1000 < int(intent["valid_until_ms"])):
         raise _WorkProjectionUnavailable()
     fence_digest = hashlib.sha256(lease["fence"].encode("utf-8")).hexdigest()
@@ -803,8 +870,14 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
                  or not finish_attempt_states
                  or not finish_attempt_states <= known_finish_states)):
         raise _WorkProjectionUnavailable()
+    if (recovery_attempt_states is not None
+            and (type(recovery_attempt_states) is not frozenset
+                 or not recovery_attempt_states
+                 or not recovery_attempt_states <= _RECOVERY_ATTEMPT_STATES)):
+        raise _WorkProjectionUnavailable()
     if (len(matching) != 1 or attempts[-1] is not matching[0]
-            or not (attempt_state in finish_attempt_states if finish_attempt_states is not None
+            or not (attempt_state in recovery_attempt_states if recovery_mode else
+                    attempt_state in finish_attempt_states if finish_attempt_states is not None
                     else attempt_state in active_attempt_states or hand_back_attempt_state)
             or matching[0].get("fence_sha256") != fence_digest
             or expected_lease_digest != projection.lease_digest
@@ -847,6 +920,8 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
                                receipt_t.c.call_id == call_id,
                                order=(receipt_t.c.receipt_id,))
     except Exception:
+        if recovery_mode:
+            raise _WorkProjectionOperationFailure() from None
         raise _WorkProjectionUnavailable() from None
     if len(receipts) > 1:
         raise _WorkProjectionUnavailable()
@@ -912,6 +987,8 @@ def _compare_actual_rows(session, *, scope_id: str, call_id: str,
         binding_t = Table(_BINDING_TABLE, MetaData(), schema=binding_schema,
                           autoload_with=connection)
     except Exception:
+        if recovery_mode:
+            raise _WorkProjectionOperationFailure() from None
         raise _WorkProjectionUnavailable() from None
     if (set(binding_t.c.keys()) != _BINDING_COLUMNS
             or [column.name for column in binding_t.primary_key.columns] != ["scope_id", "call_id"]):
@@ -975,7 +1052,9 @@ def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
                                     allow_cancel_requested: bool = False,
                                     allow_interrupted_attempt: bool = False,
                                     allow_preentry_cancelled_attempt: bool = False,
-                                    finish_attempt_states: frozenset[str] | None = None) -> str:
+                                    finish_attempt_states: frozenset[str] | None = None,
+                                    recovery_attempt_states: frozenset[str] | None = None,
+                                    recovery_expected_owner: str | None = None) -> str:
     """Compare one actual Work call within an existing owner transaction.
 
     This private comparator accepts selectors, never caller-provided rows or
@@ -984,16 +1063,27 @@ def _compare_actual_work_projection(session, *, scope_id: str, call_id: str,
     that a receipt is genuine. In particular, this does not establish that all
     database writers use the owner lock boundary. It requires a running Job and
     started lease; it does not compare or authorize legacy display consumers.
+    Recovery mode is opt-in and compares the exact stored Job owner snapshot
+    plus a finite persisted attempt-state set. It does not make that owner a
+    caller or require the expired lease to be live; recovery validates final
+    expiry and identity separately after the full closure is locked.
     """
+    recovery_mode = recovery_attempt_states is not None or recovery_expected_owner is not None
     try:
         return _compare_actual_rows(session, scope_id=scope_id, call_id=call_id,
                                     allow_cancel_requested=allow_cancel_requested,
                                     allow_interrupted_attempt=allow_interrupted_attempt,
                                     allow_preentry_cancelled_attempt=allow_preentry_cancelled_attempt,
-                                    finish_attempt_states=finish_attempt_states)
+                                    finish_attempt_states=finish_attempt_states,
+                                    recovery_attempt_states=recovery_attempt_states,
+                                    recovery_expected_owner=recovery_expected_owner)
     except _WorkProjectionUnavailable:
         raise
     except Exception:
+        if recovery_mode:
+            # Keep the operational failure distinct from candidate-local row
+            # refusal, without leaking SQL, payload, or exception text.
+            raise _WorkProjectionOperationFailure() from None
         # Do not expose raw Job JSON, provider/custody data, SQL details, or
         # database errors through this dormant comparison boundary.
         raise _WorkProjectionUnavailable() from None

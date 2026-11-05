@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -13,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Text, and_, cast, inspect, or_, select, text
+from sqlalchemy import JSON, Text, and_, case, cast, func, inspect, literal, or_, select, text
 
 from .adapters import RuntimeFailure
 from .authority import check_execution_binding, issue_execution, refresh_execution, revoke_execution, sweep_terminal_authority
@@ -23,6 +24,14 @@ from .service import Platform, PlatformError, TERMINAL
 
 class _HandBackOwnerUnavailable(RuntimeError):
     """A complete Job/Work owner snapshot could not be established."""
+
+
+class _RecoverySweepIncomplete(RuntimeError):
+    """Bounded recovery pass has more candidates."""
+
+
+class _FreshReservationNeedsRecovery(RuntimeError):
+    """Internal transaction boundary before a fresh reservation."""
 
 
 class FinishRefused(RuntimeError):
@@ -88,6 +97,167 @@ def replay_safe(resolved: dict) -> bool:
         return False
     harness = resolved["harness"]
     return harness["kind"] in {"demo", "tool-agent"} and all(t.get("read_only", t["kind"] == "kubernetes-read") for t in resolved.get("tools", [])) or harness.get("idempotent", False)
+
+
+def _recovery_replay_safe(resolved: dict) -> bool:
+    """Validate stored replay flags before they can authorize a retry."""
+    if resolved.get("repository_run") is not None:
+        return False
+    harness = resolved.get("harness")
+    tools = resolved.get("tools", [])
+    if type(harness) is not dict or type(tools) is not list:
+        raise _HandBackOwnerUnavailable()
+    if harness.get("kind") not in {"demo", "tool-agent", "native-codex", "native-claude", "native-opencode", "agent-http"}:
+        raise _HandBackOwnerUnavailable()
+    if "idempotent" in harness and type(harness["idempotent"]) is not bool:
+        raise _HandBackOwnerUnavailable()
+    for tool in tools:
+        if (type(tool) is not dict or tool.get("kind") not in {"http-json", "kubernetes-read"}
+                or ("read_only" in tool and type(tool["read_only"]) is not bool)):
+            raise _HandBackOwnerUnavailable()
+    return bool(replay_safe(resolved))
+
+
+def _validate_recovery_retry_recipe(resolved: dict) -> None:
+    """Reject malformed stored fields required when a recovered Job is retried."""
+    model, grant, harness, agent = (resolved.get(key) for key in ("model", "grant", "harness", "agent"))
+    tools = resolved.get("tools", [])
+    if (type(model) is not dict or type(model.get("id")) is not str
+            or ("connection" in model and type(model["connection"]) is not dict)
+            or ("max_concurrency" in model and
+                (type(model["max_concurrency"]) is not int or not 1 <= model["max_concurrency"] <= 64))
+            or type(grant) is not dict or type(grant.get("input_class")) is not str
+            or type(agent) is not dict or type(agent.get("id")) is not str or not agent["id"]
+            or type(harness) is not dict or type(harness.get("kind")) is not str
+            or type(tools) is not list or any(type(tool) is not dict for tool in tools)
+            or any(resolved.get(key) is not None and type(resolved[key]) is not dict
+                   for key in ("previous_attempt", "workflow_binding"))):
+        raise _HandBackOwnerUnavailable()
+    if (harness["kind"] not in {"demo", "tool-agent", "native-codex", "native-claude", "native-opencode", "agent-http"}
+            or ("idempotent" in harness and type(harness["idempotent"]) is not bool)
+            or any(type(tool.get("kind")) is not str or tool["kind"] not in {"http-json", "kubernetes-read"}
+                   or ("read_only" in tool and type(tool["read_only"]) is not bool)
+                   for tool in tools)
+            or ("max_attempts" in grant and
+                (type(grant["max_attempts"]) is not int or not 1 <= grant["max_attempts"] <= 10))
+            or ("timeout_seconds" in grant and
+                (type(grant["timeout_seconds"]) is not int or not 1 <= grant["timeout_seconds"] <= 3600))):
+        raise _HandBackOwnerUnavailable()
+    prior = resolved.get("previous_attempt")
+    if prior is not None and any(type(prior.get(field)) is not str or not prior[field]
+                                 for field in ("receipt", "job_id", "submission_role")):
+        raise _HandBackOwnerUnavailable()
+    if any(resolved.get(field) is not None and
+           (type(resolved[field]) is not str or not resolved[field])
+           for field in ("source_release", "transfer_id")):
+        raise _HandBackOwnerUnavailable()
+    run = resolved.get("repository_run")
+    if run is not None:
+        from .repository_runs import RepositoryRunError, _timestamp
+        if type(run) is not dict:
+            raise _HandBackOwnerUnavailable()
+        try:
+            deadline = _timestamp(run.get("deadline"), "deadline").timestamp()
+        except (RepositoryRunError, TypeError, ValueError, OverflowError, OSError):
+            raise _HandBackOwnerUnavailable() from None
+        if not math.isfinite(deadline):
+            raise _HandBackOwnerUnavailable()
+        repair = run.get("repair")
+        if repair is not None:
+            repair_fields = {"parent_run_id", "root_run_id", "repair_number", "max_repairs",
+                             "candidate_sha256", "candidate_tip_sha", "candidate_release_id",
+                             "feedback_release_id", "feedback_sha256", "feedback_contract_ids",
+                             "input_key", "input_sha256"}
+            string_fields = repair_fields - {"repair_number", "max_repairs", "feedback_contract_ids"}
+            if (type(repair) is not dict or set(repair) != repair_fields
+                    or any(type(repair[field]) is not str or not repair[field] for field in string_fields)
+                    or type(repair["repair_number"]) is not int
+                    or type(repair["max_repairs"]) is not int
+                    or not 1 <= repair["repair_number"] <= repair["max_repairs"] <= 3
+                    or type(repair["feedback_contract_ids"]) is not list
+                    or not repair["feedback_contract_ids"]
+                    or any(type(item) is not str or not item for item in repair["feedback_contract_ids"])):
+                raise _HandBackOwnerUnavailable()
+    binding = resolved.get("workflow_binding")
+    if binding is None and (resolved.get("source_release") is not None or resolved.get("transfer_id") is not None):
+        raise _HandBackOwnerUnavailable()
+    if binding is not None:
+        from .workflows import (API_VERSION, WorkflowError, _digest as workflow_digest,
+                                delivery_role_names, validate_revision_ref, validate_workflow)
+        binding_fields = {"apiVersion", "kind", "workflow_revision", "definition", "installation_id",
+                          "bundle_generation", "input_class", "transfers", "roles", "requirements_ref",
+                          "session_policy_ref", "dispatch_authorized", "binding_digest"}
+        try:
+            if (type(binding) is not dict or set(binding) != binding_fields
+                    or binding["apiVersion"] != API_VERSION or binding["kind"] != "DeliveryWorkflowBinding"
+                    or binding["dispatch_authorized"] is not False
+                    or any(type(binding[field]) is not str or not binding[field] for field in (
+                        "workflow_revision", "installation_id", "bundle_generation", "input_class", "binding_digest"))
+                    or type(binding["roles"]) is not dict
+                    or type(binding["transfers"]) is not dict
+                    or type(resolved.get("workflow_role")) is not str):
+                raise _HandBackOwnerUnavailable()
+            definition = validate_workflow(binding["definition"])
+            validate_revision_ref(binding["requirements_ref"], "requirements_ref")
+            validate_revision_ref(binding["session_policy_ref"], "session_policy_ref")
+            role = binding["roles"].get(resolved["workflow_role"])
+            source_release, transfer_id = resolved.get("source_release"), resolved.get("transfer_id")
+            if source_release is None and transfer_id is not None:
+                raise _HandBackOwnerUnavailable()
+            if source_release is not None:
+                transfer = binding["transfers"].get(transfer_id)
+                if (type(transfer) is not dict
+                        or transfer.get("target") != {"kind": "role", "role": resolved["workflow_role"]}
+                        or type(transfer.get("contract_id")) is not str or not transfer["contract_id"]):
+                    raise _HandBackOwnerUnavailable()
+            if (resolved["workflow_role"] not in delivery_role_names(definition)
+                    or type(role) is not dict
+                    or any(type(role.get(field)) is not str for field in ("grant_id", "input_class", "model_destination"))
+                    or type(role.get("requires_output_release")) is not bool
+                    or binding["workflow_revision"] != workflow_digest(definition)
+                    or binding["binding_digest"] != workflow_digest(
+                        {key: value for key, value in binding.items() if key != "binding_digest"})):
+                raise _HandBackOwnerUnavailable()
+        except (WorkflowError, KeyError, TypeError, ValueError, OverflowError, RecursionError):
+            raise _HandBackOwnerUnavailable() from None
+
+
+def _validate_recovery_recipe_generation(resolved: dict, raw_bundle: str, generation: str, grant_id: str,
+                                         hosting_envelope_path: str | None = None) -> None:
+    """Check stored retry components against their recorded generation."""
+    from .hosting import hosted_generation, load_envelope
+    from .policy import PolicyError, resolve_recipe
+
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate bundle key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value):
+        raise ValueError("nonfinite bundle value")
+
+    try:
+        if type(raw_bundle) is not str:
+            raise _HandBackOwnerUnavailable()
+        parsed = json.loads(raw_bundle, object_pairs_hook=unique_pairs, parse_constant=reject_constant)
+        if type(parsed) is not dict:
+            raise _HandBackOwnerUnavailable()
+        bundle = parsed
+        envelope = load_envelope(hosting_envelope_path) if hosting_envelope_path else None
+        if hosted_generation(bundle, envelope) != generation:
+            raise _HandBackOwnerUnavailable()
+        producer = resolve_recipe(bundle, grant_id)
+        producer["generation"] = generation
+        if any(resolved.get(key) != value for key, value in producer.items()):
+            raise _HandBackOwnerUnavailable()
+        if any(key in resolved and key not in producer for key in ("restricted_class", "connector_roles")):
+            raise _HandBackOwnerUnavailable()
+    except (PolicyError, KeyError, TypeError, ValueError, UnicodeError,
+            AttributeError, OverflowError, RecursionError):
+        raise _HandBackOwnerUnavailable() from None
 
 
 @dataclass(frozen=True)
@@ -325,8 +495,111 @@ class LeaseService:
             "fence": lease.fence, "lease_until": lease.lease_until, "task": job.task,
             "recipe": self._agent_http_recipe(job)}}
 
+    def _recovery_scope(self, session, query, compute_id):
+        """Exclude only an explicitly foreign JSON string; unknown types stay in scope."""
+        value = Job.resolved["compute"]["id"]
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            root_members = func.json_each(Job.resolved).table_valued("key", "value")
+            compute_members = func.json_each(Job.resolved, "$.compute").table_valued("key", "value")
+            root_count = select(func.count()).select_from(root_members).where(
+                root_members.c.key == "compute").correlate(Job).scalar_subquery()
+            id_count = select(func.count()).select_from(compute_members).where(
+                compute_members.c.key == "id").correlate(Job).scalar_subquery()
+            kind = func.json_type(Job.resolved, "$.compute.id")
+            identifier = case((kind == "text", value.as_string()), else_="")
+            # Use the bundle producer's ID contract, not the distinct execution
+            # principal syntax. A malformed string is unknown, not foreign.
+            valid_identifier = and_(identifier.regexp_match(r"^[A-Za-z][A-Za-z0-9_.-]{0,95}$"),
+                                    ~identifier.contains("\n"))
+            in_scope = or_(root_count != 1, id_count != 1, kind.is_(None),
+                           kind != "text", ~valid_identifier, identifier == compute_id)
+            if self.repository_worker_only:
+                from .repository_runs import RUN_SCHEMA
+                in_scope = and_(Job.resolved["repository_run"]["schema_version"].as_string() == RUN_SCHEMA,
+                                in_scope)
+            # SQLite CASE is lazy; malformed JSON reaches candidate validation.
+            return query.where(case((func.json_valid(Job.resolved) == 0, True), else_=in_scope))
+        if dialect == "postgresql":
+            empty_object = cast(literal("{}"), JSON)
+            root_object = case((func.json_typeof(Job.resolved) == "object", Job.resolved), else_=empty_object)
+            compute_object = case((func.json_typeof(Job.resolved["compute"]) == "object",
+                                   Job.resolved["compute"]), else_=empty_object)
+            root_members = func.json_each(root_object).table_valued("key", "value")
+            compute_members = func.json_each(compute_object).table_valued("key", "value")
+            root_count = select(func.count()).select_from(root_members).where(
+                root_members.c.key == "compute").correlate(Job).scalar_subquery()
+            id_count = select(func.count()).select_from(compute_members).where(
+                compute_members.c.key == "id").correlate(Job).scalar_subquery()
+            kind = func.json_typeof(value)
+            identifier = case((kind == "string", value.as_string()), else_="")
+            valid_identifier = and_(identifier.regexp_match(r"^[A-Za-z][A-Za-z0-9_.-]{0,95}$"),
+                                    ~identifier.contains("\n"))
+            in_scope = or_(root_count != 1, id_count != 1, kind.is_(None),
+                           kind != "string", ~valid_identifier, identifier == compute_id)
+            if self.repository_worker_only:
+                from .repository_runs import RUN_SCHEMA
+                in_scope = and_(Job.resolved["repository_run"]["schema_version"].as_string() == RUN_SCHEMA,
+                                in_scope)
+            # PostgreSQL json can store escapes which text JSON operators reject.
+            # On PG16+, jsonb input validation distinguishes bad escapes from
+            # valid pairs and literal backslashes without decoding the JSON.
+            raw = cast(Job.resolved, Text)
+            version = session.get_bind().dialect.server_version_info or ()
+            if version >= (16,):
+                unsafe_escape = ~func.pg_input_is_valid(raw, "jsonb")
+            else:
+                # Older servers lack pg_input_is_valid: conservatively include
+                # suspicious escape text for candidate-local validation.
+                unsafe_escape = raw.regexp_match(r"\\u(0000|[dD][89aAbBcCdDeEfF][0-9a-fA-F]{2})")
+            return query.where(case((unsafe_escape, True), else_=in_scope))
+        raise RuntimeError("unsupported recovery database")
+
+    def _guard_fresh_reservation(self, session, compute_id, *, request_recovery=False):
+        from .recovery_cursor import peek_cursor
+        try:
+            cursor = peek_cursor(session, compute_id, self.repository_worker_only)
+            if cursor is not None and cursor.phase != "idle":
+                if request_recovery:
+                    raise _FreshReservationNeedsRecovery()
+                _fail("owner_unavailable", 503, "Execution owner state is unavailable")
+            now = time.time()
+            if cursor is not None and cursor.covered_through is not None and cursor.covered_through > now:
+                _fail("owner_unavailable", 503, "Execution owner state is unavailable")
+            query = self._recovery_scope(session, select(Job.id).where(
+                Job.status == "running", Job.lease_until < now), compute_id)
+            if not request_recovery and cursor is not None and cursor.covered_through is not None:
+                query = query.where(or_(Job.created_at >= cursor.covered_through,
+                                        Job.lease_until >= cursor.covered_through))
+            if session.execute(query.limit(1)).scalar_one_or_none() is not None:
+                if request_recovery:
+                    raise _FreshReservationNeedsRecovery()
+                _fail("owner_unavailable", 503, "Execution owner state is unavailable")
+        except _FreshReservationNeedsRecovery:
+            raise
+        except PlatformError:
+            raise
+        except Exception:
+            raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503) from None
+
     def reserve(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str,
                 external_profile: str | None = None) -> dict:
+        """Replay a prior reservation or run bounded recovery before a fresh one."""
+        try:
+            return self._reserve_once(principal=principal, instance_id=instance_id,
+                                      operation_id=operation_id, external_profile=external_profile,
+                                      recovery_done=False)
+        except _FreshReservationNeedsRecovery:
+            try:
+                self.recover_expired()
+            except _RecoverySweepIncomplete:
+                raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503) from None
+            return self._reserve_once(principal=principal, instance_id=instance_id,
+                                      operation_id=operation_id, external_profile=external_profile,
+                                      recovery_done=True)
+
+    def _reserve_once(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str,
+                      external_profile: str | None, recovery_done: bool) -> dict:
         """One caller-scoped reservation; no attempt, bearer or execution deadline."""
         _validate_principal(principal); _validate_instance(instance_id); _validate_operation(operation_id)
         if external_profile not in {None, "agent-http-v1"}:
@@ -380,6 +653,8 @@ class LeaseService:
 
             if principal.compute_id != self.platform.settings.compute_id:
                 _fail("execution_scope_denied", 403, "Execution owner scope is not permitted")
+            if not recovery_done:
+                self._guard_fresh_reservation(session, principal.compute_id, request_recovery=True)
 
             candidates = session.scalars(self._eligible_query(select(Job).where(
                 Job.status.in_(("queued", "retry_wait")), Job.next_attempt_at <= now,
@@ -388,9 +663,17 @@ class LeaseService:
             # Candidate row locks can wait too; base each new reservation on
             # owner time observed after those locks have been acquired.
             now = time.time()
+            from .work_projection import WorkProjectionError, _raw_job_object
             running = Counter()
-            for active_job in session.scalars(select(Job).where(Job.status == "running")):
-                running[active_job.resolved.get("model", {}).get("id")] += 1
+            for active_raw in session.scalars(select(cast(Job.resolved, Text)).where(Job.status == "running")):
+                try:
+                    active_root = _raw_job_object(active_raw)
+                except (WorkProjectionError, TypeError, ValueError, RecursionError):
+                    continue
+                active_model = active_root.get("model")
+                model_id = active_model.get("id") if type(active_model) is dict else None
+                if type(model_id) is str:
+                    running[model_id] += 1
             incompatible_profile_job = False
             for job in candidates:
                 if job.resolved.get("compute", {}).get("id") != principal.compute_id:
@@ -445,6 +728,8 @@ class LeaseService:
                 limit = model.get("max_concurrency")
                 if limit and running[model.get("id")] >= limit:
                     continue
+                self._guard_fresh_reservation(session, principal.compute_id)
+                now = time.time()
                 fence = uuid.uuid4().hex
                 lease_until = now + self.platform.settings.lease_seconds
                 lease = WorkerExecutionLease(job_id=job.id, workload_id=principal.workload_id,
@@ -628,46 +913,159 @@ class LeaseService:
                 row.updated_at, row.job_id = time.time(), job_id
 
     def recover_expired(self):
-        now = time.time()
-        with self.platform.db.sessions.begin() as session:
-            self.platform.db.authority_lock(session)
-            if self.platform.db.engine.dialect.name == "postgresql":
+        """Recover expired owners; global failures prevent a subsequent claim."""
+        try:
+            return self._recover_expired_sweep()
+        except _RecoverySweepIncomplete:
+            raise _RecoverySweepIncomplete("recovery sweep incomplete") from None
+        except Exception:
+            try:
+                logging.getLogger(__name__).warning("recovery_scan status=unavailable")
+            except Exception:
+                pass
+            raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503) from None
+
+    def _recover_expired_sweep(self):
+        """Recover bounded expired owner snapshots without borrowing a live fence."""
+        from .collection_transaction import owner_transaction
+        from .db import Base, MIGRATIONS
+        from .recovery_cursor import read_cursor, advance_cursor
+        from .work_projection import _WorkProjectionBusy
+
+        database = self.platform.db
+        counts = {"examined": 0, "retired": 0, "changed": 0, "busy": 0, "invalid": 0}
+
+        def coordinate(session):
+            if database.engine.dialect.name == "postgresql":
                 session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CLAIM_LOCK})
+
+        def scoped(session, query):
+            return self._recovery_scope(session, query, self.platform.settings.compute_id)
+
+        def eligible_after(session, cursor):
+            statement = scoped(session, select(Job.id).where(
+                Job.status == "running", Job.lease_until < cursor.scan_started_at))
+            if cursor.phase == "forward":
+                if cursor.forward_upper_id is None:
+                    return None
+                statement = statement.where(Job.id <= cursor.forward_upper_id)
+                if cursor.fair_pointer_job_id is not None:
+                    statement = statement.where(Job.id > cursor.fair_pointer_job_id)
+            else:
+                statement = statement.where(Job.id <= cursor.fair_pointer_job_id)
+            if cursor.last_job_id is not None:
+                statement = statement.where(Job.id > cursor.last_job_id)
+            return session.execute(statement.order_by(Job.id).limit(1)).scalar_one_or_none()
+
+        def save_cursor(session, cursor, **changes):
+            values = {name: getattr(cursor, name) for name in (
+                "phase", "last_job_id", "fair_pointer_job_id", "forward_upper_id",
+                "scan_started_at", "covered_through")}
+            values.update(changes)
+            if not advance_cursor(session, cursor, **values):
+                raise RuntimeError("recovery cursor changed")
+            return read_cursor(session, cursor.compute_id, cursor.repository_worker_only)
+
+        def complete_or_wrap(session, cursor):
+            if cursor.phase == "forward" and cursor.fair_pointer_job_id is not None:
+                save_cursor(session, cursor, phase="wrap", last_job_id=None)
+                return False
+            save_cursor(session, cursor, phase="idle", last_job_id=None,
+                        fair_pointer_job_id=cursor.forward_upper_id,
+                        forward_upper_id=None, covered_through=cursor.scan_started_at,
+                        scan_started_at=None)
+            return True
+
+        # Global schema/audit/terminal authority failures must abort the claim.
+        with owner_transaction(database) as session:
+            coordinate(session)
+            connection = session.connection()
+            version = database._version(connection)
+            if type(version) is not int or not 1 <= version <= database.schema_version:
+                raise RuntimeError("recovery schema unavailable")
+            expected = {table.name: table for migration, tables in MIGRATIONS
+                        if migration <= version for table in tables}
+            later = {table.name for migration, tables in MIGRATIONS if migration > version
+                     for table in tables if table.name not in expected}
+            names = set(inspect(connection).get_table_names(schema=database.schema))
+            if set(expected) - names or names.intersection(later):
+                raise RuntimeError("recovery schema unavailable")
+            database._structure(connection, list(expected.values()))
             if not self.repository_worker_only:
                 sweep_terminal_authority(self.platform, session)
-            rows = session.scalars(self._eligible_query(select(Job).where(Job.status == "running", Job.lease_until < now)).with_for_update(skip_locked=True)).all()
-            for row in rows:
-                lease = session.get(WorkerExecutionLease, row.id, with_for_update=True)
-                if lease is not None:
-                    self._check_lease_finite(row, lease)
-                    if lease.phase not in {"reserved", "started"}:
-                        _fail("owner_unavailable", 503, "Execution owner state is unavailable")
-                if row.resolved.get("compute", {}).get("id") != self.platform.settings.compute_id:
-                    continue
-                if row.cancel_requested:
-                    row.status, row.error_code = "cancelled", "cancelled"
-                elif lease is not None and lease.phase == "reserved":
-                    # No execution started, so this reservation is free to retry.
-                    row.status, row.error_code = "retry_wait", "lease_expired"
-                    row.next_attempt_at = now
-                elif not replay_safe(row.resolved):
-                    row.status, row.error_code = "blocked", "execution_uncertain"
-                elif row.attempts >= int(row.resolved["grant"].get("max_attempts", self.platform.settings.max_attempts)):
-                    row.status, row.error_code = "failed", "lease_recovery_exhausted"
-                else:
-                    row.status, row.error_code = "retry_wait", "lease_expired"
-                    row.next_attempt_at = now
-                row.lease_owner, row.lease_until, row.updated_at = None, None, now
-                if lease is not None:
-                    lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
-                revoke_execution(session, row.id)
-                self._forget_fence(row.id, lease.fence if lease is not None else None)
-                if row.status in TERMINAL:
-                    row.finished_at = now
-                self.platform.db.audit(session, self.id, "task.lease_recovered", row.id, {"status": row.status, "error_code": row.error_code})
+
+        while counts["examined"] < 1000:
+            cursor = None
+            initial_cursor = None
+            candidate_id = None
+            retired_fence = None
+            outcome = "changed"
+            try:
+                with owner_transaction(database) as session:
+                    coordinate(session)
+                    cursor = read_cursor(session, self.platform.settings.compute_id,
+                                         self.repository_worker_only)
+                    if cursor.phase == "idle":
+                        initial_cursor = cursor
+                        scan_started_at = time.time()
+                        upper = session.execute(scoped(session, select(func.max(Job.id)))).scalar_one()
+                        cursor = save_cursor(session, cursor, phase="forward", last_job_id=None,
+                                             scan_started_at=scan_started_at, forward_upper_id=upper)
+                    candidate_id = eligible_after(session, cursor)
+                    if candidate_id is None:
+                        outcome = "complete" if complete_or_wrap(session, cursor) else "wrap"
+                    else:
+                        counts["examined"] += 1
+                        if self._close_owner(candidate_id, recovery_session=session):
+                            locked_lease = session.get(WorkerExecutionLease, candidate_id)
+                            retired_fence = locked_lease.fence if locked_lease is not None else None
+                            outcome = "retired"
+                        save_cursor(session, cursor, last_job_id=candidate_id)
+                if candidate_id is None:
+                    if outcome == "wrap":
+                        outcome = "changed"
+                        continue
+                    try:
+                        logging.getLogger(__name__).info("recovery_scan status=complete counts=%s", counts)
+                    except Exception:
+                        pass
+                    return counts
+                counts[outcome] += 1
+                if outcome == "retired":
+                    self._forget_fence(candidate_id, retired_fence)
+            except (_WorkProjectionBusy, _HandBackOwnerUnavailable) as exc:
+                # Candidate transaction rolled back; progress requires exact cursor CAS.
+                if cursor is None or candidate_id is None:
+                    raise
+                with owner_transaction(database) as session:
+                    coordinate(session)
+                    latest = read_cursor(session, self.platform.settings.compute_id,
+                                         self.repository_worker_only)
+                    if initial_cursor is not None:
+                        if latest.value != initial_cursor.value:
+                            raise RuntimeError("recovery cursor changed") from None
+                        latest = save_cursor(session, latest, phase=cursor.phase,
+                                             last_job_id=cursor.last_job_id,
+                                             fair_pointer_job_id=cursor.fair_pointer_job_id,
+                                             forward_upper_id=cursor.forward_upper_id,
+                                             scan_started_at=cursor.scan_started_at,
+                                             covered_through=cursor.covered_through)
+                    if latest.value != cursor.value:
+                        raise RuntimeError("recovery cursor changed") from None
+                    save_cursor(session, latest, last_job_id=candidate_id)
+                counts["busy" if isinstance(exc, _WorkProjectionBusy) else "invalid"] += 1
+        # Complete empty tail phases without spending a candidate budget.
+        with owner_transaction(database) as session:
+            coordinate(session)
+            cursor = read_cursor(session, self.platform.settings.compute_id,
+                                 self.repository_worker_only)
+            while eligible_after(session, cursor) is None:
+                if complete_or_wrap(session, cursor):
+                    return counts
+                cursor = read_cursor(session, cursor.compute_id, cursor.repository_worker_only)
+        raise _RecoverySweepIncomplete("recovery sweep incomplete")
 
     def claim(self) -> Job | None:
-        self.recover_expired()
         principal = ExecutionPrincipal(self.platform.settings.execution_workload_identity,
                                        self.platform.settings.compute_id)
         instance_id = hashlib.sha256(self.id.encode("utf-8")).hexdigest()
@@ -737,17 +1135,19 @@ class LeaseService:
     def hand_back(self, job_id: str, fence: str | None = None):
         return self._close_owner(job_id, fence=fence)
 
-    def _close_owner(self, job_id: str, fence: str | None = None, *, finish_outcome=None):
+    def _close_owner(self, job_id: str, fence: str | None = None, *, finish_outcome=None,
+                     recovery_session=None):
         """Validate, lock, and rescan one complete Job/Work owner snapshot."""
+        from contextlib import nullcontext
         from sqlalchemy import outerjoin
 
-        from .collection_transaction import owner_transaction
+        from .collection_transaction import _owner_transaction_is_active, owner_transaction
         from .db import Base, MIGRATIONS, digest
         from .program_ledger import _mark_work_projection_unknown_in_transaction
         from .program_ledger import _is_lower_hex, _validate_locked_legacy_binding
         from .repository_runs import RUN_SCHEMA
         from .work_projection import (
-            WorkProjectionError,
+            WorkProjectionError, _WorkProjectionBusy, _WorkProjectionUnavailable,
             _compare_actual_work_projection,
             _raw_job_object,
             lock_work_projection_set,
@@ -755,6 +1155,8 @@ class LeaseService:
         )
 
         database = self.platform.db
+        if recovery_session is not None and not _owner_transaction_is_active(recovery_session):
+            raise ValueError("recovery owner transaction unavailable")
         hand_back_attempt_states = {
             "preparing", "awaiting_activation", "running", "interrupted",
             "cancelled", "activation_cancelled",
@@ -776,7 +1178,9 @@ class LeaseService:
         succeeded = False
         succeeded_fence = None
         try:
-            with owner_transaction(database) as session:
+            transaction = (owner_transaction(database) if recovery_session is None
+                           else nullcontext(recovery_session))
+            with transaction as session:
                 connection = session.connection()
                 try:
                     version = database._version(connection)
@@ -798,20 +1202,32 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                     database._structure(connection, expected_tables)
                 except _HandBackOwnerUnavailable:
+                    if recovery_session is not None:
+                        raise RuntimeError("recovery schema unavailable") from None
                     raise
                 except Exception:
+                    if recovery_session is not None:
+                        raise RuntimeError("recovery schema unavailable") from None
                     raise _HandBackOwnerUnavailable() from None
 
                 tables = Base.metadata.tables
                 job_table = tables["jobs"]
                 probe = session.execute(select(
-                    Job.id, Job.status, Job.caller, Job.attempts, Job.generation,
+                    Job.id, Job.status, Job.caller, Job.attempts, Job.generation, Job.grant_id,
                     Job.lease_owner, Job.lease_until, Job.cancel_requested,
                 ).where(Job.id == job_id)).mappings().one_or_none()
                 if probe is None:
                     if finish_outcome is not None:
                         raise _HandBackOwnerUnavailable()
                     return False
+                lease_snapshot = None
+                retry_bundle_snapshot = None
+                if recovery_session is not None:
+                    bundle_table = tables["bundle_revisions"]
+                    retry_bundle_snapshot = session.execute(select(cast(bundle_table.c.bundle, Text)).where(
+                        bundle_table.c.generation == probe["generation"])).scalar_one_or_none()
+                    lease_snapshot = session.execute(select(WorkerExecutionLease.__table__).where(
+                        WorkerExecutionLease.job_id == job_id)).mappings().one_or_none()
                 raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
                     job_table.c.id == job_id)).scalar_one_or_none()
                 if type(raw) is not str:
@@ -848,7 +1264,11 @@ class LeaseService:
                 current_attempt_row = None
                 current_attempt_state = None
                 preappend_finish = False
-                if run is not None and probe["status"] == "running":
+                recovery_reserved = (recovery_session is not None and lease_snapshot is not None
+                                     and lease_snapshot["phase"] == "reserved")
+                if recovery_reserved:
+                    preappend_finish = True
+                if run is not None and probe["status"] == "running" and not recovery_reserved:
                     if (type(probe["attempts"]) is not int or isinstance(probe["attempts"], bool)
                             or probe["attempts"] < 1):
                         raise _HandBackOwnerUnavailable()
@@ -904,7 +1324,8 @@ class LeaseService:
                             and type(getattr(error, "code", None)) is str
                             and error.code in preappend_codes
                         )
-                        if (not (preappend_error or preappend_cancel)
+                        recovery_preappend = recovery_session is not None
+                        if (not (preappend_error or preappend_cancel or recovery_preappend)
                                 or any(number >= probe["attempts"] for number in attempt_numbers)
                                 or attempt_numbers != sorted(set(attempt_numbers))):
                             raise _HandBackOwnerUnavailable()
@@ -1097,13 +1518,23 @@ class LeaseService:
                         or work_reservations or work_slots or work_intents or work_bindings):
                     raise _HandBackOwnerUnavailable()
 
-                if projections_all or legacy_batch_keys:
+                if projections_all or legacy_batch_keys or recovery_session is not None:
                     try:
                         lock_work_projection_set(session, projections_all,
                             additional_work_calls=tuple(historical_calls),
                             legacy_batch_keys=tuple(legacy_batch_keys), expected_job_id=job_id,
-                            include_bindings=schema_version >= 10)
+                            include_bindings=schema_version >= 10,
+                            nonblocking_owner_ids=(job_id,) if recovery_session is not None else (),
+                            allow_missing_owner_lease=(recovery_session is not None and lease_snapshot is None))
+                    except _WorkProjectionBusy:
+                        if recovery_session is not None:
+                            raise
+                        raise _HandBackOwnerUnavailable() from None
+                    except _WorkProjectionUnavailable:
+                        raise _HandBackOwnerUnavailable() from None
                     except Exception:
+                        if recovery_session is not None:
+                            raise
                         raise _HandBackOwnerUnavailable() from None
                 row = session.execute(select(Job).where(Job.id == job_id).with_for_update()).scalar_one_or_none()
                 lease = session.get(WorkerExecutionLease, job_id, with_for_update=True)
@@ -1156,13 +1587,14 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                 if (locked_raw != raw or row.status != probe["status"]
                         or row.attempts != probe["attempts"]
+                        or (recovery_session is not None and row.grant_id != probe["grant_id"])
                         or row.generation != probe["generation"]
                         or row.lease_owner != probe["lease_owner"]
                         or row.lease_until != probe["lease_until"]
                         or row.cancel_requested != probe["cancel_requested"]):
                     raise _HandBackOwnerUnavailable()
                 if (not self._eligible_job(row) or row.status != "running"
-                        or row.lease_owner != self.id):
+                        or (recovery_session is None and row.lease_owner != self.id)):
                     if finish_outcome is not None:
                         raise _HandBackOwnerUnavailable()
                     return False
@@ -1361,9 +1793,144 @@ class LeaseService:
                             slot = session.execute(select(slot_t).where(
                                 slot_t.c.scope_id == link["scope_id"], slot_t.c.slot_id == link["slot_id"])).mappings().one_or_none()
                             job_mapping = {column.name: getattr(row, column.name) for column in job_table.columns}
-                            _validate_locked_legacy_binding(link, batch, registry, job_mapping, reservation, slot)
+                            try:
+                                _validate_locked_legacy_binding(link, batch, registry, job_mapping, reservation, slot)
+                            except ValueError:
+                                raise _HandBackOwnerUnavailable() from None
 
-                if finish_outcome is None:
+                if recovery_session is not None:
+                    now = time.time()
+                    legacy_no_lease = lease_snapshot is None
+                    if legacy_no_lease:
+                        # Migration 5 introduced leases without backfilling old
+                        # running Jobs. Job and lease locks have now been taken;
+                        # any newly appeared lease makes this snapshot stale.
+                        if lease is not None or run is not None or projections_all or legacy_links:
+                            raise _HandBackOwnerUnavailable()
+                        if work_reservations or work_slots or work_intents or work_bindings:
+                            raise _HandBackOwnerUnavailable()
+                    else:
+                        if lease is None or any(getattr(lease, col.name) != lease_snapshot[col.name]
+                                                for col in WorkerExecutionLease.__table__.columns):
+                            raise _HandBackOwnerUnavailable()
+                        try:
+                            self._check_lease_finite(row, lease)
+                        except PlatformError as error:
+                            if error.code != "owner_unavailable":
+                                raise
+                            raise _HandBackOwnerUnavailable() from None
+                    compute = row.resolved.get("compute") if type(row.resolved) is dict else None
+                    if (type(compute) is not dict or compute.get("id") != self.platform.settings.compute_id
+                            or type(row.lease_until) not in (int, float)
+                            or not math.isfinite(row.lease_until) or row.lease_until >= now
+                            or type(row.attempts) is not int or row.attempts < (1 if legacy_no_lease else 0)
+                            or type(row.lease_owner) is not str or not row.lease_owner):
+                        raise _HandBackOwnerUnavailable()
+                    if not legacy_no_lease:
+                        if (row.lease_until != lease.lease_until
+                                or lease.phase not in {"reserved", "started"}
+                                or (lease.phase == "started" and row.attempts < 1)):
+                            raise _HandBackOwnerUnavailable()
+                        derived_owner = execution_owner_key(workload_id=lease.workload_id,
+                                                            instance_id=lease.instance_id)
+                        if (row.lease_owner != derived_owner and
+                                hashlib.sha256(row.lease_owner.encode("utf-8")).hexdigest() != lease.instance_id):
+                            raise _HandBackOwnerUnavailable()
+                        if ((lease.phase == "reserved" and lease.execution_deadline is not None)
+                                or (lease.phase == "started" and lease.execution_deadline is None)):
+                            raise _HandBackOwnerUnavailable()
+                    projected_history = bool(projections_all or legacy_links)
+                    if not legacy_no_lease and lease.phase == "reserved" and projected_history:
+                        raise _HandBackOwnerUnavailable()
+                    if run is not None and not recovery_reserved and current_attempt_row is not None:
+                        if hashlib.sha256(lease.fence.encode("utf-8")).hexdigest() != current_attempt_row.get("fence_sha256"):
+                            raise _HandBackOwnerUnavailable()
+                    elif projected_history:
+                        raise _HandBackOwnerUnavailable()
+                    recovery_states = frozenset(owner_attempt_states)
+                    for projection in current:
+                        try:
+                            _compare_actual_work_projection(
+                                session, scope_id=projection.scope_id, call_id=projection.call_id,
+                                allow_cancel_requested=True,
+                                recovery_attempt_states=recovery_states,
+                                recovery_expected_owner=row.lease_owner,
+                            )
+                        except _WorkProjectionBusy:
+                            raise
+                        except _WorkProjectionUnavailable:
+                            raise _HandBackOwnerUnavailable() from None
+                    unresolved_work = False
+                    next_projections = {}
+                    explicit_uncertainty = current_attempt_state == "uncertain"
+                    for projection in current:
+                        state = (projection.intent_state, projection.reservation_state, projection.slot_state)
+                        if state == ("known", "settled", "released") and not explicit_uncertainty:
+                            continue
+                        if state in {("committed", "reserved", "held"), ("unknown", "unknown", "unknown")}:
+                            unresolved_work = True
+                        elif state != ("known", "settled", "released"):
+                            raise _HandBackOwnerUnavailable()
+                        payload = _mark_work_projection_unknown_in_transaction(
+                            database, session, projection, job_id=job_id, attempt_id=current_attempt)
+                        if payload is not None:
+                            next_projections[(projection.scope_id, projection.call_id)] = payload
+                    if next_projections:
+                        locked_root["repository_run"]["program_ledger_projections_v1"] = [
+                            next_projections.get((entry.get("scope_id"), entry.get("call_id")), entry)
+                            for entry in locked_root["repository_run"]["program_ledger_projections_v1"]
+                        ]
+                        row.resolved = locked_root
+                    def validate_retry():
+                        current_bundle = session.execute(select(cast(bundle_table.c.bundle, Text)).where(
+                            bundle_table.c.generation == probe["generation"])).scalar_one_or_none()
+                        if type(retry_bundle_snapshot) is not str or current_bundle != retry_bundle_snapshot:
+                            raise _HandBackOwnerUnavailable()
+                        _validate_recovery_retry_recipe(row.resolved)
+                        _validate_recovery_recipe_generation(row.resolved, retry_bundle_snapshot,
+                                                             probe["generation"], probe["grant_id"],
+                                                             getattr(self.platform.settings, "hosting_envelope_path", None))
+
+                    if unresolved_work or explicit_uncertainty:
+                        row.status, row.error_code = "blocked", "execution_uncertain"
+                    elif row.cancel_requested:
+                        row.status, row.error_code = "cancelled", "cancelled"
+                    elif not legacy_no_lease and lease.phase == "reserved":
+                        validate_retry()
+                        row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
+                    else:
+                        try:
+                            safe = False if projected_history else _recovery_replay_safe(row.resolved)
+                            if safe:
+                                grant = row.resolved["grant"]
+                                if type(grant) is not dict:
+                                    raise _HandBackOwnerUnavailable()
+                                max_attempts = grant.get("max_attempts", self.platform.settings.max_attempts)
+                                if (type(max_attempts) is not int or max_attempts < 1
+                                        or ("max_attempts" in grant and max_attempts > 10)):
+                                    raise _HandBackOwnerUnavailable()
+                            else:
+                                max_attempts = None
+                        except (KeyError, TypeError, AttributeError, ValueError, OverflowError):
+                            raise _HandBackOwnerUnavailable() from None
+                        if not safe:
+                            row.status, row.error_code = "blocked", "execution_uncertain"
+                        elif row.attempts >= max_attempts:
+                            row.status, row.error_code = "failed", "lease_recovery_exhausted"
+                        else:
+                            validate_retry()
+                            row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
+                    row.lease_owner, row.lease_until, row.updated_at = None, None, now
+                    if lease is not None:
+                        lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
+                    revoke_execution(session, row.id)
+                    if row.status in TERMINAL:
+                        row.finished_at = now
+                    self.platform.db.audit(session, self.id, "task.lease_recovered", row.id,
+                                           {"status": row.status, "error_code": row.error_code})
+                    succeeded = True
+                    succeeded_fence = lease.fence if lease is not None else None
+                elif finish_outcome is None:
                     now = time.time()
                     projected_history = bool(projections_all or legacy_links)
                     if run is not None and current_attempt_state not in hand_back_attempt_states:
@@ -1679,21 +2246,27 @@ class LeaseService:
                     succeeded_fence = lease.fence
 
         except PlatformError:
+            if recovery_session is not None:
+                raise
             if finish_outcome is not None:
                 raise FinishRefused("execution owner state unavailable") from None
             raise
         except _HandBackOwnerUnavailable:
+            if recovery_session is not None:
+                raise
             if finish_outcome is not None:
                 raise FinishRefused("execution owner state unavailable") from None
             _fail("execution_owner_state_unavailable", 503,
                   "Execution owner state is unavailable; retry the request")
         except Exception:
+            if recovery_session is not None:
+                raise
             if finish_outcome is not None:
                 raise FinishRefused("execution owner state unavailable") from None
             _fail("execution_owner_state_unavailable", 503,
                   "Execution owner state is unavailable; retry the request")
 
-        if succeeded:
+        if succeeded and recovery_session is None:
             self._forget_fence(job_id, succeeded_fence)
         return succeeded
 

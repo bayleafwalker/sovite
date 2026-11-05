@@ -53,7 +53,10 @@ def test_LEASE_FENCED_claim_digest_only_hand_back_and_reclaim_replace_capability
 def test_LEASE_FENCED_lease_recovery_replaces_execution_capability(authority_env):
     env = authority_env
     with env.platform.db.sessions.begin() as session:
-        session.get(Job, env.job.id).lease_until = time.time() - 1
+        from sovite.db import WorkerExecutionLease
+        expiry = time.time() - 1
+        session.get(Job, env.job.id).lease_until = expiry
+        session.get(WorkerExecutionLease, env.job.id).lease_until = expiry
     env.worker.recover_expired()
     with env.platform.db.sessions() as session:
         assert session.get(ExecutionAuthority, env.job.id).capability_digest == ''

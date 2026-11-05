@@ -310,7 +310,10 @@ def test_compute_pool_binding_and_late_lease_holder_cannot_publish(setup):
     claimed = worker.claim()
     assert claimed.id == job.id
     with platform.db.sessions.begin() as session:
-        session.get(Job, job.id).lease_until = time.time() - 1
+        from sovite.db import WorkerExecutionLease
+        expiry = time.time() - 1
+        session.get(Job, job.id).lease_until = expiry
+        session.get(WorkerExecutionLease, job.id).lease_until = expiry
     second = Worker(platform)
     replacement = second.claim()
     assert replacement.id == job.id
@@ -723,8 +726,9 @@ def test_o2_same_worker_old_task_cannot_borrow_replacement_fence(setup):
         try:
             await asyncio.wait_for(entered.wait(), 3)
             with platform.db.sessions.begin() as session:
-                session.get(Job, old.id).lease_until = time.time() - 1
-                session.get(WorkerExecutionLease, old.id).lease_until = time.time() - 1
+                expiry = time.time() - 1
+                session.get(Job, old.id).lease_until = expiry
+                session.get(WorkerExecutionLease, old.id).lease_until = expiry
             worker.recover_expired()
             replacement = worker.claim()  # Same object/worker ID, new execution.
             assert replacement.id == old.id and replacement.execution_fence != old_fence

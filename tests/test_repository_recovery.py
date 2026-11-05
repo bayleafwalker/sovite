@@ -296,7 +296,9 @@ def test_existing_lease_reaper_recovers_partitioned_owner_without_reexecution(in
     # must first classify that execution as uncertain.
     with platform.db.sessions.begin() as session:
         current=session.get(Job,job.id);lease=session.get(WorkerExecutionLease,job.id)
+        from sovite.lease_service import execution_owner_key
         current.status='running';current.error_code=None;current.lease_until=time.time()-1
+        current.lease_owner=execution_owner_key(workload_id=lease.workload_id,instance_id=lease.instance_id)
         lease.phase='started';lease.lease_until=current.lease_until
         resolved=copy.deepcopy(current.resolved)
         resolved['repository_run']['attempts'][-1]['state']='running'

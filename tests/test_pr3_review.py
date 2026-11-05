@@ -316,7 +316,11 @@ def test_terminal_inference_requests_helper_sessions_retention_sweep(authority_e
     with env.platform.db.sessions() as session:
         assert len(session.scalars(select(HelperSession).where(HelperSession.id.like('old-%'))).all()) == 2
         assert len(session.scalars(select(RequestLedger).where(RequestLedger.id.like('old-request-%'))).all()) == 2
-    monkeypatch.setattr(module, 'time', SimpleNamespace(time=lambda: now + 3601))
+    # The initial sweep may take longer than one second on a busy runner.
+    # Advance from the persisted throttle time, not the pre-fixture clock.
+    with env.platform.db.sessions() as session:
+        swept_at = session.get(MetadataRow, 'authority_retention_sweep').value['at']
+    monkeypatch.setattr(module, 'time', SimpleNamespace(time=lambda: swept_at + 3601))
     Worker(env.platform).recover_expired()
     with env.platform.db.sessions() as session:
         assert not session.scalars(select(HelperSession).where(HelperSession.id.like('old-%'))).all()
