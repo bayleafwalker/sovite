@@ -830,9 +830,11 @@ def test_expired_worker_fence_blocks_mutable_run_replay(setup, tmp_path):
         row = session.get(Job, job.id)
         row.lease_until = 0
         resolved = copy.deepcopy(row.resolved)
-        resolved["repository_run"]["attempts"] = [{"id": "attempt-interrupted", "state": "interrupted"}]
-        row.resolved = resolved
         lease = session.get(__import__("sovite.db", fromlist=["WorkerExecutionLease"]).WorkerExecutionLease, job.id)
+        import hashlib
+        resolved["repository_run"]["attempts"] = [{"id": f"{job.id}-{row.attempts}", "state": "running",
+                                                    "fence_sha256": hashlib.sha256(lease.fence.encode()).hexdigest()}]
+        row.resolved = resolved
         lease.lease_until = 0
     worker.recover_expired()
     observed = owner.get(run["id"], principal_id="cloud-codex")

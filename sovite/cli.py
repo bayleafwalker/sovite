@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from . import policy
-from .db import Database, DatabaseSchemaError, Job, WorkerHeartbeat
+from .db import Database, DatabaseSchemaError, Job, WorkerExecutionLease, WorkerHeartbeat
 from .hosting import compile_bundle, load_envelope, load_json
 from .qualification import export_qualification, import_qualification, initialize_keys, issue_qualification, runtime_settings_fingerprint, write_qualification
 from .service import Platform
@@ -60,9 +60,15 @@ async def assessment(settings: Settings, output: str) -> dict:
         platform.inhibit(grant["id"], "Synthetic assessment re-enablement", False)
         checks.append({"name": "revocation", "status": "passed", "detail": "Completed receipt becomes unavailable under current operational inhibit."})
         recovered = platform.submit(grant["id"], "synthetic interrupted task", grant["callers"][0], "assessment-recovery")
+        # Produce a real started owner before simulating expiry; recovery must
+        # never manufacture the matching lease or fence from a partial Job row.
+        interrupted = Worker(platform).claim()
+        assert interrupted is not None and interrupted.id == recovered.id
         with platform.db.sessions.begin() as session:
             row = session.get(Job, recovered.id)
-            row.status, row.lease_owner, row.lease_until, row.attempts = "running", "stopped-worker", time.time() - 10, 1
+            lease = session.get(WorkerExecutionLease, recovered.id)
+            assert lease is not None and lease.phase == "started"
+            row.lease_until = lease.lease_until = time.time() - 10
         restarted = Platform(ephemeral)
         restarted.initialize()
         assert await Worker(restarted).run_once()
