@@ -434,3 +434,30 @@ def test_dispatch_cursor_malformed_raw_json_fails_closed(owner):
         owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
                               operation_id='cursor-malformed-read')
     assert error.value.code == 'owner_unavailable'
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+@pytest.mark.parametrize('corruption', ['numeric-bool', 'huge-created-at'])
+def test_dispatch_cursor_rejects_wrong_types_and_oversized_numbers(owner, corruption):
+    import json
+    from sqlalchemy import select, text
+    from sovite.db import MetadataRow
+    from sovite.service import PlatformError
+    _profile_backlog(owner)
+    assert owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                 operation_id='cursor-type-seed')['state'] == 'idle'
+    with owner.platform.db.sessions.begin() as session:
+        cursor = session.scalars(select(MetadataRow).where(MetadataRow.key.like('dispatch_fair:%'))).one()
+        value = copy.deepcopy(cursor.value)
+        if corruption == 'numeric-bool':
+            value['scope']['repository_worker_only'] = 0
+        else:
+            value['created_at'] = 10 ** 400
+        table = f'"{owner.platform.db.schema}".platform_metadata' if owner.platform.db.schema else 'platform_metadata'
+        expression = 'CAST(:raw AS JSON)' if owner.platform.db.schema else ':raw'
+        session.execute(text(f'UPDATE {table} SET value={expression} WHERE key=:key'),
+                        {'raw': json.dumps(value), 'key': cursor.key})
+    with pytest.raises(PlatformError) as error:
+        owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                              operation_id='cursor-type-read')
+    assert error.value.code == 'owner_unavailable'

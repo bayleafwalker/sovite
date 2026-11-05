@@ -701,6 +701,13 @@ class LeaseService:
             cursor_row = None
             cursor_value = None
             cursor_key = None
+            def finite_number(value):
+                if type(value) not in (int, float):
+                    return False
+                try:
+                    return math.isfinite(value)
+                except OverflowError:
+                    return False
             if external_profile is None:
                 scope = {"compute_id": principal.compute_id,
                          "repository_worker_only": self.repository_worker_only,
@@ -724,9 +731,14 @@ class LeaseService:
                     except (TypeError, ValueError, RecursionError):
                         _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
                     if (type(cursor_value) is not dict or set(cursor_value) != {"schema", "scope", "created_at", "id"}
-                            or cursor_value["schema"] != "sovite-dispatch-fair/v1" or cursor_value["scope"] != scope
-                            or type(cursor_value["created_at"]) not in (int, float)
-                            or not math.isfinite(cursor_value["created_at"])
+                            or cursor_value["schema"] != "sovite-dispatch-fair/v1"
+                            or type(cursor_value["scope"]) is not dict
+                            or set(cursor_value["scope"]) != set(scope)
+                            or type(cursor_value["scope"]["compute_id"]) is not str
+                            or type(cursor_value["scope"]["repository_worker_only"]) is not bool
+                            or type(cursor_value["scope"]["repository_run_profile"]) is not bool
+                            or cursor_value["scope"] != scope
+                            or not finite_number(cursor_value["created_at"])
                             or type(cursor_value["id"]) is not str or not 1 <= len(cursor_value["id"]) <= 64):
                         _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
                     cursor_row = session.get(MetadataRow, cursor_key)
@@ -734,7 +746,7 @@ class LeaseService:
                 nonlocal cursor_row
                 if cursor_key is None:
                     return
-                if (type(job.created_at) not in (int, float) or not math.isfinite(job.created_at)
+                if (not finite_number(job.created_at)
                         or type(job.id) is not str or not 1 <= len(job.id) <= 64):
                     _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
                 value = {"schema": "sovite-dispatch-fair/v1", "scope": scope,
