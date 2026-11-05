@@ -656,10 +656,47 @@ class LeaseService:
             if not recovery_done:
                 self._guard_fresh_reservation(session, principal.compute_id, request_recovery=True)
 
-            candidates = session.scalars(self._eligible_query(select(Job).where(
+            # Exclude provably foreign compute pools before the bounded window.
+            # Unknown/malformed selectors remain in scope for owner validation.
+            candidate_query = select(Job).where(
                 Job.status.in_(("queued", "retry_wait")), Job.next_attempt_at <= now,
                 Job.cancel_requested.is_(False),
-            )).order_by(Job.created_at, Job.id).limit(100).with_for_update(skip_locked=True)).all()
+            )
+            if self.repository_worker_only:
+                # Do not send unknown JSON through repository eligibility: an
+                # unsafe row may be ordinary work and cannot be denied here.
+                # It remains queued until its owning path can inspect it.
+                from .repository_runs import RUN_SCHEMA
+                raw = cast(Job.resolved, Text)
+                dialect = session.get_bind().dialect
+                if dialect.name == "sqlite":
+                    unsafe = func.json_valid(Job.resolved) == 0
+                    root_members = func.json_each(Job.resolved).table_valued("key", "value")
+                    run_members = func.json_each(Job.resolved, "$.repository_run").table_valued("key", "value")
+                elif dialect.name == "postgresql":
+                    version = dialect.server_version_info or ()
+                    unsafe = (~func.pg_input_is_valid(raw, "jsonb") if version >= (16,)
+                              else raw.regexp_match(r"\\u(0000|[dD][89aAbBcCdDeEfF][0-9a-fA-F]{2})"))
+                    empty = cast(literal("{}"), JSON)
+                    root = case((func.json_typeof(Job.resolved) == "object", Job.resolved), else_=empty)
+                    run = case((func.json_typeof(Job.resolved["repository_run"]) == "object",
+                                Job.resolved["repository_run"]), else_=empty)
+                    root_members = func.json_each(root).table_valued("key", "value")
+                    run_members = func.json_each(run).table_valued("key", "value")
+                else:
+                    raise RuntimeError("unsupported dispatch database")
+                root_count = select(func.count()).select_from(root_members).where(
+                    root_members.c.key == "repository_run").correlate(Job).scalar_subquery()
+                schema_count = select(func.count()).select_from(run_members).where(
+                    run_members.c.key == "schema_version").correlate(Job).scalar_subquery()
+                is_repository = and_(root_count == 1, schema_count == 1,
+                    Job.resolved["repository_run"]["schema_version"].as_string() == RUN_SCHEMA)
+                candidate_query = candidate_query.where(case((unsafe, False), else_=is_repository))
+                candidate_query = self._recovery_scope(session, candidate_query, principal.compute_id)
+            else:
+                candidate_query = self._recovery_scope(session, candidate_query, principal.compute_id)
+            candidates = session.scalars(candidate_query.order_by(
+                Job.created_at, Job.id).limit(100).with_for_update(skip_locked=True)).all()
             # Candidate row locks can wait too; base each new reservation on
             # owner time observed after those locks have been acquired.
             now = time.time()
