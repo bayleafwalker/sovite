@@ -190,38 +190,52 @@ def test_explicit_setup_budget_is_scoped_to_initial_open(authority_env, monkeypa
     asyncio.run(scenario())
 
 
-def test_production_authority_open_keeps_one_second_timeout():
+def test_production_authority_open_keeps_one_second_timeout(monkeypatch):
     import httpx
-    import time
     from sovite.gateway.client import AuthorityClient
+    observed, cancelled = [], []
+    wait_for = asyncio.wait_for
+    def observe_wait(awaitable, timeout):
+        observed.append(timeout)
+        return wait_for(awaitable, timeout)
+    monkeypatch.setattr(asyncio, 'wait_for', observe_wait)
     async def slow(_request):
-        await asyncio.sleep(5)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
     async def scenario():
         client = AuthorityClient('https://control.test', 'x' * 24, transport=httpx.MockTransport(slow))
-        start = time.monotonic()
         try:
             with pytest.raises(GatewayError, match='authority_unavailable'):
                 await client.call('open')
-            assert time.monotonic() - start < 1.5
+            assert observed == [1] and cancelled == [True]
         finally:
             await client.close()
     asyncio.run(scenario())
 
 
-def test_test_only_initial_open_budget_remains_bounded():
+def test_test_only_initial_open_budget_remains_bounded(monkeypatch):
     import httpx
-    import time
     from model_support import _SetupOpenAuthorityClient
+    observed, cancelled = [], []
+    wait_for = asyncio.wait_for
+    def observe_wait(awaitable, timeout):
+        observed.append(timeout)
+        return wait_for(awaitable, timeout)
+    monkeypatch.setattr(asyncio, 'wait_for', observe_wait)
     async def slow(_request):
-        await asyncio.sleep(10)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
     async def scenario():
         client = _SetupOpenAuthorityClient('https://control.test', 'x' * 24,
                                            transport=httpx.MockTransport(slow))
-        start = time.monotonic()
         try:
             with pytest.raises(GatewayError, match='authority_unavailable'):
                 await client.call('open')
-            assert 3.8 <= time.monotonic() - start < 6
+            assert observed == [4] and cancelled == [True]
         finally:
             await client.close()
     asyncio.run(scenario())
