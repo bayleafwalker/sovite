@@ -96,7 +96,7 @@ async def _wait_for_bounded_engine_start(env, request, consumer, request_deadlin
 ])
 def test_PIN_BEFORE_PROMPT_CURRENT_AUTHORITY_seven_checks_deny_zero_engine_bytes(authority_env, denial, code):
     async def scenario():
-        async with connected(authority_env) as env:
+        async with connected(authority_env, relaxed_hello_setup=True) as env:
             changes = {}
             with env.platform.db.sessions.begin() as session:
                 execution = session.get(ExecutionAuthority, env.job.id)
@@ -273,7 +273,7 @@ class ChangedPreparation(PilotHelper):
 
 def test_PIN_BEFORE_PROMPT_preparation_pin_swap_sends_zero_prompt_bytes(authority_env):
     async def scenario():
-        async with connected(authority_env, helper_type=ChangedPreparation) as env:
+        async with connected(authority_env, helper_type=ChangedPreparation, relaxed_hello_setup=True) as env:
             request = await infer(env)
             with pytest.raises(GatewayError): await consume(request)
             assert env.engine.calls == []

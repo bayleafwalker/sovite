@@ -251,20 +251,21 @@ def authority_env(database, tmp_path, v2_bundle):
 
 
 class _SetupOpenAuthorityClient(AuthorityClient):
-    """Test-only allowance for the ASGI open used to prepare a fixture.
+    """Test-only allowance for selected ASGI actions during fixture setup.
 
-    All other calls and opens after readiness retain the production timeout.
+    All other calls and all calls after readiness retain the production timeout.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, setup_actions=frozenset({'open'}), **kwargs):
         super().__init__(*args, **kwargs)
         self.preparing = True
+        self.setup_actions = setup_actions
 
     async def call(self, action, **fields):
-        if action != 'open' or not self.preparing:
+        if action not in self.setup_actions or not self.preparing:
             return await super().call(action, **fields)
         try:
             response = await asyncio.wait_for(
-                self.client.post('/internal/authority/open', json=fields), 4)
+                self.client.post('/internal/authority/' + action, json=fields), 4)
             if response.status_code != 200:
                 if response.status_code == 422:
                     raise GatewayError('inference_request_denied')
@@ -281,7 +282,7 @@ class _SetupOpenAuthorityClient(AuthorityClient):
 
 @asynccontextmanager
 async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_factory=_HandshakeDiagnostics,
-                    relaxed_open_setup=False):
+                    relaxed_open_setup=False, relaxed_hello_setup=False):
     tls, key = certificates(env.path)
     provision_enrollment(env.platform, enrollment_id=ASSERTION['enrollment_id'], binding_id=env.model['id'],
                          installation_id=ASSERTION['installation_id'], role=env.role['id'], certificate=(env.path / 'helper.pem').read_bytes())
@@ -293,8 +294,13 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
     (env.path / 'model.gguf').write_bytes(b'weights')
     diagnostics = diagnostics_factory()
     transport = _DiagnosticASGITransport(httpx.ASGITransport(app=env.app), diagnostics)
-    client_type = _SetupOpenAuthorityClient if relaxed_open_setup else AuthorityClient
-    client = client_type('http://control.test', env.settings.authority_token, transport=transport)
+    if relaxed_open_setup or relaxed_hello_setup:
+        actions = frozenset(action for action, enabled in (
+            ('open', relaxed_open_setup), ('hello', relaxed_hello_setup)) if enabled)
+        client = _SetupOpenAuthorityClient('http://control.test', env.settings.authority_token,
+                                           transport=transport, setup_actions=actions)
+    else:
+        client = AuthorityClient('http://control.test', env.settings.authority_token, transport=transport)
     helper_holder = {"value": None}
 
     gateway = _DiagnosticGateway(client, diagnostics)
@@ -328,7 +334,7 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
 
                 _best_effort_observation(observe_setup_failure)
                 raise
-            if relaxed_open_setup:
+            if relaxed_open_setup or relaxed_hello_setup:
                 client.preparing = False
             env.gateway, env.helper, env.engine, env.helper_settings = gateway, helper, engine, settings
             env.authority_diagnostics = diagnostics
