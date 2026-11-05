@@ -167,3 +167,61 @@ def test_nested_out_of_order_fixtures_work_across_event_loops(tmp_path, v2_bundl
             for db in databases:
                 db.engine.dispose()
     assert HelperConnection.serve is original_serve
+
+
+def test_explicit_setup_budget_is_scoped_to_initial_open(authority_env, monkeypatch):
+    import model_support
+    original = model_support._DiagnosticASGITransport.handle_async_request
+    calls = []
+    async def slow_open(self, request):
+        if request.url.path.endswith('/open'):
+            calls.append('open')
+            await asyncio.sleep(1.2)
+        return await original(self, request)
+    monkeypatch.setattr(model_support._DiagnosticASGITransport, 'handle_async_request', slow_open)
+    async def scenario():
+        async with connected(authority_env, relaxed_open_setup=True) as env:
+            assert calls == ['open']
+            assert env.gateway.authority.preparing is False
+            with pytest.raises(GatewayError, match='authority_unavailable'):
+                await env.gateway.authority.call('open', gateway_id=env.gateway.id,
+                                                 certificate_digest='0' * 64)
+            assert calls == ['open', 'open']
+    asyncio.run(scenario())
+
+
+def test_production_authority_open_keeps_one_second_timeout():
+    import httpx
+    import time
+    from sovite.gateway.client import AuthorityClient
+    async def slow(_request):
+        await asyncio.sleep(5)
+    async def scenario():
+        client = AuthorityClient('https://control.test', 'x' * 24, transport=httpx.MockTransport(slow))
+        start = time.monotonic()
+        try:
+            with pytest.raises(GatewayError, match='authority_unavailable'):
+                await client.call('open')
+            assert time.monotonic() - start < 1.5
+        finally:
+            await client.close()
+    asyncio.run(scenario())
+
+
+def test_test_only_initial_open_budget_remains_bounded():
+    import httpx
+    import time
+    from model_support import _SetupOpenAuthorityClient
+    async def slow(_request):
+        await asyncio.sleep(10)
+    async def scenario():
+        client = _SetupOpenAuthorityClient('https://control.test', 'x' * 24,
+                                           transport=httpx.MockTransport(slow))
+        start = time.monotonic()
+        try:
+            with pytest.raises(GatewayError, match='authority_unavailable'):
+                await client.call('open')
+            assert 3.8 <= time.monotonic() - start < 6
+        finally:
+            await client.close()
+    asyncio.run(scenario())
