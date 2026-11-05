@@ -692,6 +692,7 @@ class LeaseService:
                 is_repository = and_(root_count == 1, schema_count == 1,
                     Job.resolved["repository_run"]["schema_version"].as_string() == RUN_SCHEMA)
                 candidate_query = candidate_query.where(case((unsafe, False), else_=is_repository))
+                candidate_query = self._recovery_scope(session, candidate_query, principal.compute_id)
             else:
                 candidate_query = self._recovery_scope(session, candidate_query, principal.compute_id)
             candidates = session.scalars(candidate_query.order_by(

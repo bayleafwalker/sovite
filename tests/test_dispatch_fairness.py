@@ -127,3 +127,43 @@ def test_repository_worker_holds_ambiguous_json_without_denial(owner, kind):
         row = session.execute(text(f'SELECT status, error_code FROM {table} WHERE id=:id'), {'id': job.id}).one()
         assert tuple(row) == ('queued', None)
         assert session.get(WorkerExecutionLease, job.id) is None
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_foreign_repository_backlog_does_not_hide_local_repository_job(owner, tmp_path):
+    from sovite.lease_service import LeaseService
+    from test_repository_runs import BindingResolver, make_owner, make_repo, packet, submit as submit_run
+    bundle = copy.deepcopy(owner.bundle)
+    foreign_compute = copy.deepcopy(bundle['compute'][0])
+    foreign_compute['id'] = 'foreign-pool'
+    bundle['compute'].append(foreign_compute)
+    foreign_grant = copy.deepcopy(bundle['grants'][0])
+    foreign_grant['id'], foreign_grant['compute'] = 'foreign-grant', 'foreign-pool'
+    bundle['grants'].append(foreign_grant)
+    generation = owner.platform.compile(bundle)
+    owner.platform.activate(generation)
+    mirror, base = make_repo(tmp_path)
+    resolver = BindingResolver(mirror, base, generation)
+    repository_owner = make_owner(owner.platform, resolver, executor=lambda *_: None)
+    resolver.grant_id = 'foreign-grant'
+    foreign = [submit_run(repository_owner, packet(base), principal_id='cloud-codex',
+                          idempotency_key=f'foreign-repository-{index:04}') for index in range(101)]
+    resolver.grant_id = 'incident-forensics'
+    local = submit_run(repository_owner, packet(base), principal_id='cloud-codex',
+                       idempotency_key='local-repository-probe')
+    with owner.platform.db.sessions.begin() as session:
+        for item in foreign:
+            row = session.get(Job, item['id'])
+            row.created_at, row.next_attempt_at = 1, 0
+        row = session.get(Job, local['id'])
+        row.created_at, row.next_attempt_at = 1000, 0
+    service = LeaseService(owner.platform, 'repository-worker', {},
+                           repository_worker_only=True, repository_run_profile=True)
+    result = service.reserve(principal=owner.principal, instance_id=owner.instance,
+                             operation_id='repository-pool-fairness')
+    assert result['state'] == 'reserved' and result['job']['job_id'] == local['id']
+    with owner.platform.db.sessions() as session:
+        for item in foreign:
+            row = session.get(Job, item['id'])
+            assert row.status == 'queued' and row.lease_owner is None
+            assert session.get(WorkerExecutionLease, item['id']) is None
