@@ -56,6 +56,8 @@ def _protocol_object(raw):
             raise ValueError("nonfinite")
         return result
     try:
+        if type(raw) is bytes:
+            raw = raw.decode('utf-8')
         value = json.loads(raw, object_pairs_hook=unique_pairs, parse_float=finite_float,
                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
     except (TypeError, ValueError, UnicodeError, RecursionError):
@@ -375,14 +377,19 @@ class NativeAppServer:
 
     async def receive(self):
         self.check()
-        raw = await asyncio.wait_for(self.process.stdout.readline(),max(0.001,self.deadline-time.time()))
+        try:
+            raw = await asyncio.wait_for(self.process.stdout.readline(),max(0.001,self.deadline-time.time()))
+        except (ValueError, asyncio.LimitOverrunError):
+            raise RuntimeFailure('native_executor_protocol_error') from None
         need(raw,'native_supervisor_unavailable')
         need(raw.endswith(b'\n') and len(raw) <= FRAME_LIMIT, 'native_executor_protocol_error')
         value = _protocol_object(raw)
         self.check()
         if value.get('method') == 'turn/completed':
-            turn = value.get('params',{}).get('turn',{})
-            need(type(turn.get('id')) is str, 'native_executor_protocol_error')
+            params = value.get('params')
+            need(type(params) is dict, 'native_executor_protocol_error')
+            turn = params.get('turn')
+            need(type(turn) is dict and type(turn.get('id')) is str, 'native_executor_protocol_error')
             self.terminals[turn['id']] = turn
         elif 'id' in value and 'method' in value:
             # Never turn an untrusted runtime question into a user approval or
