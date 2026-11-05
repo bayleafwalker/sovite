@@ -527,3 +527,67 @@ def test_legacy_missing_owner_is_not_recovered(owner):
     with owner.platform.db.sessions() as session:
         assert session.get(Job, job_id).status == 'running'
         assert session.get(WorkerExecutionLease, job_id) is None
+
+
+@pytest.mark.parametrize('database', ['postgresql'], indirect=True)
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_legacy_recovery_serializes_supported_reserve_after_absence_check(owner, monkeypatch):
+    from threading import Event, Thread, current_thread
+    import sovite.work_projection as projections
+
+    job_id, _ = _expired_reserved_owner(owner, key='legacy-serialized-reserve')
+    with owner.platform.db.sessions.begin() as session:
+        session.get(Job, job_id).attempts = 1
+        session.delete(session.get(WorkerExecutionLease, job_id))
+    reached, release, contender_entered, contender_acquired = Event(), Event(), Event(), Event()
+    original_lock = projections.lock_work_projection_set
+    original_authority = owner.platform.db.authority_lock
+    def pause_after_discovery(session, *args, **kwargs):
+        if kwargs.get('allow_missing_owner_lease'):
+            reached.set()
+            assert release.wait(10)
+        return original_lock(session, *args, **kwargs)
+    def observed_authority(session):
+        if current_thread().name == 'legacy-contender':
+            contender_entered.set()
+            result = original_authority(session)
+            contender_acquired.set()
+            return result
+        return original_authority(session)
+    monkeypatch.setattr(projections, 'lock_work_projection_set', pause_after_discovery)
+    monkeypatch.setattr(owner.platform.db, 'authority_lock', observed_authority)
+    results = {}
+    def recover():
+        try:
+            results['recovery'] = owner.service.recover_expired()
+        except Exception as exc:
+            results['recovery_error'] = exc
+    def reserve():
+        try:
+            results['reservation'] = owner.service.reserve(principal=owner.principal,
+                instance_id=owner.instance, operation_id='legacy-contended-reserve')
+        except Exception as exc:
+            results['reserve_error'] = exc
+    recovery_thread = Thread(target=recover, name='legacy-recovery', daemon=True)
+    reserve_thread = Thread(target=reserve, name='legacy-contender', daemon=True)
+    try:
+        recovery_thread.start()
+        assert reached.wait(10)
+        reserve_thread.start()
+        assert contender_entered.wait(10)
+        assert not contender_acquired.wait(0.2)
+        release.set()
+        recovery_thread.join(20)
+        reserve_thread.join(20)
+        assert not recovery_thread.is_alive() and not reserve_thread.is_alive()
+        assert 'recovery_error' not in results and 'reserve_error' not in results
+        assert results['recovery']['retired'] == 1
+        assert results['reservation']['state'] == 'reserved'
+        assert results['reservation']['job']['job_id'] == job_id
+        with owner.platform.db.sessions() as session:
+            assert session.get(WorkerExecutionLease, job_id).phase == 'reserved'
+    finally:
+        release.set()
+        recovery_thread.join(20)
+        if reserve_thread.ident is not None:
+            reserve_thread.join(20)
