@@ -222,6 +222,38 @@ def _validate_recovery_retry_recipe(resolved: dict) -> None:
             raise _HandBackOwnerUnavailable() from None
 
 
+def _validate_recovery_recipe_generation(resolved: dict, raw_bundle: str, generation: str, grant_id: str) -> None:
+    """Check stored retry components against their recorded generation."""
+    from .policy import PolicyError, bundle_generation, resolve_recipe, validate_bundle
+
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate bundle key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value):
+        raise ValueError("nonfinite bundle value")
+
+    try:
+        if type(raw_bundle) is not str:
+            raise _HandBackOwnerUnavailable()
+        parsed = json.loads(raw_bundle, object_pairs_hook=unique_pairs, parse_constant=reject_constant)
+        bundle = validate_bundle(parsed)
+        if bundle_generation(bundle) != generation:
+            raise _HandBackOwnerUnavailable()
+        producer = resolve_recipe(bundle, grant_id)
+        if any(resolved.get(key) != value for key, value in producer.items()):
+            raise _HandBackOwnerUnavailable()
+        if any(key in resolved and key not in producer for key in ("restricted_class", "connector_roles")):
+            raise _HandBackOwnerUnavailable()
+    except (PolicyError, KeyError, TypeError, ValueError, UnicodeError,
+            AttributeError, OverflowError, RecursionError):
+        raise _HandBackOwnerUnavailable() from None
+
+
 @dataclass(frozen=True)
 class ExecutionPrincipal:
     workload_id: str
@@ -497,9 +529,24 @@ class LeaseService:
             identifier = case((kind == "string", value.as_string()), else_="")
             valid_identifier = and_(identifier.regexp_match(r"^[A-Za-z][A-Za-z0-9_.-]{0,95}$"),
                                     ~identifier.contains("\n"))
-            return self._eligible_query(query).where(or_(
-                root_count != 1, id_count != 1, kind.is_(None),
-                kind != "string", ~valid_identifier, identifier == compute_id))
+            in_scope = or_(root_count != 1, id_count != 1, kind.is_(None),
+                           kind != "string", ~valid_identifier, identifier == compute_id)
+            if self.repository_worker_only:
+                from .repository_runs import RUN_SCHEMA
+                in_scope = and_(Job.resolved["repository_run"]["schema_version"].as_string() == RUN_SCHEMA,
+                                in_scope)
+            # PostgreSQL json can store escapes which text JSON operators reject.
+            # On PG16+, jsonb input validation distinguishes bad escapes from
+            # valid pairs and literal backslashes without decoding the JSON.
+            raw = cast(Job.resolved, Text)
+            version = session.get_bind().dialect.server_version_info or ()
+            if version >= (16,):
+                unsafe_escape = ~func.pg_input_is_valid(raw, "jsonb")
+            else:
+                # Older servers lack pg_input_is_valid: conservatively include
+                # suspicious escape text for candidate-local validation.
+                unsafe_escape = raw.regexp_match(r"\\u(0000|[dD][89aAbBcCdDeEfF][0-9a-fA-F]{2})")
+            return query.where(case((unsafe_escape, True), else_=in_scope))
         raise RuntimeError("unsupported recovery database")
 
     def _guard_fresh_reservation(self, session, compute_id, *, request_recovery=False):
@@ -1162,7 +1209,7 @@ class LeaseService:
                 tables = Base.metadata.tables
                 job_table = tables["jobs"]
                 probe = session.execute(select(
-                    Job.id, Job.status, Job.caller, Job.attempts, Job.generation,
+                    Job.id, Job.status, Job.caller, Job.attempts, Job.generation, Job.grant_id,
                     Job.lease_owner, Job.lease_until, Job.cancel_requested,
                 ).where(Job.id == job_id)).mappings().one_or_none()
                 if probe is None:
@@ -1170,7 +1217,11 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                     return False
                 lease_snapshot = None
+                retry_bundle_snapshot = None
                 if recovery_session is not None:
+                    bundle_table = tables["bundle_revisions"]
+                    retry_bundle_snapshot = session.execute(select(cast(bundle_table.c.bundle, Text)).where(
+                        bundle_table.c.generation == probe["generation"])).scalar_one_or_none()
                     lease_snapshot = session.execute(select(WorkerExecutionLease.__table__).where(
                         WorkerExecutionLease.job_id == job_id)).mappings().one_or_none()
                     if lease_snapshot is None:
@@ -1532,6 +1583,7 @@ class LeaseService:
                         raise _HandBackOwnerUnavailable()
                 if (locked_raw != raw or row.status != probe["status"]
                         or row.attempts != probe["attempts"]
+                        or (recovery_session is not None and row.grant_id != probe["grant_id"])
                         or row.generation != probe["generation"]
                         or row.lease_owner != probe["lease_owner"]
                         or row.lease_until != probe["lease_until"]
@@ -1815,12 +1867,21 @@ class LeaseService:
                             for entry in locked_root["repository_run"]["program_ledger_projections_v1"]
                         ]
                         row.resolved = locked_root
+                    def validate_retry():
+                        current_bundle = session.execute(select(cast(bundle_table.c.bundle, Text)).where(
+                            bundle_table.c.generation == probe["generation"])).scalar_one_or_none()
+                        if type(retry_bundle_snapshot) is not str or current_bundle != retry_bundle_snapshot:
+                            raise _HandBackOwnerUnavailable()
+                        _validate_recovery_retry_recipe(row.resolved)
+                        _validate_recovery_recipe_generation(row.resolved, retry_bundle_snapshot,
+                                                             probe["generation"], probe["grant_id"])
+
                     if unresolved_work or explicit_uncertainty:
                         row.status, row.error_code = "blocked", "execution_uncertain"
                     elif row.cancel_requested:
                         row.status, row.error_code = "cancelled", "cancelled"
                     elif lease.phase == "reserved":
-                        _validate_recovery_retry_recipe(row.resolved)
+                        validate_retry()
                         row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
                     else:
                         try:
@@ -1842,7 +1903,7 @@ class LeaseService:
                         elif row.attempts >= max_attempts:
                             row.status, row.error_code = "failed", "lease_recovery_exhausted"
                         else:
-                            _validate_recovery_retry_recipe(row.resolved)
+                            validate_retry()
                             row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
                     row.lease_owner, row.lease_until, row.updated_at = None, None, now
                     lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now

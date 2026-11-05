@@ -1,4 +1,5 @@
 """Synthetic expired Work-owner recovery contract."""
+import copy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -6,9 +7,45 @@ import pytest
 from sqlalchemy import select
 
 from sovite.collection_transaction import owner_transaction
-from sovite.db import Base, Job, WorkerExecutionLease
+from sovite.db import Base, BundleRevision, Job, WorkerExecutionLease
 from sovite.lease_service import LeaseService, _HandBackOwnerUnavailable, execution_owner_key
+from sovite.policy import bundle_generation, resolve_recipe, validate_bundle
+from test_policy_v1alpha2 import bundle as gateway_bundle  # noqa: F401
 from test_work_projection_rows import work_rows
+
+
+def _producer_retry_state(base_bundle, recipe_variant):
+    bundle = copy.deepcopy(base_bundle)
+    old_compute = bundle["grants"][0]["compute"]
+    bundle["compute"][0]["id"] = "fixture"
+    for grant in bundle["grants"]:
+        if grant["compute"] == old_compute:
+            grant["compute"] = "fixture"
+    grant = bundle["grants"][0]
+    agent = next(item for item in bundle["agents"] if item["id"] == grant["agent"])
+    harness = next(item for item in bundle["harnesses"] if item["id"] == agent["harness"])
+    if recipe_variant == "idempotent-harness":
+        harness["idempotent"] = True
+    elif recipe_variant == "read-only-tool":
+        tool_id = "recovery-retry-read-only"
+        bundle["tools"].append({
+            "id": tool_id, "name": "Recovery retry read-only probe",
+            "description": "A producer-backed read-only replay tool.",
+            "kind": "kubernetes-read", "input_class": grant["input_class"],
+            "output_class": grant["output_class"],
+            "destination": bundle["compute"][0]["destination"],
+            "allowed_operations": ["list-pods"], "read_only": True,
+        })
+        agent["tools"].append(tool_id)
+    elif recipe_variant == "default-max-attempts-and-flags":
+        for name in ("max_attempts", "timeout_seconds", "on_outage"):
+            grant.pop(name, None)
+        harness.pop("idempotent", None)
+    else:
+        raise AssertionError(recipe_variant)
+    bundle = validate_bundle(bundle)
+    generation = bundle_generation(bundle)
+    return bundle, generation, grant["id"], resolve_recipe(bundle, grant["id"])
 
 
 def test_expired_started_work_is_held_without_release(work_rows, monkeypatch):
@@ -235,40 +272,30 @@ def test_sweep_malformed_replay_fields_with_valid_lease_does_not_hide_later_work
 
 
 @pytest.mark.parametrize("replay_recipe", [
-    {"harness": {"kind": "native-codex", "idempotent": True}, "tools": []},
-    {"harness": {"kind": "tool-agent", "idempotent": False},
-     "tools": [{"kind": "kubernetes-read"}]},
-    {"grant": {"input_class": "C2", "on_outage": "queue"},
-     "harness": {"kind": "tool-agent"}, "tools": [{"kind": "kubernetes-read"}]},
-], ids=["idempotent-harness", "read-only-tool", "default-max-attempts-and-flags"])
+    "idempotent-harness", "read-only-tool", "default-max-attempts-and-flags",
+])
 def test_sweep_preserves_valid_idempotent_and_read_only_replay_recipes(
-    work_rows, monkeypatch, replay_recipe,
+    work_rows, monkeypatch, gateway_bundle, replay_recipe,
 ):
-    """Valid historical replay-safe recipe forms still allow a bounded retry."""
+    """Producer-backed replay-safe recipe forms still allow a bounded retry."""
     import sovite.lease_service as lease_module
     db, _, _, _ = work_rows
+    bundle, generation, grant_id, resolved = _producer_retry_state(gateway_bundle, replay_recipe)
     with db.sessions.begin() as session:
         later = session.get(Job, "job")
         later.resolved = {**later.resolved, "compute": {"id": "fixture"}}
         expiry = session.get(WorkerExecutionLease, "job").lease_until
-        resolved = {
-            "compute": {"id": "fixture"},
-            "agent": {"id": "synthetic-agent"},
-            "model": {"id": "synthetic-model"},
-            "grant": {"input_class": "C2", "max_attempts": 3, "on_outage": "queue"},
-            "tools": [],
-            **replay_recipe,
-        }
         session.add(Job(id="aaa", receipt="valid-replay-recipe",
                         idempotency_key="valid-replay-recipe", request_digest="x",
-                        caller=later.caller, grant_id=later.grant_id,
-                        generation=later.generation, resolved=resolved,
+                        caller=later.caller, grant_id=grant_id,
+                        generation=generation, resolved=resolved,
                         task="synthetic replay safe", status="running", attempts=1,
                         lease_owner=later.lease_owner, lease_until=expiry))
+        session.add(BundleRevision(generation=generation, bundle=bundle))
         session.flush()
         session.add(WorkerExecutionLease(
             job_id="aaa", workload_id="workload", instance_id="instance",
-            fence="3" * 32, generation=later.generation, phase="started",
+            fence="3" * 32, generation=generation, phase="started",
             lease_until=expiry, execution_deadline=expiry, created_at=1, updated_at=1,
         ))
     monkeypatch.setattr(lease_module.time, "time", lambda: expiry + 1)
@@ -287,31 +314,29 @@ def test_sweep_preserves_valid_idempotent_and_read_only_replay_recipes(
 
 
 @pytest.mark.parametrize("phase", ["reserved", "started"])
-def test_empty_repository_recovery_respects_lease_phase(work_rows, monkeypatch, phase):
+def test_empty_repository_recovery_respects_lease_phase(work_rows, monkeypatch, gateway_bundle, phase):
     from test_work_projection_rows import _clear_work_history
     import sovite.lease_service as lease_module
     db, _, _, _ = work_rows
     _clear_work_history(db)
+    bundle, generation, grant_id, producer_recipe = _producer_retry_state(
+        gateway_bundle, "default-max-attempts-and-flags"
+    )
     with db.sessions.begin() as session:
         job = session.get(Job, "job")
         run = dict(job.resolved["repository_run"])
         run["deadline"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        job.resolved = {
-            **job.resolved,
-            "compute": {"id": "fixture"},
-            "agent": {"id": "synthetic-agent"},
-            "model": {"id": "synthetic-model", "connection": {}},
-            "grant": {"input_class": "C2", "max_attempts": 3, "on_outage": "queue"},
-            "harness": {"kind": "tool-agent", "idempotent": False},
-            "tools": [],
-            "repository_run": run,
-        }
+        job.resolved = {**producer_recipe, "repository_run": run}
+        job.generation = generation
+        job.grant_id = grant_id
         lease = session.get(WorkerExecutionLease, "job")
         expiry = lease.lease_until
+        lease.generation = generation
         lease.phase = phase
         if phase == "reserved":
             lease.execution_deadline = None
             job.attempts = 0
+        session.add(BundleRevision(generation=generation, bundle=bundle))
     monkeypatch.setattr(lease_module.time, "time", lambda: expiry + 1)
     service = LeaseService(SimpleNamespace(db=db, settings=SimpleNamespace(compute_id="fixture", max_attempts=3)),
                            execution_owner_key(workload_id="workload", instance_id="instance"), {})
