@@ -222,9 +222,11 @@ def _validate_recovery_retry_recipe(resolved: dict) -> None:
             raise _HandBackOwnerUnavailable() from None
 
 
-def _validate_recovery_recipe_generation(resolved: dict, raw_bundle: str, generation: str, grant_id: str) -> None:
+def _validate_recovery_recipe_generation(resolved: dict, raw_bundle: str, generation: str, grant_id: str,
+                                         hosting_envelope_path: str | None = None) -> None:
     """Check stored retry components against their recorded generation."""
-    from .policy import PolicyError, bundle_generation, resolve_recipe, validate_bundle
+    from .hosting import hosted_generation, load_envelope
+    from .policy import PolicyError, resolve_recipe
 
     def unique_pairs(pairs):
         result = {}
@@ -241,10 +243,14 @@ def _validate_recovery_recipe_generation(resolved: dict, raw_bundle: str, genera
         if type(raw_bundle) is not str:
             raise _HandBackOwnerUnavailable()
         parsed = json.loads(raw_bundle, object_pairs_hook=unique_pairs, parse_constant=reject_constant)
-        bundle = validate_bundle(parsed)
-        if bundle_generation(bundle) != generation:
+        if type(parsed) is not dict:
+            raise _HandBackOwnerUnavailable()
+        bundle = parsed
+        envelope = load_envelope(hosting_envelope_path) if hosting_envelope_path else None
+        if hosted_generation(bundle, envelope) != generation:
             raise _HandBackOwnerUnavailable()
         producer = resolve_recipe(bundle, grant_id)
+        producer["generation"] = generation
         if any(resolved.get(key) != value for key, value in producer.items()):
             raise _HandBackOwnerUnavailable()
         if any(key in resolved and key not in producer for key in ("restricted_class", "connector_roles")):
@@ -1874,7 +1880,8 @@ class LeaseService:
                             raise _HandBackOwnerUnavailable()
                         _validate_recovery_retry_recipe(row.resolved)
                         _validate_recovery_recipe_generation(row.resolved, retry_bundle_snapshot,
-                                                             probe["generation"], probe["grant_id"])
+                                                             probe["generation"], probe["grant_id"],
+                                                             getattr(self.platform.settings, "hosting_envelope_path", None))
 
                     if unresolved_work or explicit_uncertainty:
                         row.status, row.error_code = "blocked", "execution_uncertain"

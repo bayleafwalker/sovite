@@ -325,3 +325,95 @@ def test_large_programmatic_bundle_snapshot_has_no_invented_json_cap(owner):
     _validate_recovery_recipe_generation(
         producer_resolved, raw, generation, "incident-forensics"
     )
+
+
+def test_hosted_generation_uses_installed_envelope_and_rejects_drift(tmp_path):
+    import json
+    from pathlib import Path
+    from test_hosting import build_hosted
+    from sovite.lease_service import _HandBackOwnerUnavailable
+
+    settings, platform, bundle, envelope = build_hosted(tmp_path)
+    generation = platform.active()[1]
+    grant_id = bundle['grants'][0]['id']
+    producer = resolve_recipe(bundle, grant_id)
+    producer['generation'] = generation
+    raw = json.dumps(bundle)
+    _validate_recovery_recipe_generation(producer, raw, generation, grant_id, settings.hosting_envelope_path)
+
+    envelope['revision'] += 1
+    Path(settings.hosting_envelope_path).write_text(json.dumps(envelope))
+    with pytest.raises(_HandBackOwnerUnavailable):
+        _validate_recovery_recipe_generation(producer, raw, generation, grant_id, settings.hosting_envelope_path)
+    Path(settings.hosting_envelope_path).unlink()
+    with pytest.raises(OSError):
+        _validate_recovery_recipe_generation(producer, raw, generation, grant_id, settings.hosting_envelope_path)
+
+
+@pytest.mark.parametrize('owner', ['gateway'], indirect=True)
+@pytest.mark.parametrize('drift', [False, True])
+def test_hosted_reserved_owner_retry_uses_installed_binding(owner, tmp_path, drift):
+    import json
+    from pathlib import Path
+    from dataclasses import replace
+    from sovite.collection_transaction import owner_transaction
+    from test_hosting import build_hosted
+
+    (tmp_path / 'hosted').mkdir()
+    settings, hosted_platform, bundle, envelope = build_hosted(tmp_path / 'hosted')
+    generation = hosted_platform.active()[1]
+    grant_id = bundle['grants'][0]['id']
+    job_id, _ = _expired_reserved_owner(owner, key=f'hosted-{drift}')
+    producer = resolve_recipe(bundle, grant_id)
+    producer['generation'] = generation
+    with owner.platform.db.sessions.begin() as session:
+        row = session.get(Job, job_id)
+        lease = session.get(WorkerExecutionLease, job_id)
+        row.resolved = {**row.resolved, **producer}
+        row.generation = generation
+        row.grant_id = grant_id
+        lease.generation = generation
+        session.add(BundleRevision(generation=generation, bundle=bundle))
+    owner.platform.settings = replace(owner.platform.settings, hosting_envelope_path=settings.hosting_envelope_path)
+    if drift:
+        envelope['revision'] += 1
+        Path(settings.hosting_envelope_path).write_text(json.dumps(envelope))
+    before = _owner_state(owner, job_id)
+    if drift:
+        from sovite.lease_service import _HandBackOwnerUnavailable
+        with pytest.raises(_HandBackOwnerUnavailable):
+            with owner_transaction(owner.platform.db) as session:
+                owner.service._close_owner(job_id, recovery_session=session)
+        assert _owner_state(owner, job_id) == before
+    else:
+        with owner_transaction(owner.platform.db) as session:
+            assert owner.service._close_owner(job_id, recovery_session=session)
+        assert _owner_state(owner, job_id)[0] == 'retry_wait'
+
+
+def test_historical_bundle_retry_does_not_reapply_new_unrelated_policy(gateway_bundle):
+    import json
+    from sovite.lease_service import _HandBackOwnerUnavailable
+    from sovite.policy import PolicyError, bundle_generation, validate_bundle
+
+    # Accepted by c9248d6^; its new destination-wide rule rejects this unused
+    # provider cache even though it is outside the selected producer recipe.
+    historical = copy.deepcopy(gateway_bundle)
+    unused = copy.deepcopy(historical['destinations'][0])
+    unused['id'] = 'historical-unused-provider-cache'
+    unused['retention']['in_memory_cache']['scope'] = 'provider'
+    historical['destinations'].append(unused)
+    with pytest.raises(PolicyError):
+        validate_bundle(historical)
+    generation = bundle_generation(historical)
+    grant_id = historical['grants'][0]['id']
+    producer = resolve_recipe(historical, grant_id)
+    raw = json.dumps(historical)
+    _validate_recovery_recipe_generation(producer, raw, generation, grant_id)
+
+    tampered = copy.deepcopy(producer)
+    tampered['model']['id'] = 'other-model'
+    with pytest.raises(_HandBackOwnerUnavailable):
+        _validate_recovery_recipe_generation(tampered, raw, generation, grant_id)
+    with pytest.raises(_HandBackOwnerUnavailable):
+        _validate_recovery_recipe_generation(producer, raw, 'sha256:' + '0' * 64, grant_id)
