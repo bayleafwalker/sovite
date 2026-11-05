@@ -1018,9 +1018,7 @@ class LeaseService:
                         counts["examined"] += 1
                         if self._close_owner(candidate_id, recovery_session=session):
                             locked_lease = session.get(WorkerExecutionLease, candidate_id)
-                            if locked_lease is None:
-                                raise RuntimeError("recovered lease unavailable")
-                            retired_fence = locked_lease.fence
+                            retired_fence = locked_lease.fence if locked_lease is not None else None
                             outcome = "retired"
                         save_cursor(session, cursor, last_job_id=candidate_id)
                 if candidate_id is None:
@@ -1230,8 +1228,6 @@ class LeaseService:
                         bundle_table.c.generation == probe["generation"])).scalar_one_or_none()
                     lease_snapshot = session.execute(select(WorkerExecutionLease.__table__).where(
                         WorkerExecutionLease.job_id == job_id)).mappings().one_or_none()
-                    if lease_snapshot is None:
-                        raise _HandBackOwnerUnavailable()
                 raw = session.execute(select(cast(job_table.c.resolved, Text)).where(
                     job_table.c.id == job_id)).scalar_one_or_none()
                 if type(raw) is not str:
@@ -1268,7 +1264,8 @@ class LeaseService:
                 current_attempt_row = None
                 current_attempt_state = None
                 preappend_finish = False
-                recovery_reserved = (recovery_session is not None and lease_snapshot["phase"] == "reserved")
+                recovery_reserved = (recovery_session is not None and lease_snapshot is not None
+                                     and lease_snapshot["phase"] == "reserved")
                 if recovery_reserved:
                     preappend_finish = True
                 if run is not None and probe["status"] == "running" and not recovery_reserved:
@@ -1527,7 +1524,8 @@ class LeaseService:
                             additional_work_calls=tuple(historical_calls),
                             legacy_batch_keys=tuple(legacy_batch_keys), expected_job_id=job_id,
                             include_bindings=schema_version >= 10,
-                            nonblocking_owner_ids=(job_id,) if recovery_session is not None else ())
+                            nonblocking_owner_ids=(job_id,) if recovery_session is not None else (),
+                            allow_missing_owner_lease=(recovery_session is not None and lease_snapshot is None))
                     except _WorkProjectionBusy:
                         if recovery_session is not None:
                             raise
@@ -1802,37 +1800,47 @@ class LeaseService:
 
                 if recovery_session is not None:
                     now = time.time()
-                    if lease is None or lease_snapshot is None:
-                        raise _HandBackOwnerUnavailable()
-                    if any(getattr(lease, col.name) != lease_snapshot[col.name]
-                           for col in WorkerExecutionLease.__table__.columns):
-                        raise _HandBackOwnerUnavailable()
-                    try:
-                        self._check_lease_finite(row, lease)
-                    except PlatformError as error:
-                        if error.code != "owner_unavailable":
-                            raise
-                        raise _HandBackOwnerUnavailable() from None
+                    legacy_no_lease = lease_snapshot is None
+                    if legacy_no_lease:
+                        # Migration 5 introduced leases without backfilling old
+                        # running Jobs. Job and lease locks have now been taken;
+                        # any newly appeared lease makes this snapshot stale.
+                        if lease is not None or run is not None or projections_all or legacy_links:
+                            raise _HandBackOwnerUnavailable()
+                        if work_reservations or work_slots or work_intents or work_bindings:
+                            raise _HandBackOwnerUnavailable()
+                    else:
+                        if lease is None or any(getattr(lease, col.name) != lease_snapshot[col.name]
+                                                for col in WorkerExecutionLease.__table__.columns):
+                            raise _HandBackOwnerUnavailable()
+                        try:
+                            self._check_lease_finite(row, lease)
+                        except PlatformError as error:
+                            if error.code != "owner_unavailable":
+                                raise
+                            raise _HandBackOwnerUnavailable() from None
                     compute = row.resolved.get("compute") if type(row.resolved) is dict else None
                     if (type(compute) is not dict or compute.get("id") != self.platform.settings.compute_id
                             or type(row.lease_until) not in (int, float)
-                            or not math.isfinite(row.lease_until)
-                            or row.lease_until != lease.lease_until or row.lease_until >= now
-                            or lease.phase not in {"reserved", "started"}
-                            or (lease.phase == "started" and
-                                (type(row.attempts) is not int or row.attempts < 1))):
+                            or not math.isfinite(row.lease_until) or row.lease_until >= now
+                            or type(row.attempts) is not int or row.attempts < (1 if legacy_no_lease else 0)
+                            or type(row.lease_owner) is not str or not row.lease_owner):
                         raise _HandBackOwnerUnavailable()
-                    derived_owner = execution_owner_key(workload_id=lease.workload_id,
-                                                        instance_id=lease.instance_id)
-                    if (type(row.lease_owner) is not str or not row.lease_owner
-                            or (row.lease_owner != derived_owner and
-                                hashlib.sha256(row.lease_owner.encode("utf-8")).hexdigest() != lease.instance_id)):
-                        raise _HandBackOwnerUnavailable()
-                    if ((lease.phase == "reserved" and lease.execution_deadline is not None)
-                            or (lease.phase == "started" and lease.execution_deadline is None)):
-                        raise _HandBackOwnerUnavailable()
+                    if not legacy_no_lease:
+                        if (row.lease_until != lease.lease_until
+                                or lease.phase not in {"reserved", "started"}
+                                or (lease.phase == "started" and row.attempts < 1)):
+                            raise _HandBackOwnerUnavailable()
+                        derived_owner = execution_owner_key(workload_id=lease.workload_id,
+                                                            instance_id=lease.instance_id)
+                        if (row.lease_owner != derived_owner and
+                                hashlib.sha256(row.lease_owner.encode("utf-8")).hexdigest() != lease.instance_id):
+                            raise _HandBackOwnerUnavailable()
+                        if ((lease.phase == "reserved" and lease.execution_deadline is not None)
+                                or (lease.phase == "started" and lease.execution_deadline is None)):
+                            raise _HandBackOwnerUnavailable()
                     projected_history = bool(projections_all or legacy_links)
-                    if lease.phase == "reserved" and projected_history:
+                    if not legacy_no_lease and lease.phase == "reserved" and projected_history:
                         raise _HandBackOwnerUnavailable()
                     if run is not None and not recovery_reserved and current_attempt_row is not None:
                         if hashlib.sha256(lease.fence.encode("utf-8")).hexdigest() != current_attempt_row.get("fence_sha256"):
@@ -1887,7 +1895,7 @@ class LeaseService:
                         row.status, row.error_code = "blocked", "execution_uncertain"
                     elif row.cancel_requested:
                         row.status, row.error_code = "cancelled", "cancelled"
-                    elif lease.phase == "reserved":
+                    elif not legacy_no_lease and lease.phase == "reserved":
                         validate_retry()
                         row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
                     else:
@@ -1913,14 +1921,15 @@ class LeaseService:
                             validate_retry()
                             row.status, row.error_code, row.next_attempt_at = "retry_wait", "lease_expired", now
                     row.lease_owner, row.lease_until, row.updated_at = None, None, now
-                    lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
+                    if lease is not None:
+                        lease.phase, lease.lease_until, lease.updated_at = "finished", 0, now
                     revoke_execution(session, row.id)
                     if row.status in TERMINAL:
                         row.finished_at = now
                     self.platform.db.audit(session, self.id, "task.lease_recovered", row.id,
                                            {"status": row.status, "error_code": row.error_code})
                     succeeded = True
-                    succeeded_fence = lease.fence
+                    succeeded_fence = lease.fence if lease is not None else None
                 elif finish_outcome is None:
                     now = time.time()
                     projected_history = bool(projections_all or legacy_links)

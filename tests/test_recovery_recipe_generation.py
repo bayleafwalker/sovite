@@ -417,3 +417,113 @@ def test_historical_bundle_retry_does_not_reapply_new_unrelated_policy(gateway_b
         _validate_recovery_recipe_generation(tampered, raw, generation, grant_id)
     with pytest.raises(_HandBackOwnerUnavailable):
         _validate_recovery_recipe_generation(producer, raw, 'sha256:' + '0' * 64, grant_id)
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+@pytest.mark.parametrize('safe', [True, False])
+def test_legacy_running_owner_without_lease_recovered_conservatively(owner, safe):
+    job_id, _ = _expired_reserved_owner(owner, key=f'legacy-no-lease-{safe}')
+    with owner.platform.db.sessions.begin() as session:
+        row = session.get(Job, job_id)
+        row.attempts = 1
+        if not safe:
+            resolved = copy.deepcopy(row.resolved)
+            resolved['harness']['kind'] = 'agent-http'
+            row.resolved = resolved
+        session.delete(session.get(WorkerExecutionLease, job_id))
+    result = owner.service.recover_expired()
+    assert result['retired'] == 1 and result['invalid'] == 0
+    with owner.platform.db.sessions() as session:
+        row = session.get(Job, job_id)
+        assert (row.status, row.error_code) == (('retry_wait', 'lease_expired') if safe else ('blocked', 'execution_uncertain'))
+        assert row.lease_owner is None and row.lease_until is None
+        assert session.get(WorkerExecutionLease, job_id) is None
+
+
+def test_v4_running_job_without_lease_survives_migration_and_recovers(database, tmp_path):
+    from sovite.policy import load_bundle
+    from sovite.service import Platform
+    from sovite.settings import Settings
+    from test_migrations import _create_historical_schema
+
+    _create_historical_schema(database, 4)
+    bundle, generation = load_bundle('config/platform.local.yaml')
+    grant_id = 'incident-forensics'
+    recipe = resolve_recipe(bundle, grant_id)
+    with database.sessions.begin() as session:
+        session.add(BundleRevision(generation=generation, bundle=bundle))
+        session.add(MetadataRow(key='active_generation', value={'generation': generation}))
+        session.add(Job(id='legacy-v4', receipt='legacy-receipt', idempotency_key='legacy-key',
+                        request_digest='legacy-digest', caller='operations', grant_id=grant_id,
+                        generation=generation, resolved=recipe, task='legacy', status='running',
+                        attempts=1, lease_owner='legacy-worker', lease_until=time.time() - 10))
+    database.migrate()
+    settings = Settings(database_url=database.engine.url.render_as_string(hide_password=False),
+                        database_schema=database.schema, artifact_path=str(tmp_path / 'artifacts'),
+                        compute_id=recipe['compute']['id'], require_qualification=False)
+    platform = Platform(settings)
+    platform.db.engine.dispose()
+    platform.db = database
+    with database.sessions() as session:
+        assert session.get(WorkerExecutionLease, 'legacy-v4') is None
+    result = LeaseService(platform, 'new-worker', {}).recover_expired()
+    assert result['retired'] == 1
+    with database.sessions() as session:
+        job = session.get(Job, 'legacy-v4')
+        assert (job.status, job.error_code) == ('retry_wait', 'lease_expired')
+        assert job.lease_owner is None and job.lease_until is None
+        assert session.get(WorkerExecutionLease, 'legacy-v4') is None
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_legacy_snapshot_refuses_lease_appearing_before_owner_lock(owner, monkeypatch):
+    import sovite.work_projection as projections
+    job_id, _ = _expired_reserved_owner(owner, key='legacy-lease-drift')
+    with owner.platform.db.sessions.begin() as session:
+        row = session.get(Job, job_id)
+        row.attempts = 1
+        lease = session.get(WorkerExecutionLease, job_id)
+        saved = {col.name: getattr(lease, col.name) for col in WorkerExecutionLease.__table__.columns}
+        session.delete(lease)
+    from test_execution_leases import snapshot
+    before = snapshot(owner.platform)
+    original = projections.lock_work_projection_set
+    reached = []
+    def insert_before_lock(session, *args, **kwargs):
+        reached.append(True)
+        session.add(WorkerExecutionLease(**saved))
+        session.flush()
+        return original(session, *args, **kwargs)
+    monkeypatch.setattr(projections, 'lock_work_projection_set', insert_before_lock)
+    result = owner.service.recover_expired()
+    assert reached and result['invalid'] == 1 and result['retired'] == 0
+    after = snapshot(owner.platform)
+    assert [row for row in after['jobs'] if row['id'] == job_id] == [row for row in before['jobs'] if row['id'] == job_id]
+    with owner.platform.db.sessions() as session:
+        assert session.get(WorkerExecutionLease, job_id) is None
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_recovery_denies_live_conflicting_lease(owner):
+    job_id, _ = _expired_reserved_owner(owner, key='legacy-live-conflict')
+    with owner.platform.db.sessions.begin() as session:
+        session.get(WorkerExecutionLease, job_id).lease_until = owner.clock[0] + 100
+    before = _owner_state(owner, job_id)
+    result = owner.service.recover_expired()
+    assert result['invalid'] == 1 and result['retired'] == 0
+    assert _owner_state(owner, job_id) == before
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_legacy_missing_owner_is_not_recovered(owner):
+    job_id, _ = _expired_reserved_owner(owner, key='legacy-missing-owner')
+    with owner.platform.db.sessions.begin() as session:
+        row = session.get(Job, job_id)
+        row.attempts = 1
+        row.lease_owner = None
+        session.delete(session.get(WorkerExecutionLease, job_id))
+    result = owner.service.recover_expired()
+    assert result['invalid'] == 1 and result['retired'] == 0
+    with owner.platform.db.sessions() as session:
+        assert session.get(Job, job_id).status == 'running'
+        assert session.get(WorkerExecutionLease, job_id) is None

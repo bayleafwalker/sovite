@@ -364,7 +364,7 @@ def work_projections_from_job(raw: Any, *, allow_absent: bool = False) -> tuple[
 def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...], *,
                              additional_work_calls=(), legacy_batch_keys=(),
                              expected_job_id=None, include_bindings=True,
-                             nonblocking_owner_ids=()) -> None:
+                             nonblocking_owner_ids=(), allow_missing_owner_lease=False) -> None:
     """Prelock a multi-call Work projection set by global row class order.
 
     Per-call comparison below may repeat SELECT FOR UPDATE queries, but those
@@ -382,6 +382,10 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
     additional_work_calls = tuple(additional_work_calls)
     legacy_batch_keys = tuple(legacy_batch_keys)
     nonblocking_owner_ids = frozenset(nonblocking_owner_ids)
+    if (type(allow_missing_owner_lease) is not bool or
+            (allow_missing_owner_lease and (not nonblocking_owner_ids or projections
+                                            or additional_work_calls or legacy_batch_keys))):
+        raise _WorkProjectionUnavailable()
     if (any(type(value) is not str or not value for value in nonblocking_owner_ids)
             or nonblocking_owner_ids and len(nonblocking_owner_ids) != 1):
         raise _WorkProjectionUnavailable()
@@ -534,7 +538,8 @@ def lock_work_projection_set(session, projections: tuple[WorkProjectionV1, ...],
         raise _WorkProjectionUnavailable()
     locked_leases = lock_keys(lease_t, (lease_t.c.job_id,), ((job_id,) for job_id in job_ids),
                               skip_locked=bool(owner_job_ids))
-    if owner_job_ids and any(locked_leases.get((job_id,)) is None for job_id in owner_job_ids):
+    if (owner_job_ids and not allow_missing_owner_lease
+            and any(locked_leases.get((job_id,)) is None for job_id in owner_job_ids)):
         raise _WorkProjectionUnavailable()
 
     lock_keys(reservation_t, (reservation_t.c.scope_id, reservation_t.c.call_id), calls)
