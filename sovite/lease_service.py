@@ -656,10 +656,14 @@ class LeaseService:
             if not recovery_done:
                 self._guard_fresh_reservation(session, principal.compute_id, request_recovery=True)
 
-            candidates = session.scalars(self._eligible_query(select(Job).where(
+            # Exclude provably foreign compute pools before the bounded window.
+            # Unknown/malformed selectors remain in scope for owner validation.
+            candidate_query = self._recovery_scope(session, select(Job).where(
                 Job.status.in_(("queued", "retry_wait")), Job.next_attempt_at <= now,
                 Job.cancel_requested.is_(False),
-            )).order_by(Job.created_at, Job.id).limit(100).with_for_update(skip_locked=True)).all()
+            ), principal.compute_id)
+            candidates = session.scalars(candidate_query.order_by(
+                Job.created_at, Job.id).limit(100).with_for_update(skip_locked=True)).all()
             # Candidate row locks can wait too; base each new reservation on
             # owner time observed after those locks have been acquired.
             now = time.time()
