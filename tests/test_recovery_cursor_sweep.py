@@ -1050,6 +1050,33 @@ def test_direct_reserve_counts_malformed_running_model_as_unknown_and_reserves_l
         assert session.get(Job, queued.id).status == "running"
 
 
+def reserve_after_submission(owner, operation_id):
+    # Submission uses wall time while the lease fixture uses a controlled clock.
+    import time as wall_time
+    owner.clock[0] = max(owner.clock[0], wall_time.time() + 1)
+    return owner.service.reserve(
+        principal=owner.principal, instance_id=owner.instance, operation_id=operation_id,
+    )
+
+
+@pytest.mark.parametrize("owner", ["direct"], indirect=True)
+def test_initial_reservation_after_owner_setup_outlives_fixture_clock(owner):
+    """A newly submitted job remains eligible when setup outlives the fixture clock."""
+    import time as wall_time
+    from test_worker_remote_boundary import admit_agent_http_owner
+
+    admit_agent_http_owner(owner)
+    owner.clock[0] = wall_time.time() - 2
+    candidate = owner.platform.submit(
+        "native-code-review", "stale fixture clock", "operations", "stale-fixture-clock",
+        input_class="C2",
+    )
+    with owner.platform.db.sessions() as session:
+        assert session.get(Job, candidate.id).next_attempt_at > owner.clock[0]
+    result = reserve_after_submission(owner, "reserve-after-stale-fixture-clock")
+    assert result["state"] == "reserved" and result["job"]["job_id"] == candidate.id
+
+
 @pytest.mark.parametrize("owner", ["direct"], indirect=True)
 @pytest.mark.parametrize("entrypoint", ["reserve", "pull"], ids=["direct-reserve", "installed-pull"])
 @pytest.mark.parametrize("malformed_recipe", [
@@ -1084,9 +1111,8 @@ def test_expired_reserved_malformed_recipe_stays_held_and_later_reservation_prog
             return submit(owner, key=key, task=f"reserved recovery {key}")
 
     candidate = submit_case(f"malformed-reserved-{entrypoint}-{malformed_recipe}")
-    first = owner.service.reserve(
-        principal=owner.principal, instance_id=owner.instance,
-        operation_id=f"reserve-before-malformation-{entrypoint}-{malformed_recipe}",
+    first = reserve_after_submission(
+        owner, f"reserve-before-malformation-{entrypoint}-{malformed_recipe}",
     )
     assert first["state"] == "reserved" and first["job"]["job_id"] == candidate.id
     now = max(owner.clock[0], wall_time.time() + 1)
