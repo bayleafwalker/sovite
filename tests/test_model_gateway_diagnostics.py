@@ -570,3 +570,49 @@ def test_bounded_start_observer_failure_preserves_barrier_failure():
         assert not getattr(caught.value, '__notes__', [])
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('failed_action', ['finish', 'renew'])
+def test_inference_failure_reports_sanitized_authority_action(authority_env, failed_action):
+    from test_model_gateway import _assert_inference_completed
+    from sovite.gateway.server import create_inference_app
+    from connector_support import BODY
+
+    async def scenario():
+        async with connected(authority_env) as env:
+            transport = env.gateway.authority.client._transport.transport
+            original = transport.handle_async_request
+
+            async def fail_action(request):
+                if request.url.path.endswith('/' + failed_action):
+                    return httpx.Response(503, json={'detail': {'code': 'private-canary'}}, request=request)
+                return await original(request)
+
+            transport.handle_async_request = fail_action
+            app = create_inference_app(env.gateway, {'worker': 'workload-test-' + 'w' * 24})
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://inference.test') as client:
+                response = await client.post(f'/inference/{env.model["id"]}/chat', content=BODY,
+                    headers={'Authorization': 'Bearer ' + 'workload-test-' + 'w' * 24,
+                             'X-Sovite-Capability': env.job.execution_capability,
+                             'X-Sovite-Job': env.job.id, 'X-Sovite-Fence': env.job.execution_fence,
+                             'X-Sovite-Deadline': str(int(time.time()) + 20)})
+            assert b'authority_unavailable' in response.content
+            with pytest.raises(AssertionError) as raised:
+                _assert_inference_completed(response, env.authority_diagnostics)
+            note = ' '.join(raised.value.__notes__)
+            assert f'action:{failed_action}' in note
+            assert 'status:5xx' in note
+            for secret in ('private-canary', env.job.execution_capability, env.settings.authority_token,
+                           'workload-test-' + 'w' * 24):
+                assert secret not in note
+            if failed_action == 'finish':
+                assert env.engine.calls and b'[DONE]' not in response.content
+
+    asyncio.run(scenario())
+
+
+def test_inference_failure_diagnostic_error_does_not_mask_assertion():
+    from test_model_gateway import _assert_inference_completed
+    response = httpx.Response(200, content=b'failure')
+    with pytest.raises(AssertionError):
+        _assert_inference_completed(response, _BrokenNoteDiagnostics())

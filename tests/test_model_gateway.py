@@ -287,6 +287,17 @@ def test_PIN_BEFORE_PROMPT_preparation_pin_swap_sends_zero_prompt_bytes(authorit
     asyncio.run(scenario())
 
 
+def _assert_inference_completed(response, diagnostics):
+    try:
+        assert response.status_code == 200 and b'[DONE]' in response.content
+    except AssertionError as error:
+        try:
+            error.add_note(diagnostics.note())
+        except (Exception, asyncio.CancelledError):
+            pass  # Test diagnostics must never mask the original failure.
+        raise
+
+
 def test_INFERENCE_ONLY_helper_credentials_rejected_as_workload_identity(authority_env):
     async def scenario():
         async with connected(authority_env) as env:
@@ -299,7 +310,7 @@ def test_INFERENCE_ONLY_helper_credentials_rejected_as_workload_identity(authori
                 response = await client.post(f'/inference/{env.model["id"]}/chat', content=BODY,
                     headers={'Authorization': 'Bearer ' + 'workload-test-' + 'w' * 24, 'X-Sovite-Capability': env.job.execution_capability,
                              'X-Sovite-Job': env.job.id, 'X-Sovite-Fence': env.job.execution_fence, 'X-Sovite-Deadline': str(int(time.time()) + 20)})
-                assert response.status_code == 200 and b'[DONE]' in response.content
+                _assert_inference_completed(response, env.authority_diagnostics)
             assert len(env.engine.calls) == 1
     asyncio.run(scenario())
 
