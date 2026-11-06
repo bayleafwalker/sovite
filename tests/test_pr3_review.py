@@ -253,8 +253,8 @@ def test_disconnect_fence_retries_with_small_bound(authority_env):
     ('job_id', ''), ('fence', 'bad/fence'), ('capability', ''), ('workload', 'x' * 161)])
 def test_malformed_worker_requests_are_denied_locally(authority_env, field, value):
     async def scenario():
-        # This case tests local request validation, not the production open RTT.
-        async with connected(authority_env, relaxed_open_setup=True) as env:
+        # This case tests local request validation, not production setup RTTs.
+        async with connected(authority_env, relaxed_open_setup=True, relaxed_hello_setup=True) as env:
             calls = []
             original = env.gateway.call
             async def observe(action, **fields):

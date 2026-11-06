@@ -58,6 +58,9 @@
 {{- if or (hasPrefix "SOVITE_" .env) (hasPrefix "AWS_" .env) -}}{{ fail "modelCredentials cannot override reserved SOVITE_ or AWS_ runtime variables" }}{{- end -}}
 {{- end -}}
 {{- if .Values.remoteWorker.enabled -}}
+{{- if not (has (int .Values.remoteWorker.apiVersion) (list 1 2)) -}}
+{{- fail "remoteWorker.apiVersion must be 1 or 2" -}}
+{{- end -}}
 {{- if not (regexMatch "^https://[^/?#@]+$" .Values.remoteWorker.controlUrl) -}}
 {{- fail "remoteWorker.controlUrl must be an explicit HTTPS origin" -}}
 {{- end -}}
