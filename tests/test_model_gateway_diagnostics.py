@@ -501,6 +501,11 @@ def test_broken_diagnostics_do_not_mask_connected_setup_failure(authority_env):
 def test_broken_diagnostics_do_not_mask_real_authority_success_or_cleanup(authority_env):
     async def scenario():
         async with connected(authority_env, diagnostics_factory=_BrokenDiagnostics) as env:
+            events = env.setup_sidecar.events
+            assert any(event["stage"] == "owner" and event["action"] == "hello"
+                       and event["outcome"] == "entered" for event in events)
+            assert any(event["stage"] == "owner" and event["action"] == "hello"
+                       and event["outcome"] == "ok" for event in events), env.setup_sidecar.note()
             request = await infer(env)
             result = await consume(request)
             assert b"[DONE]" in result
@@ -764,7 +769,42 @@ def test_connected_start_broken_observer_preserves_failure(authority_env, monkey
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("failure_stage", ["transport_constructor", "websocket_server_entry"])
+def test_connected_restores_owner_routes_after_setup_failure(authority_env, monkeypatch, failure_stage):
+    owner_routes = [route.dependant for route in authority_env.app.routes
+                    if getattr(route, "path", "").startswith("/internal/authority/")
+                    and getattr(route, "dependant", None) is not None]
+    original_calls = [route.call for route in owner_routes]
+
+    if failure_stage == "transport_constructor":
+        def fail_transport(*_args, **_kwargs):
+            raise RuntimeError("private-canary-constructor")
+
+        monkeypatch.setattr(model_support, "_DiagnosticASGITransport", fail_transport)
+    else:
+        class FailedServe:
+            async def __aenter__(self):
+                raise RuntimeError("private-canary-server-entry")
+
+            async def __aexit__(self, *_args):
+                return False
+
+        monkeypatch.setattr(model_support, "serve", lambda *_args, **_kwargs: FailedServe())
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="private-canary"):
+            async with connected(authority_env):
+                pytest.fail("setup failure was not raised")
+        assert [route.call for route in owner_routes] == original_calls
+
+    asyncio.run(scenario())
+
+
 def test_connected_start_cleanup_failures_preserve_original_and_attempt_all(authority_env, monkeypatch):
+    owner_routes = [route.dependant for route in authority_env.app.routes
+                    if getattr(route, "path", "").startswith("/internal/authority/")
+                    and getattr(route, "dependant", None) is not None]
+    original_calls = [route.call for route in owner_routes]
     calls = []
     class Injected(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -801,6 +841,7 @@ def test_connected_start_cleanup_failures_preserve_original_and_attempt_all(auth
         assert 'action:start' in notes and 'cause_category:transport_error' in notes
         assert 'private-canary' not in notes
         assert calls == ['gateway_close', 'server_close', 'server_wait_closed']
+        assert [route.call for route in owner_routes] == original_calls
 
     asyncio.run(scenario())
 

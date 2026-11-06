@@ -267,10 +267,10 @@ def _best_effort_observation(callback):
 
 class _DiagnosticASGITransport(httpx.AsyncBaseTransport):
     """Pass through ASGI requests while retaining bounded, body-free diagnostics."""
-    def __init__(self, transport, diagnostics, sidecar=None):
+    def __init__(self, transport, diagnostics):
         self.transport = transport
         self.diagnostics = diagnostics
-        self.sidecar = sidecar
+        self.sidecar = None
 
     async def handle_async_request(self, request):
         action = request.url.path.rsplit("/", 1)[-1]
@@ -434,63 +434,53 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
     sidecar = _SetupSidecar()
     observed_app = _ObservedAuthorityASGI(env.app, sidecar)
     restore_owner_routes = _observe_authority_route_handlers(env.app, sidecar)
-    transport = _DiagnosticASGITransport(httpx.ASGITransport(app=observed_app), diagnostics, sidecar)
-    if relaxed_open_setup or relaxed_hello_setup:
-        actions = frozenset(action for action, enabled in (
-            ('open', relaxed_open_setup), ('hello', relaxed_hello_setup)) if enabled)
-        client = _SetupOpenAuthorityClient('http://control.test', env.settings.authority_token,
-                                           transport=transport, setup_actions=actions)
-    else:
-        client = AuthorityClient('http://control.test', env.settings.authority_token, transport=transport)
-    helper_holder = {"value": None}
-
-    gateway = _DiagnosticGateway(client, diagnostics)
+    gateway = None
+    task = None
     try:
-        await gateway.start()
-    except BaseException as error:
-        def observe_start_failure():
-            diagnostics.add(stage="setup", outcome="cancelled" if isinstance(error, asyncio.CancelledError) else "error")
-            error.add_note(diagnostics.note())
+        transport = _DiagnosticASGITransport(httpx.ASGITransport(app=observed_app), diagnostics)
+        transport.sidecar = sidecar
+        if relaxed_open_setup or relaxed_hello_setup:
+            actions = frozenset(action for action, enabled in (
+                ('open', relaxed_open_setup), ('hello', relaxed_hello_setup)) if enabled)
+            client = _SetupOpenAuthorityClient('http://control.test', env.settings.authority_token,
+                                               transport=transport, setup_actions=actions)
+        else:
+            client = AuthorityClient('http://control.test', env.settings.authority_token, transport=transport)
 
-        _best_effort_observation(observe_start_failure)
+        gateway = _DiagnosticGateway(client, diagnostics)
         try:
-            error.add_note(sidecar.note())
-        except BaseException:
-            pass
-        restore_owner_routes()
-        try:
-            await gateway.close()
-        except (Exception, asyncio.CancelledError):
-            pass
-        try:
-            http_server.close()
-        except (Exception, asyncio.CancelledError):
-            pass
-        try:
-            await http_server.wait_closed()
-        except (Exception, asyncio.CancelledError):
-            pass
-        raise
-    async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
-        settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
-            ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
-            signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
-            identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
-        helper = helper_type(settings)
-        helper_holder["value"] = helper
-        async def run_helper_with_sidecar():
+            await gateway.start()
+        except BaseException as error:
+            def observe_start_failure():
+                diagnostics.add(stage="setup", outcome="cancelled" if isinstance(error, asyncio.CancelledError) else "error")
+                error.add_note(diagnostics.note())
+
+            _best_effort_observation(observe_start_failure)
             try:
-                await helper.run()
-            except BaseException as error:
-                sidecar.add("helper", "other", "exception", category=_helper_failure_category(error))
-                try:
-                    error.add_note(sidecar.note())
-                except BaseException:
-                    pass
-                raise
+                error.add_note(sidecar.note())
+            except BaseException:
+                pass
+            raise
 
-        task = asyncio.create_task(run_helper_with_sidecar())
-        try:
+        async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
+            settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
+                ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
+                signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
+                identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
+            helper = helper_type(settings)
+
+            async def run_helper_with_sidecar():
+                try:
+                    await helper.run()
+                except BaseException as error:
+                    sidecar.add("helper", "other", "exception", category=_helper_failure_category(error))
+                    try:
+                        error.add_note(sidecar.note())
+                    except BaseException:
+                        pass
+                    raise
+
+            task = asyncio.create_task(run_helper_with_sidecar())
             try:
                 async with asyncio.timeout(5):
                     while env.model['id'] not in gateway.sessions:
@@ -522,15 +512,34 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
             env.setup_sidecar = sidecar
             env.observed_authority_app = observed_app
             yield env
-        finally:
-            await gateway.close()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            restore_owner_routes()
-            http_server.close()
-            await http_server.wait_closed()
+    finally:
+        try:
+            if gateway is not None:
+                try:
+                    await gateway.close()
+                except BaseException:
+                    pass
+            if task is not None:
+                task.cancel()
+                try:
+                    await asyncio.gather(task, return_exceptions=True)
+                except BaseException:
+                    pass
+            try:
+                http_server.close()
+            except BaseException:
+                pass
+            try:
+                await http_server.wait_closed()
+            except BaseException:
+                pass
             if engine.handlers:
-                await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
+                try:
+                    await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
+                except BaseException:
+                    pass
+        finally:
+            restore_owner_routes()
 
 
 async def infer(env, **changes):
