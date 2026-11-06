@@ -195,7 +195,7 @@ class _DiagnosticGateway(Gateway):
                              "category": _error_category(error), "cause_category": _safe_cause_category(error),
                              "owner_state": "not_observed"}
                     self.diagnostics.add(**event)
-                    if action in {"authorize", "renew"} and isinstance(error, GatewayError):
+                    if isinstance(error, GatewayError):
                         error.add_note(self.diagnostics.note())
 
                 _best_effort_observation(observe_failure)
@@ -304,7 +304,27 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
     helper_holder = {"value": None}
 
     gateway = _DiagnosticGateway(client, diagnostics)
-    await gateway.start()
+    try:
+        await gateway.start()
+    except BaseException as error:
+        def observe_start_failure():
+            diagnostics.add(stage="setup", outcome="cancelled" if isinstance(error, asyncio.CancelledError) else "error")
+            error.add_note(diagnostics.note())
+
+        _best_effort_observation(observe_start_failure)
+        try:
+            await gateway.close()
+        except (Exception, asyncio.CancelledError):
+            pass
+        try:
+            http_server.close()
+        except (Exception, asyncio.CancelledError):
+            pass
+        try:
+            await http_server.wait_closed()
+        except (Exception, asyncio.CancelledError):
+            pass
+        raise
     async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
         settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
             ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
