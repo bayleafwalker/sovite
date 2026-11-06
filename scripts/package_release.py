@@ -35,62 +35,71 @@ def source_files():
 
 def validate_contract_provenance(files):
     by_name = {path.relative_to(ROOT).as_posix(): path for path in files}
-    provenance_path = "contracts/execution-v1/provenance.json"
-    provenance = json.loads(by_name[provenance_path].read_text())
-    sdk_root = ROOT / "sovite/execution_contract" / provenance["generatedSdk"]["package"].rsplit(".", 1)[-1]
+    for version in ("v1", "v2"):
+        contract_root = f"contracts/execution-{version}"
+        source_root = contract_root if version == "v1" else f"{contract_root}/source"
+        provenance_path = f"{contract_root}/provenance.json"
+        provenance = json.loads(by_name[provenance_path].read_text())
+        sdk_root = ROOT / "sovite/execution_contract" / provenance["generatedSdk"]["package"].rsplit(".", 1)[-1]
 
-    for relative, expected in provenance["sourceSha256"].items():
-        path = f"contracts/execution-v1/{relative}"
-        if path not in by_name or hashlib.sha256(by_name[path].read_bytes()).hexdigest() != expected:
-            raise ValueError(f"Execution contract source provenance does not match {path}")
-    if provenance["generator"]["runtimePackage"] != "vuoro-contracts==0.2.0":
-        raise ValueError("Execution contract runtime package is not the qualified release")
-    if provenance["generator"]["runtimeWheelSha256"] != "7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9":
-        raise ValueError("Execution contract runtime wheel hash is not the qualified release")
+        for relative, expected in provenance["sourceSha256"].items():
+            path = f"{source_root}/{relative}"
+            if path not in by_name or hashlib.sha256(by_name[path].read_bytes()).hexdigest() != expected:
+                raise ValueError(f"Execution contract source provenance does not match {path}")
+        if provenance["generator"]["runtimePackage"] != "vuoro-contracts==0.2.0":
+            raise ValueError("Execution contract runtime package is not the qualified release")
+        if provenance["generator"]["runtimeWheelSha256"] != "7bc6558076fff11591b6382641608a95afebb846c254309673351a29854e12c9":
+            raise ValueError("Execution contract runtime wheel hash is not the qualified release")
 
     # Hash exactly the files the source release can contain. Runtime imports
     # create interpreter-specific __pycache__/*.pyc files inside this package;
     # those files are excluded from the release and must not affect provenance.
-    package_files = sorted(
-        path for path in files
-        if path.is_relative_to(sdk_root)
-        and path.suffix in SOURCE_SUFFIXES
-        and not (set(path.relative_to(sdk_root).parts) & EXCLUDED_PARTS)
-    )
-    tree_hash = hashlib.sha256()
-    for path in package_files:
-        relative = path.relative_to(sdk_root).as_posix()
-        body = path.read_bytes()
-        tree_hash.update(relative.encode("utf-8"))
-        tree_hash.update(b"\0")
-        tree_hash.update(body)
-        tree_hash.update(b"\0")
-    if tree_hash.hexdigest() != provenance["generatedSdk"]["treeSha256"]:
-        raise ValueError("Generated execution SDK tree differs from its provenance hash")
+        package_files = sorted(
+            path for path in files
+            if path.is_relative_to(sdk_root)
+            and path.suffix in SOURCE_SUFFIXES
+            and not (set(path.relative_to(sdk_root).parts) & EXCLUDED_PARTS)
+        )
+        tree_hash = hashlib.sha256()
+        for path in package_files:
+            relative = path.relative_to(sdk_root).as_posix()
+            body = path.read_bytes()
+            tree_hash.update(relative.encode("utf-8"))
+            tree_hash.update(b"\0")
+            tree_hash.update(body)
+            tree_hash.update(b"\0")
+        if tree_hash.hexdigest() != provenance["generatedSdk"]["treeSha256"]:
+            raise ValueError("Generated execution SDK tree differs from its provenance hash")
 
-    integrity_file = sdk_root / "data/integrity.json"
-    if hashlib.sha256(integrity_file.read_bytes()).hexdigest() != provenance["generatedSdk"]["dataIntegritySha256"]:
-        raise ValueError("Generated execution SDK data inventory hash differs from provenance")
-    integrity = json.loads(integrity_file.read_text())
-    for relative, expected in integrity["files"].items():
-        asset = sdk_root / "data" / relative
-        if not asset.is_file() or hashlib.sha256(asset.read_bytes()).hexdigest() != expected:
-            raise ValueError(f"Generated execution SDK data hash differs for {relative}")
-    runtime = (ROOT / "sovite/execution_contract/runtime.py").read_text()
-    if provenance["generatedSdk"]["dataIntegritySha256"] not in runtime:
-        raise ValueError("Execution runtime loader is not pinned to the generated SDK inventory")
+        # v1's first generated package placed the Python data at its root;
+        # v2 uses the current nested multi-client output layout.
+        sdk_data = sdk_root / "data"
+        if not sdk_data.is_dir():
+            sdk_data = sdk_root / "clients/python" / sdk_root.name / "data"
+        integrity_file = sdk_data / "integrity.json"
+        if hashlib.sha256(integrity_file.read_bytes()).hexdigest() != provenance["generatedSdk"]["dataIntegritySha256"]:
+            raise ValueError("Generated execution SDK data inventory hash differs from provenance")
+        integrity = json.loads(integrity_file.read_text())
+        for relative, expected in integrity["files"].items():
+            asset = sdk_data / relative
+            if not asset.is_file() or hashlib.sha256(asset.read_bytes()).hexdigest() != expected:
+                raise ValueError(f"Generated execution SDK data hash differs for {relative}")
+        runtime_name = "runtime.py" if version == "v1" else "runtime_v2.py"
+        runtime = (ROOT / "sovite/execution_contract" / runtime_name).read_text()
+        if provenance["generatedSdk"]["dataIntegritySha256"] not in runtime:
+            raise ValueError("Execution runtime loader is not pinned to the generated SDK inventory")
 
-    required = {
-        "uv.lock",
-        "contracts/execution-v1/main.tsp",
-        "contracts/execution-v1/tspconfig.yaml",
-        "contracts/execution-v1/contract.json",
-        provenance_path,
-        "sovite/execution_contract/runtime.py",
-        "sovite/execution_contract/" + provenance["generatedSdk"]["package"].rsplit(".", 1)[-1] + "/data/integrity.json",
-    }
-    if not required.issubset(by_name):
-        raise ValueError("Source release archive is missing locked execution contract inputs or SDK integrity data")
+        required = {
+            "uv.lock",
+            f"{source_root}/main.tsp",
+            f"{source_root}/tspconfig.yaml",
+            f"{source_root}/contract.json",
+            provenance_path,
+            f"sovite/execution_contract/{runtime_name}",
+            (sdk_data.relative_to(ROOT)).as_posix() + "/integrity.json",
+        }
+        if not required.issubset(by_name):
+            raise ValueError("Source release archive is missing locked execution contract inputs or SDK integrity data")
 
 
 def package(output: Path):

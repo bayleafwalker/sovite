@@ -482,8 +482,11 @@ class RemoteExecution:
                  "status": job.status, "error_code": job.error_code})
             return response
 
-    def lookup(self, principal: ExecutionPrincipal, *, instance_id: str, operation_id: str) -> dict:
+    def lookup(self, principal: ExecutionPrincipal, *, instance_id: str, operation_id: str,
+               pull_protocol: int = 1) -> dict:
         _validate_principal(principal)
+        if type(pull_protocol) is not int or pull_protocol not in {1, 2}:
+            raise PlatformError("invalid_request", "Execution owner request is invalid", 422)
         if principal.compute_id != self.platform.settings.compute_id:
             raise PlatformError("execution_scope_denied", "Execution owner scope is not permitted", 403)
         if not isinstance(instance_id, str) or _INSTANCE_RE.fullmatch(instance_id) is None or not isinstance(operation_id, str) or _OPERATION_RE.fullmatch(operation_id) is None:
@@ -499,11 +502,16 @@ class RemoteExecution:
             if row.operation_kind not in _OPERATION_KINDS or not isinstance(row.result, dict):
                 raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503)
             state = row.result.get("state")
-            if state not in _RESULT_STATES:
+            versioned_pull_state = (pull_protocol == 2 and row.operation_kind == "pull"
+                                    and state in {"scan_advanced", "profile_unavailable"})
+            if state not in _RESULT_STATES and not versioned_pull_state:
                 raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503)
             # An idle pull has no assigned job or fence. Other results must
             # retain their binding; nullability is not a corruption escape.
-            if state == "idle":
+            if state in {"scan_advanced", "profile_unavailable"}:
+                valid_binding = (versioned_pull_state and row.job_id is None and row.fence is None
+                                 and row.result == {"state": state})
+            elif state == "idle":
                 valid_binding = (row.operation_kind == "pull"
                     and row.result == {"state": "idle"}
                     and row.job_id is None and row.fence is None)

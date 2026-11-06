@@ -1,0 +1,11 @@
+{
+  "contractVersion": "2.0.0",
+  "exposures": {
+    "executionPullV2": "internal",
+    "executionLookupV2": "internal"
+  },
+  "byteBounds": {
+    "executionPullV2": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 4194304, "403": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}},
+    "executionLookupV2": {"requestMaxBytes": 65536, "responseMaxBytes": {"200": 4096, "403": 4096, "404": 4096, "409": 4096, "413": 4096, "422": 4096, "503": 4096}}
+  }
+}

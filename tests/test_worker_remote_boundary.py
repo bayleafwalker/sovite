@@ -487,6 +487,29 @@ def test_execution_client_uses_versioned_contract_body_and_json_result():
     }
 
 
+def test_execution_client_v2_is_explicit_and_uses_generated_pull_lookup_contract():
+    import httpx
+    from sovite.execution_client import ExecutionClient
+
+    observed = []
+
+    def respond(request):
+        observed.append(request.url.path)
+        body = json.loads(request.content)
+        result = ({"state": "idle"} if request.url.path.endswith("/pull") else {
+            "state": "found", "operation_id": body["operation_id"], "operation_kind": "pull",
+            "job_id": None, "fence": None, "result_state": "idle",
+        })
+        return httpx.Response(200, json=result)
+
+    client = ExecutionClient("https://execution.example", TOKEN,
+        transport=httpx.MockTransport(respond), api_version=2)
+    assert client.api_version == 2
+    assert client.pull("worker-v2", "pull-v2") == {"state": "idle"}
+    assert client.lookup("worker-v2", "pull-v2")["result_state"] == "idle"
+    assert observed == ["/internal/execution/v2/pull", "/internal/execution/v2/lookup"]
+
+
 def test_execution_client_real_http_contract_lifecycle(owner):
     import httpx
     from sovite.execution_client import ExecutionClient, ExecutionContext

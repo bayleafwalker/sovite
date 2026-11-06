@@ -330,7 +330,11 @@ def operation_request_digest(*, operation_kind: str, principal: ExecutionPrincip
     value = dict(request)
     fields = {"instance_id", "operation_id"} if operation_kind == "pull" else {"instance_id", "operation_id", "job_id", "generation", "fence"}
     profile = value.pop("profile", None)
+    protocol_version = value.pop("protocol_version", None)
     if set(value) != fields or (profile is not None and profile != "agent-http-v1"):
+        _request_error()
+    if (protocol_version is not None
+            and (type(protocol_version) is not int or protocol_version != 2 or operation_kind != "pull")):
         _request_error()
     _validate_instance(value["instance_id"])
     _validate_operation(value["operation_id"])
@@ -342,7 +346,8 @@ def operation_request_digest(*, operation_kind: str, principal: ExecutionPrincip
     try:
         return _digest({"schema_version": _OP_DIGEST_SCHEMA, "operation_kind": operation_kind,
                         "workload_id": principal.workload_id, "compute_id": principal.compute_id,
-                        "request": {**value, **({"profile": profile} if profile is not None else {})}})
+                        "request": {**value, **({"profile": profile} if profile is not None else {}),
+                                    **({"protocol_version": protocol_version} if protocol_version is not None else {})}})
     except ValueError:
         _request_error()
 
@@ -583,12 +588,12 @@ class LeaseService:
             raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503) from None
 
     def reserve(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str,
-                external_profile: str | None = None) -> dict:
+                external_profile: str | None = None, pull_protocol: int = 1) -> dict:
         """Replay a prior reservation or run bounded recovery before a fresh one."""
         try:
             return self._reserve_once(principal=principal, instance_id=instance_id,
                                       operation_id=operation_id, external_profile=external_profile,
-                                      recovery_done=False)
+                                      pull_protocol=pull_protocol, recovery_done=False)
         except _FreshReservationNeedsRecovery:
             try:
                 self.recover_expired()
@@ -596,18 +601,22 @@ class LeaseService:
                 raise PlatformError("owner_unavailable", "Execution owner state is unavailable", 503) from None
             return self._reserve_once(principal=principal, instance_id=instance_id,
                                       operation_id=operation_id, external_profile=external_profile,
-                                      recovery_done=True)
+                                      pull_protocol=pull_protocol, recovery_done=True)
 
     def _reserve_once(self, *, principal: ExecutionPrincipal, instance_id: str, operation_id: str,
-                      external_profile: str | None, recovery_done: bool) -> dict:
+                      external_profile: str | None, pull_protocol: int, recovery_done: bool) -> dict:
         """One caller-scoped reservation; no attempt, bearer or execution deadline."""
         _validate_principal(principal); _validate_instance(instance_id); _validate_operation(operation_id)
-        if external_profile not in {None, "agent-http-v1"}:
+        if (external_profile not in {None, "agent-http-v1"}
+                or type(pull_protocol) is not int or pull_protocol not in {1, 2}
+                or (pull_protocol == 2 and external_profile is None)):
             _request_error()
         owner = self._owner_for(principal, instance_id)
         request = {"instance_id": instance_id, "operation_id": operation_id}
         if external_profile is not None:
             request["profile"] = external_profile
+        if pull_protocol == 2:
+            request["protocol_version"] = 2
         request_digest = operation_request_digest(operation_kind="pull", principal=principal, request=request)
         with self.platform.db.sessions.begin() as session:
             self.platform.db.authority_lock(session)
@@ -625,6 +634,10 @@ class LeaseService:
                     _fail("owner_unavailable", 503, "Execution owner state is unavailable")
                 if prior.result == {"state": "idle"} and prior.job_id is None and prior.fence is None:
                     return {"state": "idle"}
+                if (pull_protocol == 2 and prior.result in (
+                        {"state": "scan_advanced"}, {"state": "profile_unavailable"})
+                        and prior.job_id is None and prior.fence is None):
+                    return copy.deepcopy(prior.result)
                 if prior.result.get("state") != "reserved" or not prior.job_id or not prior.fence:
                     _fail("execution_fenced", 409, "Execution reservation is no longer current")
                 job = session.execute(select(Job).where(Job.id == prior.job_id).with_for_update()).scalar_one_or_none()
@@ -708,11 +721,22 @@ class LeaseService:
                     return math.isfinite(value)
                 except OverflowError:
                     return False
-            if external_profile is None:
-                scope = {"compute_id": principal.compute_id,
-                         "repository_worker_only": self.repository_worker_only,
-                         "repository_run_profile": self.repository_run_profile}
-                cursor_key = "dispatch_fair:" + hashlib.sha256(
+            if external_profile is None or pull_protocol == 2:
+                if pull_protocol == 2:
+                    scope = {"workload_id": principal.workload_id,
+                             "compute_id": principal.compute_id,
+                             "profile": external_profile,
+                             "repository_worker_only": self.repository_worker_only,
+                             "repository_run_profile": self.repository_run_profile}
+                    cursor_schema = "sovite-external-dispatch-fair/v2"
+                    cursor_prefix = "external_dispatch_fair_v2:"
+                else:
+                    scope = {"compute_id": principal.compute_id,
+                             "repository_worker_only": self.repository_worker_only,
+                             "repository_run_profile": self.repository_run_profile}
+                    cursor_schema = "sovite-dispatch-fair/v1"
+                    cursor_prefix = "dispatch_fair:"
+                cursor_key = cursor_prefix + hashlib.sha256(
                     json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:48]
                 cursor_record = session.execute(select(cast(MetadataRow.__table__.c.value, Text)).where(
                     MetadataRow.key == cursor_key).with_for_update()).one_or_none()
@@ -731,7 +755,7 @@ class LeaseService:
                     except (TypeError, ValueError, RecursionError):
                         _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
                     if (type(cursor_value) is not dict or set(cursor_value) != {"schema", "scope", "created_at", "id"}
-                            or cursor_value["schema"] != "sovite-dispatch-fair/v1"
+                            or cursor_value["schema"] != cursor_schema
                             or type(cursor_value["scope"]) is not dict
                             or set(cursor_value["scope"]) != set(scope)
                             or type(cursor_value["scope"]["compute_id"]) is not str
@@ -749,7 +773,7 @@ class LeaseService:
                 if (not finite_number(job.created_at)
                         or type(job.id) is not str or not 1 <= len(job.id) <= 64):
                     _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
-                value = {"schema": "sovite-dispatch-fair/v1", "scope": scope,
+                value = {"schema": cursor_schema, "scope": scope,
                          "created_at": job.created_at, "id": job.id}
                 if cursor_row is None:
                     cursor_row = MetadataRow(key=cursor_key, value=value)
@@ -764,7 +788,7 @@ class LeaseService:
                 after = or_(Job.created_at > stamp, and_(Job.created_at == stamp, Job.id > identifier))
                 before = or_(Job.created_at < stamp, and_(Job.created_at == stamp, Job.id <= identifier))
                 candidates = session.scalars(ordered.where(after).limit(100).with_for_update(skip_locked=True)).all()
-                if len(candidates) < 100:
+                if pull_protocol != 2 and len(candidates) < 100:
                     candidates.extend(session.scalars(ordered.where(before).limit(
                         100 - len(candidates)).with_for_update(skip_locked=True)).all())
             # Candidate row locks can wait too; base each new reservation on
@@ -785,15 +809,17 @@ class LeaseService:
             for job in candidates:
                 if job.resolved.get("compute", {}).get("id") != principal.compute_id:
                     continue
+                repository_profile_incompatible = False
                 if job.resolved.get("repository_run") is not None:
                     # The released agent-http profile and ordinary local worker
                     # are answer-only. Repository mutation needs its separately
                     # injected owner profile; never hand it to a generic worker.
                     if external_profile is not None:
                         incompatible_profile_job = True
+                        repository_profile_incompatible = True
                     elif not self.repository_run_profile:
                         continue
-                    if incompatible_profile_job:
+                    if repository_profile_incompatible and pull_protocol == 1:
                         continue
                 existing_lease = session.get(WorkerExecutionLease, job.id, with_for_update=True)
                 # This final row lock can block after candidate selection too.
@@ -819,6 +845,11 @@ class LeaseService:
                         raise
                     job.status, job.error_code, job.updated_at, job.finished_at = "blocked", exc.code, now, now
                     self.platform.db.audit(session, self.id, "task.dispatch_denied", job.id, {"code": exc.code})
+                    continue
+                if repository_profile_incompatible:
+                    # V2 commits the authorization/audit decision before it
+                    # advances past an incompatible recipe. V1 retains its
+                    # original rollback-on-409 behavior above.
                     continue
                 if external_profile is not None:
                     try:
@@ -862,8 +893,39 @@ class LeaseService:
                     {"generation": job.generation, "fence": fence, "workload_id": principal.workload_id, "instance_id": instance_id})
                 save_progress(job)
                 return copy.deepcopy(response)
-            if incompatible_profile_job:
+            if incompatible_profile_job and pull_protocol == 1:
                 _fail("execution_profile_unavailable", 409, "Execution profile is not available to this worker")
+            if pull_protocol == 2:
+                if not candidates:
+                    if cursor_row is not None:
+                        session.delete(cursor_row)
+                        result = {"state": "profile_unavailable"}
+                        audit_action = "task.execution_profile_unavailable"
+                    else:
+                        result = {"state": "idle"}
+                        audit_action = "task.execution_idle"
+                else:
+                    last = candidates[-1]
+                    after_last = or_(Job.created_at > last.created_at,
+                                     and_(Job.created_at == last.created_at, Job.id > last.id))
+                    more = session.scalar(candidate_query.where(after_last).with_only_columns(Job.id).limit(1))
+                    if more is not None:
+                        save_progress(last)
+                        result = {"state": "scan_advanced"}
+                        audit_action = "task.execution_scan_advanced"
+                    else:
+                        if cursor_row is not None:
+                            session.delete(cursor_row)
+                        result = {"state": "profile_unavailable"}
+                        audit_action = "task.execution_profile_unavailable"
+                session.add(WorkerExecutionOperation(
+                    workload_id=principal.workload_id, instance_id=instance_id,
+                    operation_id=operation_id, operation_kind="pull", request_digest=request_digest,
+                    job_id=None, fence=None, result=result, created_at=now, updated_at=now))
+                self.platform.db.audit(session, self.id, audit_action, instance_id,
+                    {"workload_id": principal.workload_id, "compute_id": principal.compute_id,
+                     "protocol_version": 2, "state": result["state"]})
+                return result
             if cursor_key is not None:
                 if len(candidates) == 100:
                     save_progress(candidates[-1])

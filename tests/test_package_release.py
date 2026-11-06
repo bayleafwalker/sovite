@@ -26,6 +26,12 @@ def test_release_archive_contains_locked_tsp_sources_and_verified_sdk_inventory(
             "sovite/contracts/execution-v1/contract.json",
             "sovite/contracts/execution-v1/provenance.json",
             "sovite/sovite/execution_contract/runtime.py",
+            "sovite/contracts/execution-v2/source/main.tsp",
+            "sovite/contracts/execution-v2/source/tspconfig.yaml",
+            "sovite/contracts/execution-v2/source/contract.json",
+            "sovite/contracts/execution-v2/provenance.json",
+            "sovite/sovite/execution_contract/runtime_v2.py",
+            "sovite/sovite/execution_contract/vuoro_contract_61440b32de59136facdd786826aa33c916da1dbb981dc6f3fc2115ce2f952d02_client/clients/python/vuoro_contract_61440b32de59136facdd786826aa33c916da1dbb981dc6f3fc2115ce2f952d02_client/data/integrity.json",
             "sovite/sovite/execution_contract/vuoro_contract_c3c73ae52d117dd8407c15d4b4b549461e753e30de4783134a2cad02f5dd1ab4_client/data/integrity.json",
         }
         assert required <= names
@@ -40,6 +46,12 @@ def test_release_archive_contains_locked_tsp_sources_and_verified_sdk_inventory(
         assert hashlib.sha256(archive.read(sdk_data + "integrity.json")).hexdigest() == provenance["generatedSdk"]["dataIntegritySha256"]
         for path, expected in inventory["files"].items():
             assert hashlib.sha256(archive.read(sdk_data + path)).hexdigest() == expected
+        v2 = json.loads(archive.read("sovite/contracts/execution-v2/provenance.json"))
+        v2_data = "sovite/sovite/execution_contract/vuoro_contract_61440b32de59136facdd786826aa33c916da1dbb981dc6f3fc2115ce2f952d02_client/clients/python/vuoro_contract_61440b32de59136facdd786826aa33c916da1dbb981dc6f3fc2115ce2f952d02_client/data/"
+        v2_inventory = json.loads(archive.read(v2_data + "integrity.json"))
+        assert hashlib.sha256(archive.read(v2_data + "integrity.json")).hexdigest() == v2["generatedSdk"]["dataIntegritySha256"]
+        for path, expected in v2_inventory["files"].items():
+            assert hashlib.sha256(archive.read(v2_data + path)).hexdigest() == expected
 
 
 def test_source_release_includes_native_luna_catalog_license_with_exact_manifest(tmp_path):
@@ -58,18 +70,18 @@ def test_source_release_includes_native_luna_catalog_license_with_exact_manifest
 
 
 def test_contract_provenance_ignores_runtime_bytecode_but_rejects_sdk_source_edits(tmp_path, monkeypatch):
-    provenance = json.loads((ROOT / "contracts/execution-v1/provenance.json").read_text())
-    sdk_name = provenance["generatedSdk"]["package"].rsplit(".", 1)[-1]
-    sdk_source = ROOT / "sovite/execution_contract" / sdk_name
     sandbox_root = tmp_path / "source"
-    source_paths = [
-        ROOT / "uv.lock",
-        ROOT / "sovite/execution_contract/runtime.py",
-        *(ROOT / "contracts/execution-v1").iterdir(),
-        *(path for path in sdk_source.rglob("*")
-          if path.is_file() and path.suffix in package_release.SOURCE_SUFFIXES
-          and "__pycache__" not in path.parts),
-    ]
+    source_paths = [ROOT / "uv.lock"]
+    for version in ("v1", "v2"):
+        provenance = json.loads((ROOT / f"contracts/execution-{version}/provenance.json").read_text())
+        sdk_name = provenance["generatedSdk"]["package"].rsplit(".", 1)[-1]
+        sdk_source = ROOT / "sovite/execution_contract" / sdk_name
+        runtime = ROOT / "sovite/execution_contract" / ("runtime.py" if version == "v1" else "runtime_v2.py")
+        contract_root = ROOT / f"contracts/execution-{version}"
+        source_paths.extend([runtime, *(path for path in contract_root.rglob("*") if path.is_file())])
+        source_paths.extend(path for path in sdk_source.rglob("*")
+                            if path.is_file() and path.suffix in package_release.SOURCE_SUFFIXES
+                            and "__pycache__" not in path.parts)
     copied = []
     for source in source_paths:
         relative = source.relative_to(ROOT)
@@ -77,6 +89,8 @@ def test_contract_provenance_ignores_runtime_bytecode_but_rejects_sdk_source_edi
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         copied.append(destination)
+    provenance = json.loads((sandbox_root / "contracts/execution-v1/provenance.json").read_text())
+    sdk_name = provenance["generatedSdk"]["package"].rsplit(".", 1)[-1]
     sandbox_sdk = sandbox_root / "sovite/execution_contract" / sdk_name
     bytecode = sandbox_sdk / "__pycache__/untracked.cpython-999.pyc"
     bytecode.parent.mkdir(parents=True, exist_ok=True)

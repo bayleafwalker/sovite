@@ -176,7 +176,7 @@ def _finite_number(value) -> bool:
             and (type(value) is not int or abs(value) <= 9_007_199_254_740_991))
 
 
-def _validate_response(operation: str, result: dict, request: dict) -> None:
+def _validate_response(operation: str, result: dict, request: dict, *, api_version: int = 1) -> None:
     """Check fixed identities and states on top of generated schema validation."""
     def exact(fields):
         if set(result) != set(fields):
@@ -198,6 +198,9 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
 
     state = result.get("state")
     if operation == "pull":
+        if api_version == 2 and state in {"idle", "scan_advanced", "profile_unavailable"}:
+            exact({"state"})
+            return
         if state == "idle":
             exact({"state"})
             return
@@ -267,13 +270,17 @@ def _validate_response(operation: str, result: dict, request: dict) -> None:
         return
     if operation == "lookup":
         exact({"state", "operation_id", "operation_kind", "job_id", "fence", "result_state"})
-        idle_pull = (result.get("operation_kind") == "pull" and result.get("result_state") == "idle"
-                     and result.get("job_id") is None and result.get("fence") is None)
+        unbound_pull = (result.get("operation_kind") == "pull"
+                        and result.get("result_state") in ({"idle", "scan_advanced", "profile_unavailable"}
+                                                            if api_version == 2 else {"idle"})
+                        and result.get("job_id") is None and result.get("fence") is None)
         if (state != "found" or result["operation_id"] != request["operation_id"]
                 or result["operation_kind"] not in {"pull", "start", "renew", "handback", "complete"}
-                or not idle_pull and (not isinstance(result["job_id"], str) or _ID.fullmatch(result["job_id"]) is None
-                                      or not isinstance(result["fence"], str) or _FENCE.fullmatch(result["fence"]) is None)
-                or result["result_state"] not in {"idle", "reserved", "started", "already_started", "renewed", "handed_back", "completed", "failed", "cancelled", "retry_wait", "blocked"}):
+                or not unbound_pull and (not isinstance(result["job_id"], str) or _ID.fullmatch(result["job_id"]) is None
+                                         or not isinstance(result["fence"], str) or _FENCE.fullmatch(result["fence"]) is None)
+                or result["result_state"] not in ({"idle", "reserved", "started", "already_started", "renewed", "handed_back", "completed", "failed", "cancelled", "retry_wait", "blocked", "scan_advanced", "profile_unavailable"}
+                                                   if api_version == 2 else {"idle", "reserved", "started", "already_started", "renewed", "handed_back", "completed", "failed", "cancelled", "retry_wait", "blocked"})
+                or result["result_state"] in {"scan_advanced", "profile_unavailable"} and not unbound_pull):
             raise ValueError
         return
     raise ValueError
@@ -283,25 +290,32 @@ class ExecutionClient:
     """One-shot bounded HTTP calls using only the dedicated execution token."""
 
     def __init__(self, origin: str, token: str, *, verify: bool | str = True,
-                 transport: httpx.BaseTransport | None = None):
+                 transport: httpx.BaseTransport | None = None, api_version: int = 1):
         # Reuse the strict origin checks without reading process credentials.
         target, checked_token = _env_target({"SOVITE_CONTROL_URL": origin,
                                              "SOVITE_EXECUTION_TOKEN": token})
         if verify is False or not isinstance(verify, (bool, str)):
             raise ExecutionClientError("TLS certificate verification must remain enabled")
+        if type(api_version) is not int or api_version not in {1, 2}:
+            raise ExecutionClientError("Execution API version is invalid")
         self._origin = target
         self._token = checked_token
         self._verify = verify
         self._transport = transport
+        self._api_version = api_version
 
     def __repr__(self) -> str:
-        return f"ExecutionClient(origin={self._origin!r}, token=<redacted>)"
+        return f"ExecutionClient(origin={self._origin!r}, api_version={self._api_version}, token=<redacted>)"
+
+    @property
+    def api_version(self) -> int:
+        return self._api_version
 
     @classmethod
     def from_env(cls, *, env=None, verify: bool | str = True,
-                 transport: httpx.BaseTransport | None = None) -> "ExecutionClient":
+                 transport: httpx.BaseTransport | None = None, api_version: int = 1) -> "ExecutionClient":
         target, token = _env_target(os.environ if env is None else env)
-        return cls(target, token, verify=verify, transport=transport)
+        return cls(target, token, verify=verify, transport=transport, api_version=api_version)
 
     def _post(self, operation: str, body: dict, *, mutation: bool) -> dict:
         op_id = body.get("operation_id", "")
@@ -320,7 +334,11 @@ class ExecutionClient:
         except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
             raise ExecutionClientError("Execution request is invalid") from None
         try:
-            from .execution_contract.runtime import OPERATIONS, load_bundle
+            use_v2 = self._api_version == 2 and operation in {"pull", "lookup"}
+            if use_v2:
+                from .execution_contract.runtime_v2 import OPERATIONS, load_bundle
+            else:
+                from .execution_contract.runtime import OPERATIONS, load_bundle
             contract = load_bundle()
             contract_operation = contract.manifest["operations"][OPERATIONS[operation]]
             contract.validate_request(OPERATIONS[operation], wire_body)
@@ -335,7 +353,8 @@ class ExecutionClient:
             with httpx.Client(timeout=httpx.Timeout(TIMEOUT_SECONDS), trust_env=False,
                               follow_redirects=False, verify=self._verify,
                               transport=self._transport) as client:
-                with client.stream("POST", self._origin + "/internal/execution/v1/" + operation,
+                api_version = 2 if self._api_version == 2 and operation in {"pull", "lookup"} else 1
+                with client.stream("POST", self._origin + f"/internal/execution/v{api_version}/" + operation,
                                    headers=headers, content=encoded) as response:
                     if response.status_code < 200 or response.status_code >= 300:
                         # Typed client/validation refusals have not performed the requested
@@ -383,7 +402,7 @@ class ExecutionClient:
             raise ExecutionClientError("Execution owner returned an invalid response")
         try:
             contract.validate_response(OPERATIONS[operation], 200, result)
-            _validate_response(operation, result, body)
+            _validate_response(operation, result, body, api_version=self._api_version)
         except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
             if mutation:
                 raise ExecutionOutcomeUnknown(body.get("instance_id", ""), op_id) from None
