@@ -212,6 +212,32 @@ def _profile_backlog(owner):
     return job
 
 
+def _external_profile_backlog(owner):
+    from test_worker_remote_boundary import admit_agent_http_owner
+
+    admit_agent_http_owner(owner)
+    bundle = copy.deepcopy(owner.platform.active()[0])
+    for model in bundle['models']:
+        model['max_concurrency'] = 1
+    owner.platform.activate(owner.platform.compile(bundle))
+    target = owner.platform.submit('native-code-review', 'external fairness target',
+                                  'operations', 'external-fairness-target', input_class='C2')
+    # Keep owner authorization valid while making only the external recipe
+    # incompatible. This exercises v2's authorize-then-audit progression.
+    with owner.platform.db.sessions.begin() as session:
+        local = session.get(Job, target.id)
+        local.created_at, local.next_attempt_at = 1000, 0
+        for index in range(101):
+            resolved = copy.deepcopy(local.resolved)
+            resolved['harness']['kind'] = 'unsupported-external-profile'
+            session.add(Job(id=f'external-control-{index:03}', receipt=f'external-control-receipt-{index}',
+                idempotency_key=f'external-control-key-{index}', request_digest='external-control-digest',
+                caller=local.caller, grant_id=local.grant_id, generation=local.generation,
+                resolved=resolved, task='external fairness incompatible task', status='queued', attempts=0,
+                created_at=1, next_attempt_at=0))
+    return target
+
+
 @pytest.mark.parametrize('owner', ['direct'], indirect=True)
 def test_dispatch_cursor_and_idle_journal_roll_back_together(owner, monkeypatch):
     from sqlalchemy import select
@@ -350,6 +376,192 @@ def test_external_profile_denial_does_not_write_dispatch_cursor(owner):
         assert not session.scalars(select(MetadataRow).where(MetadataRow.key.like('dispatch_fair:%'))).all()
         assert session.get(WorkerExecutionOperation, (owner.principal.workload_id,
                            owner.instance, 'cursor-external-denial')) is None
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_external_v2_scans_in_bounded_batches_and_replays_progress(owner):
+    from sqlalchemy import select
+    from sovite.db import MetadataRow, WorkerExecutionOperation
+    from sovite.remote_execution import RemoteExecution
+    from sovite.service import PlatformError
+    from sovite.lease_service import LeaseService
+
+    target = _external_profile_backlog(owner)
+    first = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                  operation_id='external-v2-first', external_profile='agent-http-v1',
+                                  pull_protocol=2)
+    assert first == {'state': 'scan_advanced'}
+    restarted = LeaseService(owner.platform, 'external-v2-restarted', {})
+    assert restarted.reserve(principal=owner.principal, instance_id=owner.instance,
+                             operation_id='external-v2-first', external_profile='agent-http-v1',
+                             pull_protocol=2) == first
+    with pytest.raises(PlatformError) as conflict:
+        restarted.reserve(principal=owner.principal, instance_id=owner.instance,
+                          operation_id='external-v2-first', external_profile='agent-http-v1')
+    assert conflict.value.code == 'idempotency_conflict'
+    lookup = RemoteExecution(owner.platform).lookup(
+        owner.principal, instance_id=owner.instance, operation_id='external-v2-first', pull_protocol=2)
+    assert lookup['state'] == 'found' and lookup['result_state'] == first['state']
+    with pytest.raises(PlatformError) as error:
+        RemoteExecution(owner.platform).lookup(
+            owner.principal, instance_id=owner.instance, operation_id='external-v2-first')
+    assert error.value.code == 'owner_unavailable'
+
+    second = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                   operation_id='external-v2-second', external_profile='agent-http-v1',
+                                   pull_protocol=2)
+    assert second['state'] == 'reserved' and second['job']['job_id'] == target.id
+    with owner.platform.db.sessions() as session:
+        cursor = session.scalars(select(MetadataRow).where(
+            MetadataRow.key.like('external_dispatch_fair_v2:%'))).all()
+        assert len(cursor) == 1
+        assert cursor[0].value['schema'] == 'sovite-external-dispatch-fair/v2'
+        assert cursor[0].value['scope'] == {
+            'workload_id': owner.principal.workload_id,
+            'compute_id': owner.principal.compute_id,
+            'profile': 'agent-http-v1',
+            'repository_worker_only': False,
+            'repository_run_profile': False,
+        }
+        row = session.get(WorkerExecutionOperation, (owner.principal.workload_id,
+                             owner.instance, 'external-v2-first'))
+        assert row.result == first and row.job_id is None and row.fence is None
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_external_lookup_protocols_do_not_cross_and_v1_lookup_stays_compatible(owner):
+    from sovite.remote_execution import RemoteExecution
+    from sovite.service import PlatformError
+
+    v1 = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                               operation_id='external-v1-lookup', external_profile='agent-http-v1')
+    assert v1 == {'state': 'idle'}
+    remote = RemoteExecution(owner.platform)
+    assert remote.lookup(owner.principal, instance_id=owner.instance,
+                         operation_id='external-v1-lookup')['result_state'] == 'idle'
+    with pytest.raises(PlatformError) as error:
+        remote.lookup(owner.principal, instance_id=owner.instance,
+                      operation_id='external-v1-lookup', pull_protocol=2)
+    assert error.value.code == 'owner_unavailable'
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_external_v2_busy_preserves_cursor_before_compatible_concurrency_block(owner):
+    from sqlalchemy import select
+    from sovite.db import Job, MetadataRow
+    from sovite.lease_service import LeaseService
+
+    target = _external_profile_backlog(owner)
+    with owner.platform.db.sessions.begin() as session:
+        target_row = session.get(Job, target.id)
+        resolved = copy.deepcopy(target_row.resolved)
+        session.add(Job(id='external-running-capacity', receipt='external-running-capacity-receipt',
+            idempotency_key='external-running-capacity-key', request_digest='external-running-capacity-digest',
+            caller=target_row.caller, grant_id=target_row.grant_id, generation=target_row.generation,
+            resolved=resolved, task='running concurrency sentinel', status='running', attempts=0,
+            created_at=1, next_attempt_at=0))
+    first = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                  operation_id='external-v2-busy-first', external_profile='agent-http-v1',
+                                  pull_protocol=2)
+    assert first == {'state': 'scan_advanced'}
+    busy = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                 operation_id='external-v2-busy-second', external_profile='agent-http-v1',
+                                 pull_protocol=2)
+    assert busy == {'state': 'busy'}
+    assert LeaseService(owner.platform, 'external-v2-restarted', {}).reserve(
+        principal=owner.principal, instance_id=owner.instance,
+        operation_id='external-v2-busy-second', external_profile='agent-http-v1', pull_protocol=2) == busy
+    with owner.platform.db.sessions.begin() as session:
+        assert session.scalar(select(MetadataRow).where(
+            MetadataRow.key.like('external_dispatch_fair_v2:%'))) is None
+        session.get(Job, 'external-running-capacity').status = 'failed'
+    ready_first = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                        operation_id='external-v2-busy-ready-first', external_profile='agent-http-v1',
+                                        pull_protocol=2)
+    assert ready_first == {'state': 'scan_advanced'}
+    ready = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                  operation_id='external-v2-busy-ready', external_profile='agent-http-v1',
+                                  pull_protocol=2)
+    assert ready['state'] == 'reserved' and ready['job']['job_id'] == target.id
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_external_v2_journals_profile_unavailable_and_resets_scan(owner):
+    from sqlalchemy import select
+    from sovite.db import MetadataRow, WorkerExecutionOperation
+    from sovite.lease_service import LeaseService
+    from sovite.remote_execution import RemoteExecution
+
+    target = _external_profile_backlog(owner)
+    # The ordinary row from the helper is also made profile-incompatible.
+    with owner.platform.db.sessions.begin() as session:
+        target_row = session.get(Job, target.id)
+        resolved = copy.deepcopy(target_row.resolved)
+        resolved.pop('repository_run', None)
+        resolved['harness']['kind'] = 'unsupported-external-profile'
+        target_row.resolved = resolved
+        target_row.created_at = 1000
+    first = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                  operation_id='external-v2-unavailable-first', external_profile='agent-http-v1',
+                                  pull_protocol=2)
+    assert first == {'state': 'scan_advanced'}
+    second = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                   operation_id='external-v2-unavailable-second', external_profile='agent-http-v1',
+                                   pull_protocol=2)
+    assert second == {'state': 'profile_unavailable'}
+    with owner.platform.db.sessions() as session:
+        assert not session.scalars(select(MetadataRow).where(
+            MetadataRow.key.like('external_dispatch_fair_v2:%'))).all()
+    later_target = owner.platform.submit('native-code-review', 'after unavailable journal',
+                                         'operations', 'external-fairness-after-unavailable', input_class='C2')
+    with owner.platform.db.sessions.begin() as session:
+        row = session.get(Job, later_target.id)
+        row.created_at, row.next_attempt_at = 0, 0
+    assert owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                 operation_id='external-v2-unavailable-second', external_profile='agent-http-v1',
+                                 pull_protocol=2) == second
+    restarted = LeaseService(owner.platform, 'external-v2-restarted', {})
+    next_scan = restarted.reserve(principal=owner.principal, instance_id=owner.instance,
+                                  operation_id='external-v2-after-unavailable', external_profile='agent-http-v1',
+                                  pull_protocol=2)
+    assert next_scan['state'] == 'reserved' and next_scan['job']['job_id'] == later_target.id
+    lookup = RemoteExecution(owner.platform).lookup(
+        owner.principal, instance_id=owner.instance,
+        operation_id='external-v2-unavailable-second', pull_protocol=2)
+    assert lookup['state'] == 'found' and lookup['result_state'] == second['state']
+    with owner.platform.db.sessions() as session:
+        cursor = session.scalars(select(MetadataRow).where(
+            MetadataRow.key.like('external_dispatch_fair_v2:%'))).all()
+        assert len(cursor) == 1 and cursor[0].value['id'] == later_target.id
+        row = session.get(WorkerExecutionOperation, (owner.principal.workload_id,
+                             owner.instance, 'external-v2-unavailable-second'))
+        assert row.result == second and row.job_id is None and row.fence is None
+
+
+@pytest.mark.parametrize('owner', ['direct'], indirect=True)
+def test_external_v2_corrupt_cursor_fails_closed_without_journaling(owner):
+    from sqlalchemy import select
+    from sovite.db import MetadataRow, WorkerExecutionOperation
+    from sovite.service import PlatformError
+
+    _external_profile_backlog(owner)
+    first = owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                                  operation_id='external-v2-corrupt-seed', external_profile='agent-http-v1',
+                                  pull_protocol=2)
+    assert first == {'state': 'scan_advanced'}
+    with owner.platform.db.sessions.begin() as session:
+        cursor = session.scalar(select(MetadataRow).where(
+            MetadataRow.key.like('external_dispatch_fair_v2:%')))
+        cursor.value = {'schema': 'sovite-external-dispatch-fair/v2', 'scope': {},
+                        'created_at': 'not-a-number', 'id': 'corrupt'}
+    with pytest.raises(PlatformError) as error:
+        owner.service.reserve(principal=owner.principal, instance_id=owner.instance,
+                              operation_id='external-v2-corrupt-next', external_profile='agent-http-v1',
+                              pull_protocol=2)
+    assert error.value.code == 'owner_unavailable'
+    with owner.platform.db.sessions() as session:
+        assert session.get(WorkerExecutionOperation, (owner.principal.workload_id,
+                           owner.instance, 'external-v2-corrupt-next')) is None
 
 
 @pytest.mark.parametrize('owner', ['direct'], indirect=True)

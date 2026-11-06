@@ -63,21 +63,36 @@ def install_routes(app, platform, settings):
     load_bundle()
     service = RemoteExecution(platform)
 
-    def admitted(operation, body):
+    def admitted(operation, body, *, version=1):
         try:
-            validate_request(operation, body.model_dump(exclude_unset=True))
+            if version == 2:
+                from .execution_contract.runtime_v2 import validate_request as validate_v2_request
+                validate_v2_request(operation, body.model_dump(exclude_unset=True))
+            else:
+                validate_request(operation, body.model_dump(exclude_unset=True))
         except Exception:
             raise HTTPException(422, {"code": "invalid_request", "message": "Execution request is invalid"}) from None
 
-    def projected(operation, value):
+    def projected(operation, value, *, version=1):
         try:
             import json
-            from .execution_contract.runtime import OPERATIONS
-            contract_operation = load_bundle().manifest["operations"][OPERATIONS[operation]]
+            if version == 2:
+                from .execution_contract.runtime_v2 import OPERATIONS as operations_v2
+                from .execution_contract.runtime_v2 import load_bundle as load_bundle_v2
+                from .execution_contract.runtime_v2 import validate_response as validate_response_v2
+                operation_id = operations_v2[operation]
+                contract_operation = load_bundle_v2().manifest["operations"][operation_id]
+            else:
+                from .execution_contract.runtime import OPERATIONS
+                operation_id = OPERATIONS[operation]
+                contract_operation = load_bundle().manifest["operations"][operation_id]
             encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
             if len(encoded) > contract_operation["responseMaxBytes"]["200"]:
                 raise ValueError
-            validate_response(operation, 200, value)
+            if version == 2:
+                validate_response_v2(operation, 200, value)
+            else:
+                validate_response(operation, 200, value)
         except Exception:
             # The owner has committed before this check. The remote client must
             # treat the missing valid response as uncertain and reconcile by key.
@@ -110,6 +125,18 @@ def install_routes(app, platform, settings):
             external_profile="agent-http-v1",
         )
         return projected("pull", value)
+
+    @app.post("/internal/execution/v2/pull")
+    def pull_v2(body: Pull, principal=Depends(authenticate)):
+        admitted("pull", body, version=2)
+        value = service.leases.reserve(
+            principal=principal,
+            instance_id=body.instance_id,
+            operation_id=body.operation_id,
+            external_profile="agent-http-v1",
+            pull_protocol=2,
+        )
+        return projected("pull", value, version=2)
 
     @app.post("/internal/execution/v1/start")
     def start(body: ExecutionMutation, principal=Depends(authenticate)):
@@ -157,3 +184,10 @@ def install_routes(app, platform, settings):
     def lookup(body: OperationLookup, principal=Depends(authenticate)):
         admitted("lookup", body)
         return projected("lookup", service.lookup(principal, instance_id=body.instance_id, operation_id=body.operation_id))
+
+    @app.post("/internal/execution/v2/lookup")
+    def lookup_v2(body: OperationLookup, principal=Depends(authenticate)):
+        admitted("lookup", body, version=2)
+        value = service.lookup(principal, instance_id=body.instance_id,
+                               operation_id=body.operation_id, pull_protocol=2)
+        return projected("lookup", value, version=2)

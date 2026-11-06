@@ -1,0 +1,611 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Sovite External Execution API v2",
+    "version": "0.0.0"
+  },
+  "tags": [],
+  "paths": {
+    "/internal/execution/v2/lookup": {
+      "post": {
+        "operationId": "executionLookupV2",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationFound"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The server cannot find the requested resource.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LookupRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/execution/v2/pull": {
+      "post": {
+        "operationId": "executionPullV2",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The request has succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PullResult"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access is forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state of the server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Client error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PullRequest"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentHttpRecipe": {
+        "type": "object",
+        "required": [
+          "profile",
+          "agent_id",
+          "endpoint",
+          "idempotent",
+          "timeout_seconds"
+        ],
+        "properties": {
+          "profile": {
+            "type": "string",
+            "enum": [
+              "agent-http-v1"
+            ]
+          },
+          "agent_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96
+          },
+          "endpoint": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16000
+          },
+          "cancel_endpoint": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16000
+          },
+          "credential_env": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 96,
+            "pattern": "^[A-Z][A-Z0-9_]+$"
+          },
+          "idempotent": {
+            "type": "boolean"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "maximum": 2147483647
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ExecutionErrorCode"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ExecutionErrorCode": {
+        "type": "string",
+        "enum": [
+          "invalid_request",
+          "execution_scope_denied",
+          "execution_profile_unavailable",
+          "idempotency_conflict",
+          "execution_fenced",
+          "cancelled",
+          "owner_unavailable",
+          "execution_payload_too_large",
+          "not_found",
+          "previous_attempt_unavailable",
+          "previous_attempt_unfinished",
+          "previous_effect_uncertain",
+          "adapter_credential_missing",
+          "agent_endpoint_missing",
+          "authorization_revoked",
+          "execution_failed",
+          "execution_timeout",
+          "external_execution_uncertain",
+          "incompatible_demo_configuration",
+          "internal_execution_error",
+          "invalid_tool_calls",
+          "model_empty_result",
+          "model_gateway_adapter_unavailable",
+          "model_identity_missing",
+          "model_identity_mismatch",
+          "model_identity_protocol_unsupported",
+          "model_identity_unpinned",
+          "model_output_filtered",
+          "model_output_truncated",
+          "model_protocol_error",
+          "model_trust_missing",
+          "native_empty_result",
+          "native_incomplete_result",
+          "native_process_requires_external_isolation",
+          "native_provider_mismatch",
+          "native_protocol_error",
+          "native_result_missing",
+          "native_result_too_large",
+          "native_runtime_failed",
+          "native_runtime_unavailable",
+          "native_tools_unsupported",
+          "step_limit_reached",
+          "subscription_credential_changed",
+          "subscription_credential_invalid",
+          "subscription_credential_missing",
+          "subscription_credential_unavailable",
+          "subscription_profile_busy",
+          "tool_agent_requires_chat_api",
+          "tool_credential_missing",
+          "tool_operation_denied",
+          "unsupported_harness",
+          "unsupported_model_adapter",
+          "unsupported_tool",
+          "upstream_protocol_error",
+          "upstream_rejected",
+          "upstream_response_too_large",
+          "upstream_unavailable"
+        ]
+      },
+      "Fence": {
+        "type": "string",
+        "minLength": 32,
+        "maxLength": 32,
+        "pattern": "^[0-9a-f]{32}$"
+      },
+      "Generation": {
+        "type": "string",
+        "minLength": 71,
+        "maxLength": 71,
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "InstanceId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_-]+$"
+      },
+      "JobId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_-]+$"
+      },
+      "LookupRequest": {
+        "type": "object",
+        "required": [
+          "instance_id",
+          "operation_id"
+        ],
+        "properties": {
+          "instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "OperationFound": {
+        "type": "object",
+        "required": [
+          "state",
+          "operation_id",
+          "operation_kind",
+          "job_id",
+          "fence",
+          "result_state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "found"
+            ]
+          },
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          },
+          "operation_kind": {
+            "type": "string",
+            "enum": [
+              "pull",
+              "start",
+              "renew",
+              "handback",
+              "complete"
+            ]
+          },
+          "job_id": {
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JobId"
+              }
+            ],
+            "nullable": true
+          },
+          "fence": {
+            "type": "string",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Fence"
+              }
+            ],
+            "nullable": true
+          },
+          "result_state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "reserved",
+              "started",
+              "already_started",
+              "renewed",
+              "handed_back",
+              "completed",
+              "failed",
+              "cancelled",
+              "retry_wait",
+              "blocked",
+              "scan_advanced",
+              "profile_unavailable",
+              "busy"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "OperationId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_-]+$"
+      },
+      "PullBusy": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "busy"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PullIdle": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PullProfileUnavailable": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "profile_unavailable"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PullRequest": {
+        "type": "object",
+        "required": [
+          "instance_id",
+          "operation_id"
+        ],
+        "properties": {
+          "instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "operation_id": {
+            "$ref": "#/components/schemas/OperationId"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PullReserved": {
+        "type": "object",
+        "required": [
+          "state",
+          "job"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "reserved"
+            ]
+          },
+          "job": {
+            "$ref": "#/components/schemas/ReservedJob"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "PullResult": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/PullIdle"
+          },
+          {
+            "$ref": "#/components/schemas/PullReserved"
+          },
+          {
+            "$ref": "#/components/schemas/PullScanAdvanced"
+          },
+          {
+            "$ref": "#/components/schemas/PullProfileUnavailable"
+          },
+          {
+            "$ref": "#/components/schemas/PullBusy"
+          }
+        ]
+      },
+      "PullScanAdvanced": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "scan_advanced"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "ReservedJob": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "generation",
+          "fence",
+          "lease_until",
+          "task",
+          "recipe"
+        ],
+        "properties": {
+          "job_id": {
+            "$ref": "#/components/schemas/JobId"
+          },
+          "generation": {
+            "$ref": "#/components/schemas/Generation"
+          },
+          "fence": {
+            "$ref": "#/components/schemas/Fence"
+          },
+          "lease_until": {
+            "$ref": "#/components/schemas/UnixSeconds"
+          },
+          "task": {
+            "type": "string",
+            "maxLength": 3500000
+          },
+          "recipe": {
+            "$ref": "#/components/schemas/AgentHttpRecipe"
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
+      },
+      "UnixSeconds": {
+        "type": "number",
+        "format": "double",
+        "minimum": 1e-16
+      }
+    }
+  }
+}

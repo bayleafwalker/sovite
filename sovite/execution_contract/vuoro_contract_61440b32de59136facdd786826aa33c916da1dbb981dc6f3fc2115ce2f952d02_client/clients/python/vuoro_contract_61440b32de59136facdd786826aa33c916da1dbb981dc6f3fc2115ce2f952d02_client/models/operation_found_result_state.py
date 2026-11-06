@@ -1,0 +1,21 @@
+from enum import StrEnum
+
+
+class OperationFoundResultState(StrEnum):
+    ALREADY_STARTED = "already_started"
+    BLOCKED = "blocked"
+    BUSY = "busy"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    HANDED_BACK = "handed_back"
+    IDLE = "idle"
+    PROFILE_UNAVAILABLE = "profile_unavailable"
+    RENEWED = "renewed"
+    RESERVED = "reserved"
+    RETRY_WAIT = "retry_wait"
+    SCAN_ADVANCED = "scan_advanced"
+    STARTED = "started"
+
+    def __str__(self) -> str:
+        return str(self.value)
