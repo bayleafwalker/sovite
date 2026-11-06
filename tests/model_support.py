@@ -4,6 +4,7 @@ from collections import deque
 import copy
 import json
 import sqlite3
+import threading
 import time
 from types import SimpleNamespace
 
@@ -70,6 +71,130 @@ class _HandshakeDiagnostics:
         events = "|".join(",".join(key + ":" + render(event[key]) for key in sorted(event))
                           for event in self.events)
         return "handshake_diagnostics dropped=" + str(min(self.dropped, 2**31 - 1)) + " events=" + events
+
+
+class _SetupSidecar:
+    """Independent, bounded test recorder that survives a broken diagnostics sink."""
+    actions = {"start", "open", "hello", "touch", "fence", "authorize", "renew", "finish", "other"}
+
+    def __init__(self):
+        self.events = []
+        self.dropped = 0
+        self._lock = threading.Lock()
+
+    def add(self, stage, action, outcome, category="none", status="other", duration_ms=0):
+        if stage not in {"client", "owner", "owner_asgi", "helper"} or outcome not in {
+            "begin", "response", "entered", "ok", "error", "cancelled", "exception"
+        }:
+            with self._lock:
+                self.dropped += 1
+            return
+        if action not in self.actions:
+            action = "other"
+        if category not in {"none", "timeout", "cancelled", "connection_closed", "gateway_error", "other"}:
+            category = "other"
+        if status not in {"2xx", "4xx", "5xx", "other"}:
+            status = "other"
+        if type(duration_ms) is not int:
+            duration_ms = 0
+        with self._lock:
+            if len(self.events) == 16:
+                self.events.pop(0)
+                self.dropped += 1
+            self.events.append({"stage": stage, "action": action, "outcome": outcome,
+                                "category": category, "status": status,
+                                "duration_ms": min(60000, max(0, duration_ms))})
+
+    def note(self):
+        with self._lock:
+            snapshot = tuple(dict(event) for event in self.events)
+            dropped = self.dropped
+        events = "|".join(",".join(f"{key}:{event[key]}" for key in sorted(event))
+                         for event in snapshot)
+        return f"setup_sidecar dropped={min(2**31 - 1, dropped)} events={events}"
+
+
+class _ObservedAuthorityASGI:
+    """Observe bounded owner route phases without reading request or response bodies."""
+    def __init__(self, app, sidecar):
+        self.app, self.sidecar = app, sidecar
+        self.delay_action = None
+        self.delay_seconds = 0
+
+    async def __call__(self, scope, receive, send):
+        action = scope.get("path", "").rsplit("/", 1)[-1]
+        if action not in _SetupSidecar.actions:
+            action = "other"
+        started = time.monotonic()
+        self.sidecar.add("owner_asgi", action, "entered")
+        status = "other"
+
+        async def observed_send(message):
+            nonlocal status
+            if message.get("type") == "http.response.start":
+                code = message.get("status")
+                status = ("2xx" if type(code) is int and 200 <= code < 300 else
+                          "4xx" if type(code) is int and 400 <= code < 500 else
+                          "5xx" if type(code) is int and 500 <= code < 600 else "other")
+            await send(message)
+
+        try:
+            if action == self.delay_action:
+                await asyncio.sleep(min(5, max(0, self.delay_seconds)))
+            await self.app(scope, receive, observed_send)
+        except asyncio.CancelledError:
+            self.sidecar.add("owner_asgi", action, "cancelled", category="cancelled",
+                             duration_ms=int((time.monotonic() - started) * 1000))
+            raise
+        except Exception:
+            self.sidecar.add("owner_asgi", action, "exception", category="other",
+                             duration_ms=int((time.monotonic() - started) * 1000))
+            raise
+        self.sidecar.add("owner_asgi", action, "response", status=status,
+                         duration_ms=int((time.monotonic() - started) * 1000))
+
+
+def _helper_failure_category(error):
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if type(error).__name__ == "ConnectionClosedOK":
+        return "connection_closed"
+    return "other"
+
+
+def _observe_authority_route_handlers(app, sidecar):
+    """Observe sync route execution separately from cancellable ASGI transport."""
+    restored = []
+    for route in getattr(app, "routes", ()):
+        path = getattr(route, "path", "")
+        action = path.rsplit("/", 1)[-1]
+        dependant = getattr(route, "dependant", None)
+        original = getattr(dependant, "call", None)
+        if (not path.startswith("/internal/authority/") or action not in _SetupSidecar.actions
+                or original is None):
+            continue
+        def observed(*args, __original=original, __action=action, **kwargs):
+            started = time.monotonic()
+            sidecar.add("owner", __action, "entered")
+            try:
+                result = __original(*args, **kwargs)
+            except BaseException as error:
+                sidecar.add("owner", __action, "exception", category=_helper_failure_category(error),
+                            duration_ms=int((time.monotonic() - started) * 1000))
+                raise
+            sidecar.add("owner", __action, "ok", duration_ms=int((time.monotonic() - started) * 1000))
+            return result
+
+        dependant.call = observed
+        restored.append((dependant, original))
+
+    def restore():
+        for dependant, original in reversed(restored):
+            dependant.call = original
+
+    return restore
 
 
 def _error_category(error):
@@ -145,28 +270,41 @@ class _DiagnosticASGITransport(httpx.AsyncBaseTransport):
     def __init__(self, transport, diagnostics):
         self.transport = transport
         self.diagnostics = diagnostics
+        self.sidecar = None
 
     async def handle_async_request(self, request):
         action = request.url.path.rsplit("/", 1)[-1]
         if action not in {"start", "open", "hello", "touch", "fence", "authorize", "renew", "finish"}:
             action = "other"
         started = time.monotonic()
+        if self.sidecar is not None:
+            self.sidecar.add("client", action, "begin")
         try:
             response = await self.transport.handle_async_request(request)
         except asyncio.CancelledError:
             _best_effort_observation(lambda: self.diagnostics.add(
                 action=action, stage="authority", outcome="cancelled", category="cancelled",
                 duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
+            if self.sidecar is not None:
+                self.sidecar.add("client", action, "cancelled", category="cancelled",
+                                 duration_ms=int((time.monotonic() - started) * 1000))
             raise
         except Exception as error:
             _best_effort_observation(lambda: self.diagnostics.add(
                 action=action, stage="authority", outcome="error", category=_safe_exception_category(error),
                 duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
+            if self.sidecar is not None:
+                category = "timeout" if isinstance(error, (TimeoutError, httpx.TimeoutException)) else "other"
+                self.sidecar.add("client", action, "error", category=category,
+                                 duration_ms=int((time.monotonic() - started) * 1000))
             raise
         _best_effort_observation(lambda: self.diagnostics.add(
             action=action, stage="authority", outcome="ok" if response.status_code == 200 else "error",
             status=_status_category(response.status_code),
             duration_ms=min(60000, max(0, int((time.monotonic() - started) * 1000)))))
+        if self.sidecar is not None:
+            self.sidecar.add("client", action, "response", status=_status_category(response.status_code),
+                             duration_ms=int((time.monotonic() - started) * 1000))
         return response
 
     async def aclose(self):
@@ -293,47 +431,57 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
     (env.path / 'identity.json').write_text(json.dumps(metadata))
     (env.path / 'model.gguf').write_bytes(b'weights')
     diagnostics = diagnostics_factory()
-    transport = _DiagnosticASGITransport(httpx.ASGITransport(app=env.app), diagnostics)
-    if relaxed_open_setup or relaxed_hello_setup:
-        actions = frozenset(action for action, enabled in (
-            ('open', relaxed_open_setup), ('hello', relaxed_hello_setup)) if enabled)
-        client = _SetupOpenAuthorityClient('http://control.test', env.settings.authority_token,
-                                           transport=transport, setup_actions=actions)
-    else:
-        client = AuthorityClient('http://control.test', env.settings.authority_token, transport=transport)
-    helper_holder = {"value": None}
-
-    gateway = _DiagnosticGateway(client, diagnostics)
+    sidecar = _SetupSidecar()
+    observed_app = _ObservedAuthorityASGI(env.app, sidecar)
+    restore_owner_routes = _observe_authority_route_handlers(env.app, sidecar)
+    gateway = None
+    task = None
+    primary_error = None
     try:
-        await gateway.start()
-    except BaseException as error:
-        def observe_start_failure():
-            diagnostics.add(stage="setup", outcome="cancelled" if isinstance(error, asyncio.CancelledError) else "error")
-            error.add_note(diagnostics.note())
+        transport = _DiagnosticASGITransport(httpx.ASGITransport(app=observed_app), diagnostics)
+        transport.sidecar = sidecar
+        if relaxed_open_setup or relaxed_hello_setup:
+            actions = frozenset(action for action, enabled in (
+                ('open', relaxed_open_setup), ('hello', relaxed_hello_setup)) if enabled)
+            client = _SetupOpenAuthorityClient('http://control.test', env.settings.authority_token,
+                                               transport=transport, setup_actions=actions)
+        else:
+            client = AuthorityClient('http://control.test', env.settings.authority_token, transport=transport)
 
-        _best_effort_observation(observe_start_failure)
+        gateway = _DiagnosticGateway(client, diagnostics)
         try:
-            await gateway.close()
-        except (Exception, asyncio.CancelledError):
-            pass
-        try:
-            http_server.close()
-        except (Exception, asyncio.CancelledError):
-            pass
-        try:
-            await http_server.wait_closed()
-        except (Exception, asyncio.CancelledError):
-            pass
-        raise
-    async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
-        settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
-            ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
-            signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
-            identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
-        helper = helper_type(settings)
-        helper_holder["value"] = helper
-        task = asyncio.create_task(helper.run())
-        try:
+            await gateway.start()
+        except BaseException as error:
+            def observe_start_failure():
+                diagnostics.add(stage="setup", outcome="cancelled" if isinstance(error, asyncio.CancelledError) else "error")
+                error.add_note(diagnostics.note())
+
+            _best_effort_observation(observe_start_failure)
+            try:
+                error.add_note(sidecar.note())
+            except BaseException:
+                pass
+            raise
+
+        async with serve(gateway.connect, '127.0.0.1', 0, ssl=tls, subprotocols=[SUBPROTOCOL], compression=None, logger=LOGGER) as listener:
+            settings = HelperSettings(gateway_url=f'wss://127.0.0.1:{listener.sockets[0].getsockname()[1]}/connector',
+                ca_file=str(env.path / 'ca.pem'), cert_file=str(env.path / 'helper.pem'), key_file=str(env.path / 'helper.key'),
+                signing_key_file=str(env.path / 'helper.key'), engine_endpoint=f'http://127.0.0.1:{http_server.sockets[0].getsockname()[1]}',
+                identity_file=str(env.path / 'identity.json'), weight_paths={'model.gguf': str(env.path / 'model.gguf')})
+            helper = helper_type(settings)
+
+            async def run_helper_with_sidecar():
+                try:
+                    await helper.run()
+                except BaseException as error:
+                    sidecar.add("helper", "other", "exception", category=_helper_failure_category(error))
+                    try:
+                        error.add_note(sidecar.note())
+                    except BaseException:
+                        pass
+                    raise
+
+            task = asyncio.create_task(run_helper_with_sidecar())
             try:
                 async with asyncio.timeout(5):
                     while env.model['id'] not in gateway.sessions:
@@ -353,20 +501,62 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
                     error.add_note(diagnostics.note())
 
                 _best_effort_observation(observe_setup_failure)
+                try:
+                    error.add_note(sidecar.note())
+                except BaseException:
+                    pass
                 raise
             if relaxed_open_setup or relaxed_hello_setup:
                 client.preparing = False
             env.gateway, env.helper, env.engine, env.helper_settings = gateway, helper, engine, settings
             env.authority_diagnostics = diagnostics
+            env.setup_sidecar = sidecar
+            env.observed_authority_app = observed_app
             yield env
-        finally:
-            await gateway.close()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        cleanup_error = None
+
+        def remember_cleanup_error(error):
+            nonlocal cleanup_error
+            if cleanup_error is None:
+                cleanup_error = error
+
+        if gateway is not None:
+            try:
+                await gateway.close()
+            except BaseException as error:
+                remember_cleanup_error(error)
+        if task is not None:
+            try:
+                task.cancel()
+            except BaseException as error:
+                remember_cleanup_error(error)
+            try:
+                await asyncio.gather(task, return_exceptions=True)
+            except BaseException as error:
+                remember_cleanup_error(error)
+        try:
             http_server.close()
+        except BaseException as error:
+            remember_cleanup_error(error)
+        try:
             await http_server.wait_closed()
-            if engine.handlers:
+        except BaseException as error:
+            remember_cleanup_error(error)
+        if engine.handlers:
+            try:
                 await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
+            except BaseException as error:
+                remember_cleanup_error(error)
+        try:
+            restore_owner_routes()
+        except BaseException as error:
+            remember_cleanup_error(error)
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 async def infer(env, **changes):
