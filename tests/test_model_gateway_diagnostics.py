@@ -490,6 +490,10 @@ def test_broken_diagnostics_do_not_mask_connected_setup_failure(authority_env):
         instance = _EarlyFailureHelper.instances[-1]
         assert failure.value is instance.error
         assert instance.task.done()
+        notes = "\n".join(getattr(failure.value, "__notes__", ()))
+        assert "setup_sidecar" in notes
+        assert "stage:helper" in notes and "outcome:exception" in notes
+        assert "private-canary-setup" not in notes
 
     asyncio.run(scenario())
 
@@ -501,6 +505,30 @@ def test_broken_diagnostics_do_not_mask_real_authority_success_or_cleanup(author
             result = await consume(request)
             assert b"[DONE]" in result
             assert env.engine.calls
+
+    asyncio.run(scenario())
+
+
+def test_independent_sidecar_observes_owner_timeout_when_primary_diagnostics_break(authority_env):
+    async def scenario():
+        async with connected(authority_env, diagnostics_factory=_BrokenDiagnostics) as env:
+            env.observed_authority_app.delay_action = "renew"
+            env.observed_authority_app.delay_seconds = 2
+            with pytest.raises(GatewayError, match="authority_unavailable"):
+                await env.gateway.call("renew", request_id="safe-test-id", capability="safe-test-capability",
+                                       workload="worker", permit="safe-test-permit")
+            events = env.setup_sidecar.events
+            assert any(event["stage"] == "owner_asgi" and event["action"] == "renew"
+                       and event["outcome"] == "entered" for event in events)
+            assert any(event["stage"] == "owner_asgi" and event["action"] == "renew"
+                       and event["outcome"] == "cancelled" for event in events), env.setup_sidecar.note()
+            assert not any(event["stage"] == "owner" and event["action"] == "renew"
+                           for event in events), env.setup_sidecar.note()
+            assert any(event["stage"] == "client" and event["action"] == "renew"
+                       and event["outcome"] == "cancelled" for event in events)
+            rendered = env.setup_sidecar.note()
+            assert "safe-test" not in rendered
+            assert "authority-test-credential" not in rendered
 
     asyncio.run(scenario())
 
