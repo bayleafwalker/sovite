@@ -229,7 +229,7 @@ def test_authorize_lost_reply_cleanup_requires_current_fence_and_certain_stop(au
 
 def test_disconnect_fence_retries_with_small_bound(authority_env):
     async def scenario():
-        async with connected(authority_env) as env:
+        async with connected(authority_env, relaxed_open_setup=True) as env:
             original, attempts = env.gateway.call, []
             fenced = asyncio.Event()
             async def transient(action, **fields):
