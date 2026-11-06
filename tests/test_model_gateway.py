@@ -87,6 +87,19 @@ async def _wait_for_bounded_engine_start(env, request, consumer, request_deadlin
         await asyncio.gather(engine_started, return_exceptions=True)
 
 
+def _note_denial_failure(error, env):
+    # Keep each observation independent and never replace the original assertion.
+    try:
+        error.add_note(env.authority_diagnostics.note())
+    except BaseException:
+        pass
+    try:
+        error.add_note(f"denial_observations engine_calls_present={bool(env.engine.calls)} "
+                       f"reservation_absent={env.helper.reservation is None}")
+    except BaseException:
+        pass
+
+
 @pytest.mark.parametrize('denial,code', [
     ('capability', 'execution_capability_invalid'), ('expired_capability', 'execution_capability_invalid'),
     ('workload', 'workload_denied'), ('fence', 'execution_fenced'), ('lease', 'execution_fenced'),
@@ -143,9 +156,13 @@ def test_PIN_BEFORE_PROMPT_CURRENT_AUTHORITY_seven_checks_deny_zero_engine_bytes
             with pytest.raises(GatewayError) as failure:
                 request = await infer(env, **changes)
                 await consume(request)
-            assert failure.value.code == code
-            assert env.engine.calls == []  # PIN_BEFORE_PROMPT: no engine request and zero prompt bytes.
-            assert env.helper.reservation is None
+            try:
+                assert failure.value.code == code
+                assert env.engine.calls == []  # PIN_BEFORE_PROMPT: no engine request and zero prompt bytes.
+                assert env.helper.reservation is None
+            except AssertionError as error:
+                _note_denial_failure(error, env)
+                raise
     asyncio.run(scenario())
 
 

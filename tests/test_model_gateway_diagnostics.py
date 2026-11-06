@@ -616,3 +616,63 @@ def test_inference_failure_diagnostic_error_does_not_mask_assertion():
     response = httpx.Response(200, content=b'failure')
     with pytest.raises(AssertionError):
         _assert_inference_completed(response, _BrokenNoteDiagnostics())
+
+
+def test_denial_failure_notes_are_bounded_and_redacted():
+    from types import SimpleNamespace
+    from test_model_gateway import _note_denial_failure
+
+    diagnostics = _HandshakeDiagnostics()
+    for _ in range(30):
+        diagnostics.add(action='authorize', stage='authority', outcome='error',
+                        category='authority_unavailable', cause_category='timeout',
+                        owner_state='not_observed', secret='private-canary')
+    env = SimpleNamespace(authority_diagnostics=diagnostics,
+                          engine=SimpleNamespace(calls=['private-canary']),
+                          helper=SimpleNamespace(reservation='private-canary'))
+    original = AssertionError('original failure')
+    _note_denial_failure(original, env)
+    notes = ' '.join(original.__notes__)
+    assert 'action:authorize' in notes and 'cause_category:timeout' in notes
+    assert 'engine_calls_present=True' in notes and 'reservation_absent=False' in notes
+    assert 'private-canary' not in notes and len(notes) < 5000
+
+
+def test_denial_failure_broken_observers_preserve_original_assertion():
+    from types import SimpleNamespace
+    from test_model_gateway import _note_denial_failure
+
+    class BrokenEngine:
+        @property
+        def calls(self):
+            raise RuntimeError('private-canary')
+
+    env = SimpleNamespace(authority_diagnostics=_BrokenDiagnostics(),
+                          engine=BrokenEngine(), helper=SimpleNamespace(reservation=None))
+    original = AssertionError('original failure')
+    try:
+        raise original
+    except AssertionError as error:
+        _note_denial_failure(error, env)
+        assert error is original
+    assert str(original) == 'original failure'
+    assert not getattr(original, '__notes__', [])
+
+
+def test_denial_assertion_failure_keeps_assertion_and_observations(authority_env, monkeypatch):
+    import test_model_gateway as target
+
+    async def unavailable(env, **changes):
+        env.authority_diagnostics.add(action='authorize', stage='authority', outcome='error',
+                                      category='authority_unavailable', cause_category='timeout',
+                                      owner_state='not_observed', secret='private-canary')
+        raise GatewayError('authority_unavailable')
+
+    monkeypatch.setattr(target, 'infer', unavailable)
+    with pytest.raises(AssertionError) as caught:
+        target.test_PIN_BEFORE_PROMPT_CURRENT_AUTHORITY_seven_checks_deny_zero_engine_bytes(
+            authority_env, 'cancel', 'cancelled')
+    notes = ' '.join(caught.value.__notes__)
+    assert 'action:authorize' in notes and 'cause_category:timeout' in notes
+    assert 'engine_calls_present=False' in notes and 'reservation_absent=True' in notes
+    assert 'private-canary' not in notes
