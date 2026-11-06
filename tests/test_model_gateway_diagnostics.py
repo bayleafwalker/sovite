@@ -676,3 +676,121 @@ def test_denial_assertion_failure_keeps_assertion_and_observations(authority_env
     assert 'action:authorize' in notes and 'cause_category:timeout' in notes
     assert 'engine_calls_present=False' in notes and 'reservation_absent=True' in notes
     assert 'private-canary' not in notes
+
+@pytest.mark.parametrize("mode", ["timeout", "transport", "malformed", "status"])
+def test_connected_start_failure_has_bounded_sanitized_diagnostics(authority_env, monkeypatch, mode):
+    class Injected(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            assert request.url.path.endswith('/start')
+            if mode == 'timeout':
+                await asyncio.Event().wait()
+            if mode == 'transport':
+                raise httpx.ConnectError('private-canary', request=request)
+            if mode == 'malformed':
+                return httpx.Response(200, content=b'private-canary', request=request)
+            return httpx.Response(503, content=b'{"detail":{"code":"private-canary"}}', request=request)
+
+    original = model_support._DiagnosticASGITransport
+    monkeypatch.setattr(model_support, '_DiagnosticASGITransport',
+                        lambda transport, diagnostics: original(Injected(), diagnostics))
+
+    async def scenario():
+        started = time.monotonic()
+        with pytest.raises(GatewayError) as failure:
+            async with connected(authority_env):
+                pytest.fail('start must fail')
+        elapsed = time.monotonic() - started
+        notes = '\n'.join(getattr(failure.value, '__notes__', ()))
+        assert failure.value.code == 'authority_unavailable'
+        assert 'action:start' in notes and 'owner_state:not_observed' in notes
+        assert 'duration_ms:' in notes
+        assert 'private-canary' not in notes and 'authority-test-credential' not in notes
+        if mode == 'timeout':
+            assert AUTHORITY_TIMEOUT == 1 and 0.9 <= elapsed < 5
+            assert 'cause_category:timeout' in notes and 'category:cancelled' in notes
+        elif mode == 'transport':
+            assert 'category:transport_error' in notes and 'cause_category:transport_error' in notes
+        elif mode == 'malformed':
+            assert 'status:2xx' in notes and 'cause_category:invalid_response' in notes
+        else:
+            assert 'status:5xx' in notes
+
+    asyncio.run(scenario())
+
+
+def test_connected_start_broken_observer_preserves_failure(authority_env, monkeypatch):
+    class Injected(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise httpx.ConnectError('private-canary', request=request)
+
+    original = model_support._DiagnosticASGITransport
+    monkeypatch.setattr(model_support, '_DiagnosticASGITransport',
+                        lambda transport, diagnostics: original(Injected(), diagnostics))
+
+    async def scenario():
+        with pytest.raises(GatewayError) as failure:
+            async with connected(authority_env, diagnostics_factory=_BrokenDiagnostics):
+                pytest.fail('start must fail')
+        assert failure.value.code == 'authority_unavailable'
+
+    asyncio.run(scenario())
+
+
+def test_connected_start_cleanup_failures_preserve_original_and_attempt_all(authority_env, monkeypatch):
+    calls = []
+    class Injected(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise httpx.ConnectError('private-canary', request=request)
+
+    class Server:
+        def close(self):
+            calls.append('server_close')
+            raise RuntimeError('private-canary-close')
+
+        async def wait_closed(self):
+            calls.append('server_wait_closed')
+            raise asyncio.CancelledError()
+
+    async def start_server(*_args, **_kwargs):
+        return Server()
+
+    async def fail_gateway_close(_self):
+        calls.append('gateway_close')
+        raise asyncio.CancelledError()
+
+    original = model_support._DiagnosticASGITransport
+    monkeypatch.setattr(model_support, '_DiagnosticASGITransport',
+                        lambda transport, diagnostics: original(Injected(), diagnostics))
+    monkeypatch.setattr(model_support.asyncio, 'start_server', start_server)
+    monkeypatch.setattr(model_support._DiagnosticGateway, 'close', fail_gateway_close)
+
+    async def scenario():
+        with pytest.raises(GatewayError) as failure:
+            async with connected(authority_env):
+                pytest.fail('start must fail')
+        assert failure.value.code == 'authority_unavailable'
+        notes = '\n'.join(getattr(failure.value, '__notes__', ()))
+        assert 'action:start' in notes and 'cause_category:transport_error' in notes
+        assert 'private-canary' not in notes
+        assert calls == ['gateway_close', 'server_close', 'server_wait_closed']
+
+    asyncio.run(scenario())
+
+
+def test_connected_start_cancellation_is_recorded_and_propagated(authority_env, monkeypatch):
+    original = asyncio.CancelledError('private-canary')
+    async def cancel_start(_self):
+        raise original
+
+    monkeypatch.setattr(model_support._DiagnosticGateway, 'start', cancel_start)
+
+    async def scenario():
+        with pytest.raises(asyncio.CancelledError) as failure:
+            async with connected(authority_env):
+                pytest.fail('start must cancel')
+        assert failure.value is original
+        notes = '\n'.join(getattr(original, '__notes__', ()))
+        assert 'outcome:cancelled,stage:setup' in notes
+        assert 'private-canary' not in notes
+
+    asyncio.run(scenario())
