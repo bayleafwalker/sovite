@@ -70,7 +70,12 @@ async def _wait_for_bounded_engine_start(env, request, consumer, request_deadlin
                 })
             except Exception as exc:
                 diagnostic['snapshot_error_class'] = type(exc).__name__
-            raise AssertionError(f'bounded pre-partition start barrier failed: {diagnostic!r}')
+            failure = AssertionError(f'bounded pre-partition start barrier failed: {diagnostic!r}')
+            try:
+                failure.add_note(env.authority_diagnostics.note())
+            except Exception:
+                pass  # Observability must not replace the barrier failure.
+            raise failure
     except BaseException:
         if not consumer.done():
             consumer.cancel()
