@@ -64,11 +64,23 @@ def interrupted(prepared,tmp_path,monkeypatch,request):
     driver=SimpleNamespace(state_root=state,platform=platform,observer=lambda _:None,
         git_facts=native_git.tool_facts(),config={'descriptor_path':str(tmp_path/'descriptor'),
             'descriptor_owner_uid':__import__('os').getuid(),'routine_credentials_root':str(tmp_path)})
-    effects=[];exports=[];quiesces=[]
+    effects=[];exports=[];quiesces=[];phases=[];failures=[]
     values={}
+    large_bytes=(request.param if isinstance(getattr(request,'param',None),int) else 0)
+    injected_failure=(request.param.get('inject_failure')
+                      if isinstance(getattr(request,'param',None),dict) else None)
+    def checkpoint(stage):
+        phases.append(stage)
+        if injected_failure and stage==injected_failure['stage']:
+            if injected_failure['kind']=='timeout':
+                raise asyncio.TimeoutError('fixture-only secret sentinel')
+            raise RuntimeError('fixture-only secret sentinel')
     async def exchange(verb,*_args,**kwargs):
         if verb=='quiesce-v1':
             quiesces.append(verb)
+            # The owner fixture always has a valid acknowledgement available,
+            # even if the simulated execution fails before export setup. This
+            # keeps cleanup from replacing the primary execution exception.
             return _canonical_json(values['ack'])
         assert verb=='export-v1'
         exports.append(verb)
@@ -96,34 +108,52 @@ def interrupted(prepared,tmp_path,monkeypatch,request):
                 context.generation,hashlib.sha256(context.fence.encode()).hexdigest(),context.deadline)
             descriptor=Descriptor(identity,{'boot_id':'fixture-original-boot'},context.deadline+60)
             values['descriptor']=descriptor
+            values['ack']={'original_base_sha':base,'boot_id':'fixture-original-boot',
+                           'recovery_until':descriptor.recovery_until}
             owner_module.load_descriptor=lambda *_args,**_kwargs:descriptor
             bound=BoundNativeVM(driver,context,descriptor,owner_module,routines=routines)
             async def execute(root,intent,worktree,goal,budget,authorization_check,repair_context,transport):
-                run=platform.get_job(context.job_id).resolved['repository_run']
-                bound._persist_recovery(root,base,base,run)
-                budget.acquire_slot('ambiguous-provider-call')
-                budget.reserve_cost('ambiguous-provider-call',.4)
-                guest=tmp_path/'guest'
-                git('clone','--no-hardlinks',str(worktree),str(guest))
-                (guest/'src'/'main.txt').write_text('partial guest edit before interruption\n')
-                if getattr(request,'param',0):
-                    import secrets
-                    (guest/'src'/'large.txt').write_text(secrets.token_hex(request.param))
-                git('add','-A',cwd=guest)
-                git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','partial',cwd=guest)
-                tip=git('rev-parse','HEAD',cwd=guest)
-                git('update-ref','refs/heads/candidate',tip,cwd=guest)
-                bundle=tmp_path/'partial.bundle'
-                git('bundle','create',str(bundle),'refs/heads/candidate','^'+base,cwd=guest)
-                raw=bundle.read_bytes()
-                values['ack']={'original_base_sha':base,'boot_id':'fixture-original-boot',
-                               'recovery_until':descriptor.recovery_until}
-                header={'schema_version':'cloud.native-vm-export.v1','original_base_sha':base,
-                    'tip_sha':tip,'bundle_bytes':len(raw),'bundle_sha256':hashlib.sha256(raw).hexdigest(),
-                    'quiescence':values['ack']}
-                values['frame']=_canonical_json(header)+b'\n'+raw
-                effects.append('edit-and-ambiguous-provider-call')
-                raise RuntimeFailure('external_execution_uncertain')
+                stage='enter'
+                try:
+                    run=platform.get_job(context.job_id).resolved['repository_run']
+                    bound._persist_recovery(root,base,base,run)
+                    stage='recovery-persisted';checkpoint(stage)
+                    budget.acquire_slot('ambiguous-provider-call')
+                    budget.reserve_cost('ambiguous-provider-call',.4)
+                    stage='budget-reserved';checkpoint(stage)
+                    guest=tmp_path/'guest'
+                    git('clone','--no-hardlinks',str(worktree),str(guest))
+                    stage='guest-cloned';checkpoint(stage)
+                    (guest/'src'/'main.txt').write_text('partial guest edit before interruption\n')
+                    if large_bytes:
+                        import secrets
+                        (guest/'src'/'large.txt').write_text(secrets.token_hex(large_bytes))
+                    git('add','-A',cwd=guest)
+                    git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','partial',cwd=guest)
+                    tip=git('rev-parse','HEAD',cwd=guest)
+                    git('update-ref','refs/heads/candidate',tip,cwd=guest)
+                    stage='candidate-created';checkpoint(stage)
+                    bundle=tmp_path/'partial.bundle'
+                    git('bundle','create',str(bundle),'refs/heads/candidate','^'+base,cwd=guest)
+                    raw=bundle.read_bytes()
+                    header={'schema_version':'cloud.native-vm-export.v1','original_base_sha':base,
+                        'tip_sha':tip,'bundle_bytes':len(raw),'bundle_sha256':hashlib.sha256(raw).hexdigest(),
+                        'quiescence':values['ack']}
+                    values['frame']=_canonical_json(header)+b'\n'+raw
+                    stage='frame-ready';checkpoint(stage)
+                    effects.append('edit-and-ambiguous-provider-call')
+                    stage='effect-marker';checkpoint(stage)
+                    raise RuntimeFailure('external_execution_uncertain')
+                except BaseException as error:
+                    if isinstance(error,asyncio.CancelledError):category='cancelled'
+                    elif isinstance(error,asyncio.TimeoutError):category='timeout'
+                    elif isinstance(error,RuntimeFailure):category='runtime-failure'
+                    elif isinstance(error,Exception):category='exception'
+                    else:category='base-exception'
+                    # Store only a closed stage and category. Never emit the
+                    # exception message, path, request data, or artifact bytes.
+                    failures.append({'stage':stage,'category':category})
+                    raise
             bound._execute_native=execute
             return bound
     lifecycle.executor=Driver()
@@ -132,9 +162,31 @@ def interrupted(prepared,tmp_path,monkeypatch,request):
     assert asyncio.run(Worker(platform,repository_run_executor=lifecycle).run_once())
     job=platform.get_job(created['id'])
     assert job.status=='blocked' and job.error_code=='execution_uncertain'
-    assert len(effects)==1 and exports==[] and quiesces==['quiesce-v1']
+    diagnostic={'stage':failures[-1]['stage'] if failures else 'before-native',
+        'category':failures[-1]['category'] if failures else 'not-observed',
+        'last_completed_phase':phases[-1] if phases else 'none',
+        'quiesce_attempted':bool(quiesces)}
+    if injected_failure:
+        values['sanitized_failure']=diagnostic
+    else:
+        assert len(effects)==1 and exports==[] and quiesces==['quiesce-v1'], (
+            f'sanitized interrupted-fixture checkpoint: {diagnostic!r}'
+        )
     attempt=job.resolved['repository_run']['attempts'][-1]['id']
     return platform,owner,job,attempt,effects,exports,values
+
+
+@pytest.mark.parametrize('interrupted,expected_category',[
+    ({'inject_failure':{'stage':'guest-cloned','kind':'exception'}},'exception'),
+    ({'inject_failure':{'stage':'guest-cloned','kind':'timeout'}},'timeout'),
+],indirect=['interrupted'],ids=['exception','timeout'])
+def test_interrupted_fixture_checkpoint_is_bounded_and_sanitized(interrupted,expected_category):
+    _,_,job,_,effects,exports,values=interrupted
+    diagnostic=values['sanitized_failure']
+    assert diagnostic=={'stage':'guest-cloned','category':expected_category,
+        'last_completed_phase':'guest-cloned','quiesce_attempted':True}
+    assert effects==[] and exports==[]
+    assert 'secret sentinel' not in repr(diagnostic)
 
 
 def capture(fixture):
