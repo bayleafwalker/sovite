@@ -41,7 +41,7 @@ class _HandshakeDiagnostics:
         if len(self.events) == self.events.maxlen:
             self.dropped += 1
         allowed = {
-            "action": {"start", "open", "hello", "touch", "fence", "authorize", "renew", "other"},
+            "action": {"start", "open", "hello", "touch", "fence", "authorize", "renew", "finish", "other"},
             "stage": {"connect", "setup", "authority"},
             "outcome": {"ok", "error", "cancelled", "unknown"},
             "category": {"authority_unavailable", "model_identity_mismatch", "workload_denied",
@@ -148,7 +148,7 @@ class _DiagnosticASGITransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request):
         action = request.url.path.rsplit("/", 1)[-1]
-        if action not in {"start", "open", "hello", "touch", "fence", "authorize", "renew"}:
+        if action not in {"start", "open", "hello", "touch", "fence", "authorize", "renew", "finish"}:
             action = "other"
         started = time.monotonic()
         try:
@@ -180,7 +180,7 @@ class _DiagnosticGateway(Gateway):
         self.diagnostics = diagnostics
 
     async def call(self, action, **fields):
-        recorded = type(action) is str and action in {"start", "open", "hello", "touch", "fence", "authorize", "renew"}
+        recorded = type(action) is str and action in {"start", "open", "hello", "touch", "fence", "authorize", "renew", "finish"}
         try:
             result = await super().call(action, **fields)
         except asyncio.CancelledError:
