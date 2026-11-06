@@ -96,7 +96,7 @@ async def _wait_for_bounded_engine_start(env, request, consumer, request_deadlin
 ])
 def test_PIN_BEFORE_PROMPT_CURRENT_AUTHORITY_seven_checks_deny_zero_engine_bytes(authority_env, denial, code):
     async def scenario():
-        async with connected(authority_env, relaxed_hello_setup=True) as env:
+        async with connected(authority_env, relaxed_open_setup=True, relaxed_hello_setup=True) as env:
             changes = {}
             with env.platform.db.sessions.begin() as session:
                 execution = session.get(ExecutionAuthority, env.job.id)

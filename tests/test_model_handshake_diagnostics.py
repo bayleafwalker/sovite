@@ -260,3 +260,25 @@ def test_explicit_hello_budget_is_scoped_to_initial_setup(authority_env, monkeyp
                 await env.gateway.authority.call('hello', gateway_id=env.gateway.id)
             assert calls == ['hello', 'hello']
     asyncio.run(scenario())
+
+
+def test_combined_setup_budgets_allow_delayed_open_and_hello(authority_env, monkeypatch):
+    import model_support
+    original = model_support._DiagnosticASGITransport.handle_async_request
+    calls = []
+
+    async def slow_setup(self, request):
+        action = request.url.path.rsplit('/', 1)[-1]
+        if action in {'open', 'hello'}:
+            calls.append(action)
+            await asyncio.sleep(1.2)
+        return await original(self, request)
+
+    monkeypatch.setattr(model_support._DiagnosticASGITransport, 'handle_async_request', slow_setup)
+
+    async def scenario():
+        async with connected(authority_env, relaxed_open_setup=True, relaxed_hello_setup=True) as env:
+            assert calls == ['open', 'hello']
+            assert env.gateway.authority.preparing is False
+
+    asyncio.run(scenario())
