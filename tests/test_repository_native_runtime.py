@@ -313,3 +313,170 @@ def test_foreign_response_tool_namespace_is_refused():
     from sovite.repository_native_runtime import check_response_tools
     with pytest.raises(RuntimeFailure,match='native_tool_inventory_mismatch'):
         check_response_tools({'output':[{'type':'function_call','name':'exec_command','namespace':'host'}]})
+
+
+@pytest.mark.parametrize('raw', [
+    b'{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"failed","status":"completed"}}}\n',
+    b'{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed","usage":NaN}}}\n',
+    b'{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed","usage":1e999}}}\n',
+    b'{"method":"turn/completed",\n',
+])
+def test_native_terminal_rejects_ambiguous_or_nonfinite_json(tmp_path, raw):
+    from types import SimpleNamespace
+    async def scenario():
+        app = NativeAppServer('/unused', tmp_path, 'gpt-6', 'http://127.0.0.1:9999',
+                              'synthetic-token', time.time() + 10, lambda: True)
+        stream = asyncio.StreamReader()
+        stream.feed_data(raw)
+        stream.feed_eof()
+        app.process = SimpleNamespace(stdout=stream)
+        with pytest.raises(RuntimeFailure, match='native_executor_protocol_error'):
+            await app.receive()
+        assert app.terminals == {}
+    asyncio.run(scenario())
+
+
+def test_native_valid_terminal_frame_preserves_exact_outcome(tmp_path):
+    from types import SimpleNamespace
+    async def scenario():
+        app = NativeAppServer('/unused', tmp_path, 'gpt-6', 'http://127.0.0.1:9999',
+                              'synthetic-token', time.time() + 10, lambda: True)
+        stream = asyncio.StreamReader()
+        stream.feed_data(b'{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed","usage":0.5}}}\n')
+        stream.feed_eof()
+        app.process = SimpleNamespace(stdout=stream)
+        value = await app.receive()
+        assert value['params']['turn']['usage'] == 0.5
+        assert app.terminals == {'turn-1': {'id': 'turn-1', 'status': 'completed', 'usage': 0.5}}
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('raw, forwarded', [
+    ('{"method":"exec","params":{"x":1}}', True),
+    ('{"method":"exec","params":{"x":1,"x":2}}', False),
+    ('{"method":"exec","params":{"x":1e999}}', False),
+])
+def test_relay_validates_frames_before_forwarding(monkeypatch, raw, forwarded):
+    from types import SimpleNamespace
+    from sovite import repository_native_runtime as module
+    async def scenario():
+        written = []
+        class Writer:
+            def write(self, value): written.append(value)
+            async def drain(self): pass
+        class Connection:
+            def __aiter__(self): return self.frames()
+            async def frames(self): yield raw
+            async def send(self, value): raise AssertionError('no executor output expected')
+            async def close(self, **kwargs): pass
+        process = SimpleNamespace(stdin=Writer(), stdout=asyncio.StreamReader())
+        async def factory(): return process
+        async def stopped(_process): return 0
+        monkeypatch.setattr(module, 'stop_process', stopped)
+        relay = ExecutorRelay(factory, time.time()+10, lambda: True)
+        await relay._relay(Connection())
+        assert written == ([raw.encode() + b'\n'] if forwarded else [])
+        assert relay.failed
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('raw, forwarded', [
+    (b'{"id":1,"result":{"exitCode":0}}\n', True),
+    (b'{"id":1,"result":{"exitCode":1,"exitCode":0}}\n', False),
+])
+def test_relay_validates_executor_output_before_forwarding(monkeypatch, raw, forwarded):
+    from types import SimpleNamespace
+    from sovite import repository_native_runtime as module
+    async def scenario():
+        sent = []
+        class Writer:
+            def write(self, value): raise AssertionError('no inbound frame expected')
+            async def drain(self): pass
+        class Connection:
+            def __aiter__(self): return self.frames()
+            async def frames(self):
+                await asyncio.Event().wait()
+                yield ''
+            async def send(self, value): sent.append(value)
+            async def close(self, **kwargs): pass
+        output = asyncio.StreamReader(); output.feed_data(raw); output.feed_eof()
+        process = SimpleNamespace(stdin=Writer(), stdout=output)
+        async def factory(): return process
+        async def stopped(_process): return 0
+        monkeypatch.setattr(module, 'stop_process', stopped)
+        relay = ExecutorRelay(factory, time.time()+10, lambda: True)
+        await relay._relay(Connection())
+        assert sent == ([raw[:-1].decode()] if forwarded else [])
+        assert relay.failed
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('frame', [
+    {'method': 'turn/completed', 'params': None},
+    {'method': 'turn/completed', 'params': []},
+    {'method': 'turn/completed', 'params': 'value'},
+    {'method': 'turn/completed', 'params': {'turn': None}},
+    {'method': 'turn/completed', 'params': {'turn': []}},
+    {'method': 'turn/completed', 'params': {'turn': 7}},
+])
+def test_native_terminal_rejects_nonobject_nested_values(tmp_path, frame):
+    from types import SimpleNamespace
+    async def scenario():
+        app = NativeAppServer('/unused', tmp_path, 'gpt-6', 'http://127.0.0.1:9999',
+                              'synthetic-token', time.time()+10, lambda: True)
+        stream = asyncio.StreamReader(); stream.feed_data(json.dumps(frame).encode()+b'\n'); stream.feed_eof()
+        app.process = SimpleNamespace(stdout=stream)
+        with pytest.raises(RuntimeFailure, match='native_executor_protocol_error'):
+            await app.receive()
+        assert app.terminals == {}
+    asyncio.run(scenario())
+
+
+def test_native_terminal_rejects_non_utf8_json_bytes(tmp_path):
+    from types import SimpleNamespace
+    async def scenario():
+        app = NativeAppServer('/unused', tmp_path, 'gpt-6', 'http://127.0.0.1:9999',
+                              'synthetic-token', time.time()+10, lambda: True)
+        stream = asyncio.StreamReader()
+        stream.feed_data('{"method":"turn/completed","params":{"turn":{"id":"x","status":"completed"}}}'.encode('utf-16')+b'\n')
+        stream.feed_eof(); app.process = SimpleNamespace(stdout=stream)
+        with pytest.raises(RuntimeFailure, match='native_executor_protocol_error'):
+            await app.receive()
+        assert app.terminals == {}
+    asyncio.run(scenario())
+
+
+def test_native_terminal_oversized_stream_reports_protocol_error(tmp_path):
+    from types import SimpleNamespace
+    async def scenario():
+        app = NativeAppServer('/unused', tmp_path, 'gpt-6', 'http://127.0.0.1:9999',
+                              'synthetic-token', time.time()+10, lambda: True)
+        stream = asyncio.StreamReader(limit=16); stream.feed_data(b'x'*32+b'\n'); stream.feed_eof()
+        app.process = SimpleNamespace(stdout=stream)
+        with pytest.raises(RuntimeFailure, match='native_executor_protocol_error'):
+            await app.receive()
+        assert app.terminals == {}
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('encoding', ['utf-16', 'utf-32'])
+def test_native_protocol_object_requires_utf8(encoding):
+    from sovite.repository_native_runtime import _protocol_object
+    raw = '{"id":1,"method":"exec"}'.encode(encoding)
+    with pytest.raises(RuntimeFailure, match='native_executor_protocol_error'):
+        _protocol_object(raw)
+
+
+def test_native_protocol_preserves_valid_utf8_and_large_bounded_frame(tmp_path):
+    from types import SimpleNamespace
+    async def scenario():
+        app = NativeAppServer('/unused', tmp_path, 'gpt-6', 'http://127.0.0.1:9999',
+                              'synthetic-token', time.time()+10, lambda: True)
+        text_value = 'é😀' + 'x'*70000
+        frame = {'method': 'turn/completed', 'params': {'turn': {'id': 'ok', 'status': 'completed', 'text': text_value}}}
+        raw = json.dumps(frame, ensure_ascii=False).encode('utf-8') + b'\n'
+        stream = asyncio.StreamReader(limit=4*1024*1024+1); stream.feed_data(raw); stream.feed_eof()
+        app.process = SimpleNamespace(stdout=stream)
+        assert await app.receive() == frame
+        assert app.terminals['ok']['text'] == text_value
+    asyncio.run(scenario())
