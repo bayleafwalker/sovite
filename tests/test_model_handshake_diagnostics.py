@@ -167,3 +167,96 @@ def test_nested_out_of_order_fixtures_work_across_event_loops(tmp_path, v2_bundl
             for db in databases:
                 db.engine.dispose()
     assert HelperConnection.serve is original_serve
+
+
+def test_explicit_setup_budget_is_scoped_to_initial_open(authority_env, monkeypatch):
+    import model_support
+    original = model_support._DiagnosticASGITransport.handle_async_request
+    calls = []
+    async def slow_open(self, request):
+        if request.url.path.endswith('/open'):
+            calls.append('open')
+            await asyncio.sleep(1.2)
+        return await original(self, request)
+    monkeypatch.setattr(model_support._DiagnosticASGITransport, 'handle_async_request', slow_open)
+    async def scenario():
+        async with connected(authority_env, relaxed_open_setup=True) as env:
+            assert calls == ['open']
+            assert env.gateway.authority.preparing is False
+            with pytest.raises(GatewayError, match='authority_unavailable'):
+                await env.gateway.authority.call('open', gateway_id=env.gateway.id,
+                                                 certificate_digest='0' * 64)
+            assert calls == ['open', 'open']
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('action', ['open', 'hello'])
+def test_production_authority_setup_actions_keep_one_second_timeout(monkeypatch, action):
+    import httpx
+    from sovite.gateway.client import AuthorityClient
+    observed, cancelled = [], []
+    wait_for = asyncio.wait_for
+    def observe_wait(awaitable, timeout):
+        observed.append(timeout)
+        return wait_for(awaitable, timeout)
+    monkeypatch.setattr(asyncio, 'wait_for', observe_wait)
+    async def slow(_request):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+    async def scenario():
+        client = AuthorityClient('https://control.test', 'x' * 24, transport=httpx.MockTransport(slow))
+        try:
+            with pytest.raises(GatewayError, match='authority_unavailable'):
+                await client.call(action)
+            assert observed == [1] and cancelled == [True]
+        finally:
+            await client.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('action', ['open', 'hello'])
+def test_test_only_initial_setup_budget_remains_bounded(monkeypatch, action):
+    import httpx
+    from model_support import _SetupOpenAuthorityClient
+    observed, cancelled = [], []
+    wait_for = asyncio.wait_for
+    def observe_wait(awaitable, timeout):
+        observed.append(timeout)
+        return wait_for(awaitable, timeout)
+    monkeypatch.setattr(asyncio, 'wait_for', observe_wait)
+    async def slow(_request):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+    async def scenario():
+        client = _SetupOpenAuthorityClient('https://control.test', 'x' * 24,
+                                           transport=httpx.MockTransport(slow), setup_actions=frozenset({action}))
+        try:
+            with pytest.raises(GatewayError, match='authority_unavailable'):
+                await client.call(action)
+            assert observed == [4] and cancelled == [True]
+        finally:
+            await client.close()
+    asyncio.run(scenario())
+
+
+def test_explicit_hello_budget_is_scoped_to_initial_setup(authority_env, monkeypatch):
+    import model_support
+    original = model_support._DiagnosticASGITransport.handle_async_request
+    calls = []
+    async def slow_hello(self, request):
+        if request.url.path.endswith('/hello'):
+            calls.append('hello')
+            await asyncio.sleep(1.2)
+        return await original(self, request)
+    monkeypatch.setattr(model_support._DiagnosticASGITransport, 'handle_async_request', slow_hello)
+    async def scenario():
+        async with connected(authority_env, relaxed_hello_setup=True) as env:
+            assert calls == ['hello'] and env.gateway.authority.preparing is False
+            with pytest.raises(GatewayError, match='authority_unavailable'):
+                await env.gateway.authority.call('hello', gateway_id=env.gateway.id)
+            assert calls == ['hello', 'hello']
+    asyncio.run(scenario())
