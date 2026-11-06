@@ -846,6 +846,43 @@ def test_connected_start_cleanup_failures_preserve_original_and_attempt_all(auth
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("failure_kind", ["error", "cancellation"])
+def test_connected_success_propagates_first_close_failure_after_all_cleanup(authority_env, monkeypatch, failure_kind):
+    owner_routes = [route.dependant for route in authority_env.app.routes
+                    if getattr(route, "path", "").startswith("/internal/authority/")
+                    and getattr(route, "dependant", None) is not None]
+    original_calls = [route.call for route in owner_routes]
+    real_start_server = model_support.asyncio.start_server
+    servers = []
+    calls = []
+    close_error = (asyncio.CancelledError("private-canary-close") if failure_kind == "cancellation"
+                   else RuntimeError("private-canary-close"))
+
+    async def capture_server(*args, **kwargs):
+        server = await real_start_server(*args, **kwargs)
+        servers.append(server)
+        return server
+
+    async def fail_gateway_close(_self):
+        calls.append("gateway_close")
+        raise close_error
+
+    monkeypatch.setattr(model_support.asyncio, "start_server", capture_server)
+    monkeypatch.setattr(model_support._DiagnosticGateway, "close", fail_gateway_close)
+
+    async def scenario():
+        with pytest.raises(type(close_error)) as failure:
+            async with connected(authority_env) as env:
+                assert any(event["stage"] == "owner" and event["action"] == "hello"
+                           and event["outcome"] == "ok" for event in env.setup_sidecar.events)
+        assert failure.value is close_error
+        assert calls == ["gateway_close"]
+        assert servers and not servers[0].is_serving()
+        assert [route.call for route in owner_routes] == original_calls
+
+    asyncio.run(scenario())
+
+
 def test_connected_start_cancellation_is_recorded_and_propagated(authority_env, monkeypatch):
     original = asyncio.CancelledError('private-canary')
     async def cancel_start(_self):

@@ -436,6 +436,7 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
     restore_owner_routes = _observe_authority_route_handlers(env.app, sidecar)
     gateway = None
     task = None
+    primary_error = None
     try:
         transport = _DiagnosticASGITransport(httpx.ASGITransport(app=observed_app), diagnostics)
         transport.sidecar = sidecar
@@ -512,34 +513,50 @@ async def connected(env, *, stall=False, helper_type=PilotHelper, diagnostics_fa
             env.setup_sidecar = sidecar
             env.observed_authority_app = observed_app
             yield env
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        try:
-            if gateway is not None:
-                try:
-                    await gateway.close()
-                except BaseException:
-                    pass
-            if task is not None:
+        cleanup_error = None
+
+        def remember_cleanup_error(error):
+            nonlocal cleanup_error
+            if cleanup_error is None:
+                cleanup_error = error
+
+        if gateway is not None:
+            try:
+                await gateway.close()
+            except BaseException as error:
+                remember_cleanup_error(error)
+        if task is not None:
+            try:
                 task.cancel()
-                try:
-                    await asyncio.gather(task, return_exceptions=True)
-                except BaseException:
-                    pass
+            except BaseException as error:
+                remember_cleanup_error(error)
             try:
-                http_server.close()
-            except BaseException:
-                pass
+                await asyncio.gather(task, return_exceptions=True)
+            except BaseException as error:
+                remember_cleanup_error(error)
+        try:
+            http_server.close()
+        except BaseException as error:
+            remember_cleanup_error(error)
+        try:
+            await http_server.wait_closed()
+        except BaseException as error:
+            remember_cleanup_error(error)
+        if engine.handlers:
             try:
-                await http_server.wait_closed()
-            except BaseException:
-                pass
-            if engine.handlers:
-                try:
-                    await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
-                except BaseException:
-                    pass
-        finally:
+                await asyncio.wait_for(asyncio.gather(*engine.handlers, return_exceptions=True), 3)
+            except BaseException as error:
+                remember_cleanup_error(error)
+        try:
             restore_owner_routes()
+        except BaseException as error:
+            remember_cleanup_error(error)
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 async def infer(env, **changes):
