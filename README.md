@@ -149,6 +149,7 @@ The release is a complete implementation for whole-platform assessment. It does 
 - [Security and qualification](docs/SECURITY.md): trusted components, enforcement duties and evidence.
 - [API contract](docs/API_CONTRACT.md): operator API, receipts and the external native-harness contract.
 - [Upstreams](docs/UPSTREAMS.md): adopted components, pinned references and explicit extension boundaries.
+- [Outcome-settlement gateway plan](docs/plans/2026-11-06-outcome-settlement-gateway.md): proposed bounded publication and recovery proof through the existing resource-owner path; no installed capability is implied.
 
 No production credentials, private keys, runtime databases or model weights are included in the source distribution.
 
