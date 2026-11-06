@@ -648,6 +648,127 @@ def test_remote_worker_v2_loss_after_pull_commit_reconciles_same_key_over_loopba
         assert not thread.is_alive()
 
 
+def test_remote_worker_v2_advances_past_101_incompatible_jobs_over_loopback(owner, tmp_path):
+    """Exercise scan recovery and eventual target execution through the worker."""
+    import httpx
+    import socket
+    import threading
+    import time
+    import uvicorn
+
+    from sqlalchemy import select
+    from sovite.db import AuditEvent
+    from sovite.execution_client import ExecutionClient
+    from sovite.remote_journal import ExecutionJournal
+    from sovite.worker import RemoteWorker
+    from test_dispatch_fairness import _external_profile_backlog
+
+    target = _external_profile_backlog(owner)
+    settings = replace(owner.platform.settings,
+        execution_tokens={"actual-workload": TOKEN, "other-workload": OTHER_TOKEN})
+    app = create_app(settings=settings, platform=owner.platform)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started and thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.started
+
+    journal_path = tmp_path / "execution.json"
+    pull_ids = []
+    lookup_ids = []
+    executed_jobs = []
+
+    class TargetRunner:
+        authorization_check = None
+
+        async def run(self, recipe, task, job_id, **kwargs):
+            assert job_id == target.id
+            assert task == "external fairness target"
+            executed_jobs.append(job_id)
+            return {"executed_job": job_id}
+
+    class LossAfterFirstScan(httpx.BaseTransport):
+        def handle_request(self, request):
+            body = json.loads(request.content)
+            is_pull = request.url.path.endswith("/v2/pull")
+            if is_pull:
+                pending = json.loads(journal_path.read_text())
+                assert pending["schema_version"] == 2
+                assert pending["pull_protocol"] == 2
+                assert pending["operation_id"] == body["operation_id"]
+            with httpx.Client(timeout=10, trust_env=False) as loopback:
+                response = loopback.request(
+                    request.method,
+                    f"http://127.0.0.1:{port}{request.url.path}",
+                    headers=dict(request.headers),
+                    content=request.content,
+                )
+            result = httpx.Response(response.status_code, headers=response.headers,
+                                    content=response.content, request=request)
+            if is_pull:
+                pull_ids.append(body["operation_id"])
+                if len(pull_ids) == 1:
+                    assert result.json()["state"] == "scan_advanced"
+                    raise httpx.ReadTimeout("synthetic scan response loss after owner commit")
+            elif request.url.path.endswith("/v2/lookup"):
+                lookup_ids.append(body["operation_id"])
+            return result
+
+        def close(self):
+            return None
+
+    transport = LossAfterFirstScan()
+    client = ExecutionClient(
+        "https://execution.example", TOKEN, transport=transport, api_version=2,
+    )
+    journal = ExecutionJournal(journal_path)
+    runner = TargetRunner()
+    worker = RemoteWorker(client, owner.instance, runner=runner, journal=journal,
+                          pull_protocol=2, poll_seconds=0.05)
+    try:
+        # The first owner transaction advances the scan cursor over the first
+        # window. The lost response is settled by same-key v2 lookup; the next
+        # worker pull continues from the durable cursor to the compatible row.
+        assert asyncio.run(worker.run_once()) is False
+        assert not worker.stop.is_set()
+        assert journal.load() is None
+        assert len(pull_ids) == len(lookup_ids) == 1
+        assert pull_ids == lookup_ids
+
+        assert asyncio.run(worker.run_once()) is True
+        assert not worker.stop.is_set()
+        assert journal.load() is None
+        assert len(pull_ids) == 2
+        assert len(set(pull_ids)) == 2
+        assert len(lookup_ids) == 1
+        assert executed_jobs == [target.id]
+        with owner.platform.db.sessions() as session:
+            row = session.get(Job, target.id)
+            assert row.status == "completed"
+            assert row.lease_owner is None
+            incompatible = session.scalars(select(Job).where(
+                Job.id.like("external-control-%")
+            )).all()
+            assert len(incompatible) == 101
+            assert all(job.status == "queued" and job.lease_owner is None
+                       for job in incompatible)
+            assert session.scalar(select(AuditEvent).where(
+                AuditEvent.target == target.id,
+                AuditEvent.action == "task.execution_completed",
+            )) is not None
+    finally:
+        journal.close()
+        transport.close()
+        server.should_exit = True
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+
 def test_execution_client_real_http_contract_lifecycle(owner):
     import httpx
     from sovite.execution_client import ExecutionClient, ExecutionContext
