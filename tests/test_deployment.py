@@ -136,6 +136,7 @@ def test_remote_worker_is_https_scoped_and_has_no_platform_or_storage_credential
     env = {entry['name']: entry for entry in container['env']}
     assert container['command'] == ['sovite-remote-worker']
     assert env['SOVITE_CONTROL_URL']['value'] == 'https://sovite.apps.kotona.app'
+    assert env['SOVITE_EXECUTION_API_VERSION']['value'] == '1'
     assert env['SOVITE_EXECUTION_INSTANCE_ID']['value'] == 'remote-agent-1'
     assert env['SOVITE_EXECUTION_TOKEN']['valueFrom']['secretKeyRef']['key'] == 'SOVITE_EXECUTION_TOKEN'
     assert env['AGENT_API_KEY']['valueFrom']['secretKeyRef']['key'] == 'REMOTE_AGENT_API_KEY'
@@ -161,6 +162,7 @@ def test_remote_worker_is_https_scoped_and_has_no_platform_or_storage_credential
         {'controlUrl': 'http://sovite.apps.kotona.app'},
         {'controlUrl': ''},
         {'instanceId': 'bad/identity'},
+        {'apiVersion': 3},
         {'credentials': [{'env': 'SOVITE_DATABASE_URL', 'key': 'bad'}]},
     ):
         candidate = {'remoteWorker': {**values['remoteWorker'], **bad}, 'networkPolicy': values['networkPolicy']}

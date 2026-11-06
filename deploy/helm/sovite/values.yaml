@@ -43,6 +43,8 @@ worker:
 remoteWorker:
   # Separate API-only worker. It starts only against this explicit HTTPS owner origin.
   enabled: false
+  # External pull protocol; v2 is opt-in and journals its version before use.
+  apiVersion: 1
   controlUrl: ""
   instanceId: ""
   journalStorage: 1Gi

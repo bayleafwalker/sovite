@@ -97,6 +97,19 @@ are observations. Lookup is scoped to the exact instance and operation ID and
 returns fixed journal metadata. Callers should generate a distinct operation
 ID for each new mutation and use the original ID for exact reconciliation.
 
+External pull protocol v2 is an explicit opt-in through
+`SOVITE_EXECUTION_API_VERSION=2` (Helm `remoteWorker.apiVersion: 2`); the
+default remains v1. The durable journal writes schema version 2 with the pull
+protocol before sending a v2 pull, accepts old schema-1 records as v1, and
+refuses startup if an unresolved record's protocol differs from configuration.
+V2 `scan_advanced`, `profile_unavailable`, and `busy` results are confirmed
+no-job outcomes. A lost pull response is reconciled through v2 lookup with the
+same operation ID; a reservation found only through lookup still stops for
+manual reconciliation because lookup does not return its task. The worker
+waits the configured poll interval between no-job outcomes. This opt-in does
+not qualify total database work: existing model concurrency accounting still
+scans running jobs.
+
 ## Remaining boundary
 
 The local `Worker.claim`, renewal, shutdown handback, recovery, and finalization

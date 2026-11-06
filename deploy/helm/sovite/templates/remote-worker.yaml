@@ -51,6 +51,7 @@ spec:
           command: [sovite-remote-worker]
           env:
             - {name: SOVITE_CONTROL_URL, value: {{ .Values.remoteWorker.controlUrl | quote }}}
+            - {name: SOVITE_EXECUTION_API_VERSION, value: {{ .Values.remoteWorker.apiVersion | quote }} }
             - name: SOVITE_EXECUTION_TOKEN
               valueFrom:
                 secretKeyRef: {name: {{ .Values.runtimeSecret }}, key: SOVITE_EXECUTION_TOKEN}

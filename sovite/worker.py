@@ -205,11 +205,17 @@ class RemoteWorker:
     """
 
     def __init__(self, client, instance_id: str, runner: AdapterRunner | None = None,
-                 *, journal, poll_seconds: float = 2.0, lease_seconds: float = 90.0):
+                 *, journal, poll_seconds: float = 2.0, lease_seconds: float = 90.0,
+                 pull_protocol: int = 1):
         from .execution_client import _identifier
 
         self.client = client
         self.instance_id = _identifier(instance_id, "instance_id")
+        if type(pull_protocol) is not int or pull_protocol not in {1, 2}:
+            raise ValueError("Remote pull protocol must be 1 or 2")
+        if getattr(client, "api_version", 1) != pull_protocol:
+            raise ValueError("Remote client API version does not match the worker pull protocol")
+        self.pull_protocol = pull_protocol
         if journal is None or not all(hasattr(journal, name) for name in ("load", "write", "clear")):
             raise ValueError("An exclusive execution recovery journal is required")
         self.journal = journal
@@ -222,8 +228,8 @@ class RemoteWorker:
     def _journal_write(self, phase, operation_id, operation_kind, *, job=None,
                        expected=(), lease_until=None, deadline=None):
         job = job or {}
-        self.journal.write({
-            "schema_version": 1,
+        record = {
+            "schema_version": 2 if self.pull_protocol == 2 else 1,
             "instance_id": self.instance_id,
             "phase": phase,
             "operation_id": operation_id,
@@ -234,7 +240,10 @@ class RemoteWorker:
             "expected_result_states": sorted(expected),
             "lease_until": lease_until,
             "deadline": deadline,
-        })
+        }
+        if self.pull_protocol == 2:
+            record["pull_protocol"] = 2
+        self.journal.write(record)
 
     def _startup_reconcile(self):
         from .execution_client import ExecutionLookupNotFound
@@ -245,6 +254,13 @@ class RemoteWorker:
             if record is None:
                 self._startup_reconciled = True
                 return True
+            record_protocol = record.get("pull_protocol", 1)
+            if record_protocol != self.pull_protocol:
+                self._diagnostic_ids(self.instance_id, record["operation_id"],
+                                     record["operation_kind"], "protocol_mismatch_manual")
+                self.stop.set()
+                self._startup_reconciled = True
+                return False
             if record["instance_id"] != self.instance_id:
                 raise RuntimeError("Execution journal belongs to another instance")
             self._diagnostic_ids(self.instance_id, record["operation_id"],
@@ -262,7 +278,10 @@ class RemoteWorker:
                     and result.get("result_state") not in set(record["expected_result_states"])):
                 raise RuntimeError("Execution journal result is outside its recorded expectation")
             if record["operation_kind"] == "pull":
-                if result.get("result_state") == "idle":
+                no_job_results = {"idle"} if record_protocol == 1 else {
+                    "idle", "scan_advanced", "profile_unavailable", "busy",
+                }
+                if result.get("result_state") in no_job_results:
                     self.journal.clear()
                     self._startup_reconciled = True
                     return True
@@ -408,7 +427,10 @@ class RemoteWorker:
                 raise
 
         pull_id = self._operation_id()
-        self._journal_write("pending_pull", pull_id, "pull", expected={"idle", "reserved"})
+        pull_results = {"idle", "reserved"} if self.pull_protocol == 1 else {
+            "idle", "reserved", "scan_advanced", "profile_unavailable", "busy",
+        }
+        self._journal_write("pending_pull", pull_id, "pull", expected=pull_results)
         try:
             pulled = self.client.pull(self.instance_id, pull_id)
         except ExecutionOutcomeUnknown:
@@ -417,10 +439,11 @@ class RemoteWorker:
                 observed = self.client.lookup(self.instance_id, pull_id)
                 if (observed.get("state") != "found" or observed.get("operation_id") != pull_id
                         or observed.get("operation_kind") != "pull"
-                        or observed.get("result_state") not in {"idle", "reserved"}):
+                        or observed.get("result_state") not in pull_results):
                     raise RuntimeError("Execution pull lookup did not resolve the exact operation")
-                if observed.get("result_state") == "idle":
-                    self._diagnostic_ids(self.instance_id, pull_id, "pull", "idle_confirmed")
+                if observed.get("result_state") in pull_results - {"reserved"}:
+                    self._diagnostic_ids(self.instance_id, pull_id, "pull",
+                                         observed["result_state"] + "_confirmed")
                     self.journal.clear()
                     return False
                 # Lookup intentionally omits task/resolved; never dispatch a
@@ -437,6 +460,9 @@ class RemoteWorker:
             self.stop.set()
             raise
         if pulled["state"] == "idle":
+            self.journal.clear()
+            return False
+        if self.pull_protocol == 2 and pulled["state"] in {"scan_advanced", "profile_unavailable", "busy"}:
             self.journal.clear()
             return False
         if pulled["state"] != "reserved" or not isinstance(pulled.get("job"), dict):

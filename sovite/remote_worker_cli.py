@@ -36,6 +36,7 @@ def _bounded_seconds(name: str, default: float, minimum: float, maximum: float) 
 async def _run(
     instance_id: str,
     journal_path: str,
+    api_version: int,
     poll_seconds: float,
     lease_seconds: float,
     ca_bundle: str | None,
@@ -50,11 +51,12 @@ async def _run(
     heartbeat_task = None
     try:
         worker = RemoteWorker(
-            ExecutionClient.from_env(verify=ca_bundle or True),
+            ExecutionClient.from_env(verify=ca_bundle or True, api_version=api_version),
             instance_id,
             journal=journal,
             poll_seconds=poll_seconds,
             lease_seconds=lease_seconds,
+            pull_protocol=api_version,
         )
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -143,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    raw_api_version = os.environ.get("SOVITE_EXECUTION_API_VERSION", "1")
+    if raw_api_version not in {"1", "2"}:
+        print("SOVITE_EXECUTION_API_VERSION must be 1 or 2", file=sys.stderr)
+        return 2
+    api_version = int(raw_api_version)
     ca_bundle = os.environ.get("SOVITE_EXECUTION_CA_BUNDLE") or None
     if ca_bundle is not None and (not Path(ca_bundle).is_file() or not os.access(ca_bundle, os.R_OK)):
         print("SOVITE_EXECUTION_CA_BUNDLE must name a readable CA file", file=sys.stderr)
@@ -150,7 +157,8 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO)
     try:
-        asyncio.run(_run(instance_id, journal_path, poll_seconds, lease_seconds, ca_bundle))
+        asyncio.run(_run(instance_id, journal_path, api_version, poll_seconds,
+                          lease_seconds, ca_bundle))
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

@@ -3,6 +3,7 @@
 The shared ``owner`` fixture uses SQLite and the disposable PostgreSQL fixture;
 PostgreSQL cases skip only when its disposable URL is absent.
 """
+import asyncio
 import json
 import sys
 import time
@@ -566,6 +567,85 @@ def test_execution_api_v2_real_asgi_routes_bind_protocol_and_audit(owner):
         assert session.scalar(select(AuditEvent).where(
             AuditEvent.target == owner.instance,
             AuditEvent.action == "task.execution_idle")) is not None
+
+
+def test_remote_worker_v2_loss_after_pull_commit_reconciles_same_key_over_loopback(owner, tmp_path):
+    import httpx
+    import json
+    import socket
+    import threading
+    import time
+    import uvicorn
+
+    from sovite.execution_client import ExecutionClient
+    from sovite.remote_journal import ExecutionJournal
+    from sovite.worker import RemoteWorker
+
+    admit_agent_http_owner(owner)
+    settings = replace(owner.platform.settings,
+        execution_tokens={"actual-workload": TOKEN, "other-workload": OTHER_TOKEN})
+    app = create_app(settings=settings, platform=owner.platform)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started and thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.started
+
+    journal_path = tmp_path / "execution.json"
+    observed_pull_ids = []
+    observed_lookup_ids = []
+
+    class LossAfterFirstPull(httpx.BaseTransport):
+        def handle_request(self, request):
+            body = json.loads(request.content)
+            with httpx.Client(timeout=10, trust_env=False) as loopback:
+                response = loopback.request(
+                    request.method,
+                    f"http://127.0.0.1:{port}{request.url.path}",
+                    headers=dict(request.headers),
+                    content=request.content,
+                )
+            result = httpx.Response(response.status_code, headers=response.headers,
+                                    content=response.content, request=request)
+            if request.url.path.endswith("/v2/pull"):
+                observed_pull_ids.append(body["operation_id"])
+                pending = json.loads(journal_path.read_text())
+                assert pending["schema_version"] == 2
+                assert pending["pull_protocol"] == 2
+                assert pending["operation_id"] == body["operation_id"]
+                if len(observed_pull_ids) == 1:
+                    raise httpx.ReadTimeout("synthetic response loss after owner commit")
+            elif request.url.path.endswith("/v2/lookup"):
+                observed_lookup_ids.append(body["operation_id"])
+            return result
+
+        def close(self):
+            return None
+
+    transport = LossAfterFirstPull()
+    client = ExecutionClient(
+        "https://execution.example", TOKEN, transport=transport, api_version=2,
+    )
+    journal = ExecutionJournal(journal_path)
+    worker = RemoteWorker(client, owner.instance, journal=journal,
+                          pull_protocol=2, poll_seconds=0.25)
+    try:
+        assert asyncio.run(worker.run_once()) is False
+        assert not worker.stop.is_set()
+        assert journal.load() is None
+        assert len(observed_pull_ids) == len(observed_lookup_ids) == 1
+        assert observed_pull_ids == observed_lookup_ids
+    finally:
+        journal.close()
+        transport.close()
+        server.should_exit = True
+        thread.join(timeout=10)
+        assert not thread.is_alive()
 
 
 def test_execution_client_real_http_contract_lifecycle(owner):

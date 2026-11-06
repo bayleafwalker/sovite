@@ -36,6 +36,23 @@ def test_remote_worker_cli_refuses_control_execution_token_map(monkeypatch, caps
     assert "server-token" not in output
 
 
+@pytest.mark.parametrize("api_version", ["0", "3", "2.0", "", "v2"])
+def test_remote_worker_cli_requires_explicit_supported_api_version(
+    monkeypatch, capsys, tmp_path, api_version,
+):
+    for name in _CONTROL_OR_STORE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SOVITE_EXECUTION_INSTANCE_ID", "worker-version-test")
+    monkeypatch.setenv("SOVITE_EXECUTION_JOURNAL_PATH", str(tmp_path / "execution.json"))
+    monkeypatch.setenv("SOVITE_REMOTE_WORKER_HEALTH_PATH", str(tmp_path / "health"))
+    monkeypatch.setenv("SOVITE_CONTROL_URL", "https://127.0.0.1:9")
+    monkeypatch.setenv("SOVITE_EXECUTION_TOKEN", "synthetic-worker-version-token")
+    monkeypatch.setenv("SOVITE_EXECUTION_API_VERSION", api_version)
+    assert main([]) == 2
+    assert "SOVITE_EXECUTION_API_VERSION must be 1 or 2" in capsys.readouterr().err
+    assert not list(tmp_path.iterdir()), "invalid API version must refuse before journal or heartbeat I/O"
+
+
 @pytest.mark.parametrize("heartbeat", [None, "relative-heartbeat"])
 def test_missing_or_relative_heartbeat_is_a_configuration_error_before_journal_io(tmp_path, heartbeat):
     journal = tmp_path / "execution.json"

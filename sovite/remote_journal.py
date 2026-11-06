@@ -25,9 +25,11 @@ _KINDS = {"pull", "start", "renew", "handback", "complete"}
 _PHASES = {"pending_pull", "reserved", "pending_start", "started", "pending_renew",
            "pending_handback", "pending_complete", "manual"}
 _RESULTS = {"idle", "reserved", "started", "already_started", "renewed", "handed_back",
-            "completed", "failed", "cancelled", "retry_wait", "blocked"}
-_FIELDS = {"schema_version", "instance_id", "phase", "operation_id", "operation_kind",
-           "job_id", "generation", "fence", "expected_result_states", "lease_until", "deadline"}
+            "completed", "failed", "cancelled", "retry_wait", "blocked", "scan_advanced",
+            "profile_unavailable", "busy"}
+_FIELDS_V1 = {"schema_version", "instance_id", "phase", "operation_id", "operation_kind",
+              "job_id", "generation", "fence", "expected_result_states", "lease_until", "deadline"}
+_FIELDS_V2 = _FIELDS_V1 | {"pull_protocol"}
 
 
 class JournalError(RuntimeError):
@@ -35,9 +37,16 @@ class JournalError(RuntimeError):
 
 
 def _valid_record(record):
-    if not isinstance(record, dict) or set(record) != _FIELDS:
+    if not isinstance(record, dict):
         return False
-    if record["schema_version"] != 1 or type(record["schema_version"]) is not int:
+    schema_version = record.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        return False
+    expected_fields = _FIELDS_V1 if schema_version == 1 else _FIELDS_V2
+    if set(record) != expected_fields:
+        return False
+    if (schema_version == 2 and (type(record.get("pull_protocol")) is not int
+                                 or record["pull_protocol"] != 2)):
         return False
     if not isinstance(record["instance_id"], str) or _ID.fullmatch(record["instance_id"]) is None:
         return False
