@@ -503,3 +503,70 @@ def test_broken_diagnostics_do_not_mask_real_authority_success_or_cleanup(author
             assert env.engine.calls
 
     asyncio.run(scenario())
+
+
+def test_bounded_start_failure_includes_sanitized_authority_trace():
+    from types import SimpleNamespace
+    from test_model_gateway import _wait_for_bounded_engine_start
+
+    async def scenario():
+        diagnostics = _HandshakeDiagnostics()
+        original = GatewayError('authority_unavailable')
+        original.__cause__ = TimeoutError('private-canary')
+        gateway = _DiagnosticGateway(_FixedAuthority(error=original), diagnostics)
+        env = SimpleNamespace(
+            engine=SimpleNamespace(started=asyncio.Event(), calls=[]),
+            helper=SimpleNamespace(session=None, task=None),
+            authority_diagnostics=diagnostics,
+            platform=SimpleNamespace(db=SimpleNamespace(sessions=lambda: None)),
+        )
+        consumer = asyncio.create_task(gateway.call('authorize', secret='private-canary'))
+        with pytest.raises(AssertionError, match='bounded pre-partition start barrier failed') as caught:
+            await _wait_for_bounded_engine_start(env, SimpleNamespace(id='private-canary'), consumer, time.time() + 25, 1)
+        note = caught.value.__notes__[0]
+        assert 'action:authorize' in note
+        assert 'category:authority_unavailable' in note
+        assert 'cause_category:timeout' in note
+        assert 'owner_state:not_observed' in note
+        assert 'private-canary' not in note
+        assert len(note) < 5000
+
+    asyncio.run(scenario())
+
+
+def test_bounded_start_success_does_not_read_diagnostics():
+    from types import SimpleNamespace
+    from test_model_gateway import _wait_for_bounded_engine_start
+
+    async def scenario():
+        started = asyncio.Event()
+        started.set()
+        env = SimpleNamespace(engine=SimpleNamespace(started=started), authority_diagnostics=_BrokenDiagnostics())
+        consumer = asyncio.create_task(asyncio.Event().wait())
+        try:
+            await _wait_for_bounded_engine_start(env, None, consumer, time.time() + 25, 1)
+            assert not consumer.done()
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_bounded_start_observer_failure_preserves_barrier_failure():
+    from types import SimpleNamespace
+    from test_model_gateway import _wait_for_bounded_engine_start
+
+    async def scenario():
+        env = SimpleNamespace(
+            engine=SimpleNamespace(started=asyncio.Event(), calls=[]),
+            helper=SimpleNamespace(session=None, task=None),
+            authority_diagnostics=_BrokenDiagnostics(),
+            platform=SimpleNamespace(db=SimpleNamespace(sessions=lambda: None)),
+        )
+        consumer = asyncio.create_task(asyncio.sleep(0))
+        with pytest.raises(AssertionError, match='bounded pre-partition start barrier failed') as caught:
+            await _wait_for_bounded_engine_start(env, SimpleNamespace(id='x'), consumer, time.time() + 25, 1)
+        assert not getattr(caught.value, '__notes__', [])
+
+    asyncio.run(scenario())
