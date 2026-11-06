@@ -12,7 +12,7 @@ CONTRACT_PACKAGE = (
     ".clients.python."
     "vuoro_contract_61440b32de59136facdd786826aa33c916da1dbb981dc6f3fc2115ce2f952d02_client"
 )
-DATA_INTEGRITY_SHA256 = "b136c5bca7c39729ac760b674488cb12e9839b063878e939e1a0eda99a57e45f"
+DATA_INTEGRITY_SHA256 = "4d7110069ba5d57e8af1144bc3a305659aff6e24d1e79e8279ad6fdfcaac8ff5"
 OPERATIONS = {"pull": "executionPullV2", "lookup": "executionLookupV2"}
 
 

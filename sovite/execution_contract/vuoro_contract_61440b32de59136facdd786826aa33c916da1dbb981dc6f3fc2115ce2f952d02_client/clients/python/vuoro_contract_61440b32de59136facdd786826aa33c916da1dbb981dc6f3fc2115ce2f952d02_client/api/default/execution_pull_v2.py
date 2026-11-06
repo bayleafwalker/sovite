@@ -6,6 +6,7 @@ import httpx
 from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.error_envelope import ErrorEnvelope
+from ...models.pull_busy import PullBusy
 from ...models.pull_idle import PullIdle
 from ...models.pull_profile_unavailable import PullProfileUnavailable
 from ...models.pull_request import PullRequest
@@ -37,6 +38,7 @@ def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
 ) -> (
     ErrorEnvelope
+    | PullBusy
     | PullIdle
     | PullProfileUnavailable
     | PullReserved
@@ -47,7 +49,13 @@ def _parse_response(
 
         def _parse_response_200(
             data: object,
-        ) -> PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced:
+        ) -> (
+            PullBusy
+            | PullIdle
+            | PullProfileUnavailable
+            | PullReserved
+            | PullScanAdvanced
+        ):
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
@@ -72,13 +80,21 @@ def _parse_response(
                 return componentsschemas_pull_result_type_2
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                componentsschemas_pull_result_type_3 = PullProfileUnavailable.from_dict(
+                    data
+                )
+
+                return componentsschemas_pull_result_type_3
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             if not isinstance(data, dict):
                 raise TypeError()
-            componentsschemas_pull_result_type_3 = PullProfileUnavailable.from_dict(
-                data
-            )
+            componentsschemas_pull_result_type_4 = PullBusy.from_dict(data)
 
-            return componentsschemas_pull_result_type_3
+            return componentsschemas_pull_result_type_4
 
         response_200 = _parse_response_200(response.json())
 
@@ -118,7 +134,12 @@ def _parse_response(
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
 ) -> Response[
-    ErrorEnvelope | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced
+    ErrorEnvelope
+    | PullBusy
+    | PullIdle
+    | PullProfileUnavailable
+    | PullReserved
+    | PullScanAdvanced
 ]:
     return Response(
         status_code=HTTPStatus(response.status_code),
@@ -133,7 +154,12 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     body: PullRequest,
 ) -> Response[
-    ErrorEnvelope | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced
+    ErrorEnvelope
+    | PullBusy
+    | PullIdle
+    | PullProfileUnavailable
+    | PullReserved
+    | PullScanAdvanced
 ]:
     """
     Args:
@@ -144,7 +170,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorEnvelope | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced]
+        Response[ErrorEnvelope | PullBusy | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced]
     """
 
     kwargs = _get_kwargs(
@@ -164,6 +190,7 @@ def sync(
     body: PullRequest,
 ) -> (
     ErrorEnvelope
+    | PullBusy
     | PullIdle
     | PullProfileUnavailable
     | PullReserved
@@ -179,7 +206,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorEnvelope | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced
+        ErrorEnvelope | PullBusy | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced
     """
 
     return sync_detailed(
@@ -193,7 +220,12 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     body: PullRequest,
 ) -> Response[
-    ErrorEnvelope | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced
+    ErrorEnvelope
+    | PullBusy
+    | PullIdle
+    | PullProfileUnavailable
+    | PullReserved
+    | PullScanAdvanced
 ]:
     """
     Args:
@@ -204,7 +236,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorEnvelope | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced]
+        Response[ErrorEnvelope | PullBusy | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced]
     """
 
     kwargs = _get_kwargs(
@@ -222,6 +254,7 @@ async def asyncio(
     body: PullRequest,
 ) -> (
     ErrorEnvelope
+    | PullBusy
     | PullIdle
     | PullProfileUnavailable
     | PullReserved
@@ -237,7 +270,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorEnvelope | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced
+        ErrorEnvelope | PullBusy | PullIdle | PullProfileUnavailable | PullReserved | PullScanAdvanced
     """
 
     return (

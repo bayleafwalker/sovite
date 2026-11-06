@@ -496,9 +496,10 @@ def test_execution_client_v2_is_explicit_and_uses_generated_pull_lookup_contract
     def respond(request):
         observed.append(request.url.path)
         body = json.loads(request.content)
-        result = ({"state": "idle"} if request.url.path.endswith("/pull") else {
+        state = "busy" if body["operation_id"] == "pull-v2-busy" else "idle"
+        result = ({"state": state} if request.url.path.endswith("/pull") else {
             "state": "found", "operation_id": body["operation_id"], "operation_kind": "pull",
-            "job_id": None, "fence": None, "result_state": "idle",
+            "job_id": None, "fence": None, "result_state": state,
         })
         return httpx.Response(200, json=result)
 
@@ -507,7 +508,64 @@ def test_execution_client_v2_is_explicit_and_uses_generated_pull_lookup_contract
     assert client.api_version == 2
     assert client.pull("worker-v2", "pull-v2") == {"state": "idle"}
     assert client.lookup("worker-v2", "pull-v2")["result_state"] == "idle"
-    assert observed == ["/internal/execution/v2/pull", "/internal/execution/v2/lookup"]
+    assert client.pull("worker-v2", "pull-v2-busy") == {"state": "busy"}
+    assert client.lookup("worker-v2", "pull-v2-busy")["result_state"] == "busy"
+    assert observed == ["/internal/execution/v2/pull", "/internal/execution/v2/lookup",
+                        "/internal/execution/v2/pull", "/internal/execution/v2/lookup"]
+
+
+def test_execution_api_v2_real_asgi_routes_bind_protocol_and_audit(owner):
+    import httpx
+    import socket
+    import threading
+    import time
+    import uvicorn
+
+    admit_agent_http_owner(owner)
+    settings = replace(owner.platform.settings,
+        execution_tokens={"actual-workload": TOKEN, "other-workload": OTHER_TOKEN})
+    app = create_app(settings=settings, platform=owner.platform)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    v2 = {"instance_id": owner.instance, "operation_id": "asgi-v2-pull"}
+    v1 = {"instance_id": owner.instance, "operation_id": "asgi-v1-pull"}
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server.started
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
+            before_denied = snapshot(owner.platform)
+            denied = client.post("/internal/execution/v2/pull",
+                headers={"Authorization": "Bearer invalid-unregistered-token"}, json=v2)
+            assert denied.status_code == 403
+            assert snapshot(owner.platform) == before_denied
+            v2_pull = client.post("/internal/execution/v2/pull", headers=headers, json=v2)
+            assert v2_pull.status_code == 200 and v2_pull.json() == {"state": "idle"}
+            v2_lookup = client.post("/internal/execution/v2/lookup", headers=headers, json=v2)
+            assert v2_lookup.status_code == 200 and v2_lookup.json()["result_state"] == "idle"
+            assert client.post("/internal/execution/v1/lookup", headers=headers, json=v2).status_code == 503
+            v1_pull = client.post("/internal/execution/v1/pull", headers=headers, json=v1)
+            assert v1_pull.status_code == 200 and v1_pull.json() == {"state": "idle"}
+            v1_lookup = client.post("/internal/execution/v1/lookup", headers=headers, json=v1)
+            assert v1_lookup.status_code == 200 and v1_lookup.json()["result_state"] == "idle"
+            assert client.post("/internal/execution/v2/lookup", headers=headers, json=v1).status_code == 503
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    from sqlalchemy import select
+    from sovite.db import AuditEvent
+    with owner.platform.db.sessions() as session:
+        assert session.scalar(select(AuditEvent).where(
+            AuditEvent.target == owner.instance,
+            AuditEvent.action == "task.execution_idle")) is not None
 
 
 def test_execution_client_real_http_contract_lifecycle(owner):

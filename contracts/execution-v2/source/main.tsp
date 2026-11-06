@@ -47,11 +47,13 @@ model PullIdle { state: "idle"; }
 model PullReserved { state: "reserved"; job: ReservedJob; }
 model PullScanAdvanced { state: "scan_advanced"; }
 model PullProfileUnavailable { state: "profile_unavailable"; }
+model PullBusy { state: "busy"; }
 union PullResult {
   idle: PullIdle,
   reserved: PullReserved,
   scanAdvanced: PullScanAdvanced,
-  profileUnavailable: PullProfileUnavailable
+  profileUnavailable: PullProfileUnavailable,
+  busy: PullBusy
 }
 
 model OperationFound {
@@ -60,7 +62,7 @@ model OperationFound {
   operation_kind: "pull" | "start" | "renew" | "handback" | "complete";
   job_id: JobId | null;
   fence: Fence | null;
-  result_state: "idle" | "reserved" | "started" | "already_started" | "renewed" | "handed_back" | "completed" | "failed" | "cancelled" | "retry_wait" | "blocked" | "scan_advanced" | "profile_unavailable";
+  result_state: "idle" | "reserved" | "started" | "already_started" | "renewed" | "handed_back" | "completed" | "failed" | "cancelled" | "retry_wait" | "blocked" | "scan_advanced" | "profile_unavailable" | "busy";
 }
 
 union ExecutionErrorCode {

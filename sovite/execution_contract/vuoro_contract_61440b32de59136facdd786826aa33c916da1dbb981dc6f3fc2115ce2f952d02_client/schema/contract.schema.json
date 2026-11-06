@@ -247,6 +247,23 @@
                 "not": {}
             }
         },
+        "PullBusy": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "PullBusy.json",
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "const": "busy"
+                }
+            },
+            "required": [
+                "state"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "OperationFound": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": "OperationFound.json",
@@ -356,6 +373,10 @@
                         {
                             "type": "string",
                             "const": "profile_unavailable"
+                        },
+                        {
+                            "type": "string",
+                            "const": "busy"
                         }
                     ]
                 }
@@ -783,6 +804,9 @@
                 },
                 {
                     "$ref": "PullProfileUnavailable.json"
+                },
+                {
+                    "$ref": "PullBusy.json"
                 }
             ]
         },

@@ -635,7 +635,7 @@ class LeaseService:
                 if prior.result == {"state": "idle"} and prior.job_id is None and prior.fence is None:
                     return {"state": "idle"}
                 if (pull_protocol == 2 and prior.result in (
-                        {"state": "scan_advanced"}, {"state": "profile_unavailable"})
+                        {"state": "scan_advanced"}, {"state": "profile_unavailable"}, {"state": "busy"})
                         and prior.job_id is None and prior.fence is None):
                     return copy.deepcopy(prior.result)
                 if prior.result.get("state") != "reserved" or not prior.job_id or not prior.fence:
@@ -714,6 +714,8 @@ class LeaseService:
             cursor_row = None
             cursor_value = None
             cursor_key = None
+            saw_profile_incompatible = False
+            saw_profile_busy = False
             def finite_number(value):
                 if type(value) not in (int, float):
                     return False
@@ -754,7 +756,10 @@ class LeaseService:
                             parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite cursor")))
                     except (TypeError, ValueError, RecursionError):
                         _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
-                    if (type(cursor_value) is not dict or set(cursor_value) != {"schema", "scope", "created_at", "id"}
+                    cursor_fields = {"schema", "scope", "created_at", "id"}
+                    if pull_protocol == 2:
+                        cursor_fields |= {"saw_profile_incompatible", "saw_profile_busy"}
+                    if (type(cursor_value) is not dict or set(cursor_value) != cursor_fields
                             or cursor_value["schema"] != cursor_schema
                             or type(cursor_value["scope"]) is not dict
                             or set(cursor_value["scope"]) != set(scope)
@@ -763,9 +768,15 @@ class LeaseService:
                             or type(cursor_value["scope"]["repository_run_profile"]) is not bool
                             or cursor_value["scope"] != scope
                             or not finite_number(cursor_value["created_at"])
-                            or type(cursor_value["id"]) is not str or not 1 <= len(cursor_value["id"]) <= 64):
+                            or type(cursor_value["id"]) is not str or not 1 <= len(cursor_value["id"]) <= 64
+                            or (pull_protocol == 2 and (
+                                type(cursor_value["saw_profile_incompatible"]) is not bool
+                                or type(cursor_value["saw_profile_busy"]) is not bool))):
                         _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
                     cursor_row = session.get(MetadataRow, cursor_key)
+                    if pull_protocol == 2:
+                        saw_profile_incompatible = cursor_value["saw_profile_incompatible"]
+                        saw_profile_busy = cursor_value["saw_profile_busy"]
             def save_progress(job):
                 nonlocal cursor_row
                 if cursor_key is None:
@@ -775,6 +786,9 @@ class LeaseService:
                     _fail("owner_unavailable", 503, "Dispatch progress is unavailable")
                 value = {"schema": cursor_schema, "scope": scope,
                          "created_at": job.created_at, "id": job.id}
+                if pull_protocol == 2:
+                    value["saw_profile_incompatible"] = saw_profile_incompatible
+                    value["saw_profile_busy"] = saw_profile_busy
                 if cursor_row is None:
                     cursor_row = MetadataRow(key=cursor_key, value=value)
                     session.add(cursor_row)
@@ -825,6 +839,8 @@ class LeaseService:
                 # This final row lock can block after candidate selection too.
                 now = time.time()
                 if job.next_attempt_at > now:
+                    if pull_protocol == 2:
+                        saw_profile_busy = True
                     continue
                 try:
                     self._authorize_current(session, job, now)
@@ -850,6 +866,7 @@ class LeaseService:
                     # V2 commits the authorization/audit decision before it
                     # advances past an incompatible recipe. V1 retains its
                     # original rollback-on-409 behavior above.
+                    saw_profile_incompatible = True
                     continue
                 if external_profile is not None:
                     try:
@@ -861,10 +878,13 @@ class LeaseService:
                         # profile. Leave incompatible work in the owner's queue
                         # for local or separately qualified workers.
                         incompatible_profile_job = True
+                        saw_profile_incompatible = True
                         continue
                 model = job.resolved.get("model", {})
                 limit = model.get("max_concurrency")
                 if limit and running[model.get("id")] >= limit:
+                    if pull_protocol == 2:
+                        saw_profile_busy = True
                     continue
                 self._guard_fresh_reservation(session, principal.compute_id)
                 now = time.time()
@@ -899,11 +919,11 @@ class LeaseService:
                 if not candidates:
                     if cursor_row is not None:
                         session.delete(cursor_row)
-                        result = {"state": "profile_unavailable"}
-                        audit_action = "task.execution_profile_unavailable"
-                    else:
-                        result = {"state": "idle"}
-                        audit_action = "task.execution_idle"
+                    result = ({"state": "busy"} if saw_profile_busy else
+                              {"state": "profile_unavailable"} if saw_profile_incompatible else {"state": "idle"})
+                    audit_action = ("task.execution_busy" if saw_profile_busy else
+                                    "task.execution_profile_unavailable" if saw_profile_incompatible
+                                    else "task.execution_idle")
                 else:
                     last = candidates[-1]
                     after_last = or_(Job.created_at > last.created_at,
@@ -916,8 +936,11 @@ class LeaseService:
                     else:
                         if cursor_row is not None:
                             session.delete(cursor_row)
-                        result = {"state": "profile_unavailable"}
-                        audit_action = "task.execution_profile_unavailable"
+                        result = ({"state": "busy"} if saw_profile_busy else
+                                  {"state": "profile_unavailable"} if saw_profile_incompatible else {"state": "idle"})
+                        audit_action = ("task.execution_busy" if saw_profile_busy else
+                                        "task.execution_profile_unavailable" if saw_profile_incompatible
+                                        else "task.execution_idle")
                 session.add(WorkerExecutionOperation(
                     workload_id=principal.workload_id, instance_id=instance_id,
                     operation_id=operation_id, operation_kind="pull", request_digest=request_digest,

@@ -198,7 +198,7 @@ def _validate_response(operation: str, result: dict, request: dict, *, api_versi
 
     state = result.get("state")
     if operation == "pull":
-        if api_version == 2 and state in {"idle", "scan_advanced", "profile_unavailable"}:
+        if api_version == 2 and state in {"idle", "scan_advanced", "profile_unavailable", "busy"}:
             exact({"state"})
             return
         if state == "idle":
@@ -271,16 +271,16 @@ def _validate_response(operation: str, result: dict, request: dict, *, api_versi
     if operation == "lookup":
         exact({"state", "operation_id", "operation_kind", "job_id", "fence", "result_state"})
         unbound_pull = (result.get("operation_kind") == "pull"
-                        and result.get("result_state") in ({"idle", "scan_advanced", "profile_unavailable"}
+                        and result.get("result_state") in ({"idle", "scan_advanced", "profile_unavailable", "busy"}
                                                             if api_version == 2 else {"idle"})
                         and result.get("job_id") is None and result.get("fence") is None)
         if (state != "found" or result["operation_id"] != request["operation_id"]
                 or result["operation_kind"] not in {"pull", "start", "renew", "handback", "complete"}
                 or not unbound_pull and (not isinstance(result["job_id"], str) or _ID.fullmatch(result["job_id"]) is None
                                          or not isinstance(result["fence"], str) or _FENCE.fullmatch(result["fence"]) is None)
-                or result["result_state"] not in ({"idle", "reserved", "started", "already_started", "renewed", "handed_back", "completed", "failed", "cancelled", "retry_wait", "blocked", "scan_advanced", "profile_unavailable"}
+                or result["result_state"] not in ({"idle", "reserved", "started", "already_started", "renewed", "handed_back", "completed", "failed", "cancelled", "retry_wait", "blocked", "scan_advanced", "profile_unavailable", "busy"}
                                                    if api_version == 2 else {"idle", "reserved", "started", "already_started", "renewed", "handed_back", "completed", "failed", "cancelled", "retry_wait", "blocked"})
-                or result["result_state"] in {"scan_advanced", "profile_unavailable"} and not unbound_pull):
+                or result["result_state"] in {"scan_advanced", "profile_unavailable", "busy"} and not unbound_pull):
             raise ValueError
         return
     raise ValueError

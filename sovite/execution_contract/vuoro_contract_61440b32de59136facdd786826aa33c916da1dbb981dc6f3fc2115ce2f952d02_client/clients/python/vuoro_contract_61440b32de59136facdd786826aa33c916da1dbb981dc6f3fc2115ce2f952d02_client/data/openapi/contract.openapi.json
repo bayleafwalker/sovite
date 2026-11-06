@@ -425,7 +425,8 @@
               "retry_wait",
               "blocked",
               "scan_advanced",
-              "profile_unavailable"
+              "profile_unavailable",
+              "busy"
             ]
           }
         },
@@ -438,6 +439,23 @@
         "minLength": 1,
         "maxLength": 64,
         "pattern": "^[A-Za-z0-9_-]+$"
+      },
+      "PullBusy": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "busy"
+            ]
+          }
+        },
+        "additionalProperties": {
+          "not": {}
+        }
       },
       "PullIdle": {
         "type": "object",
@@ -525,6 +543,9 @@
           },
           {
             "$ref": "#/components/schemas/PullProfileUnavailable"
+          },
+          {
+            "$ref": "#/components/schemas/PullBusy"
           }
         ]
       },

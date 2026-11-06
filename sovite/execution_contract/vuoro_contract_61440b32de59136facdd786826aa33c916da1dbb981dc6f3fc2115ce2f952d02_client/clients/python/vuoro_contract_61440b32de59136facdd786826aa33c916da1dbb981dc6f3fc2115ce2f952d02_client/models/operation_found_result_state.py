@@ -4,6 +4,7 @@ from enum import StrEnum
 class OperationFoundResultState(StrEnum):
     ALREADY_STARTED = "already_started"
     BLOCKED = "blocked"
+    BUSY = "busy"
     CANCELLED = "cancelled"
     COMPLETED = "completed"
     FAILED = "failed"

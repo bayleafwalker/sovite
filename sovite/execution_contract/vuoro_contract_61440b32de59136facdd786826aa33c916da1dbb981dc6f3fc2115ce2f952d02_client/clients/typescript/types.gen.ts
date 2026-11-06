@@ -48,11 +48,16 @@ export type OperationFound = {
     operation_kind: 'pull' | 'start' | 'renew' | 'handback' | 'complete';
     job_id: JobId | null;
     fence: Fence | null;
-    result_state: 'idle' | 'reserved' | 'started' | 'already_started' | 'renewed' | 'handed_back' | 'completed' | 'failed' | 'cancelled' | 'retry_wait' | 'blocked' | 'scan_advanced' | 'profile_unavailable';
+    result_state: 'idle' | 'reserved' | 'started' | 'already_started' | 'renewed' | 'handed_back' | 'completed' | 'failed' | 'cancelled' | 'retry_wait' | 'blocked' | 'scan_advanced' | 'profile_unavailable' | 'busy';
     [key: string]: unknown;
 };
 
 export type OperationId = string;
+
+export type PullBusy = {
+    state: 'busy';
+    [key: string]: unknown;
+};
 
 export type PullIdle = {
     state: 'idle';
@@ -76,7 +81,7 @@ export type PullReserved = {
     [key: string]: unknown;
 };
 
-export type PullResult = PullIdle | PullReserved | PullScanAdvanced | PullProfileUnavailable;
+export type PullResult = PullIdle | PullReserved | PullScanAdvanced | PullProfileUnavailable | PullBusy;
 
 export type PullScanAdvanced = {
     state: 'scan_advanced';
