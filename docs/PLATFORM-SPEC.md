@@ -502,7 +502,8 @@ only.
 | Native answer-only Codex, Claude and OpenCode Go launchers | Released, with synthetic validation only; no live account qualification | [README](../README.md#subscription-models-and-opencode-go) |
 | Vuoro owner catalog adapter (0.1.16); hosted compile/activate over the API (0.1.17) | Released, opt-in | [Vuoro integration](integrations/vuoro-private-workflow.md) |
 | Remote worker execution API (`agent-http-v1`), remote worker CLI | Source-only, disabled (opt-in) | [Worker execution candidate](contracts/worker-execution-v1-candidate.md), [Remote boundary](plans/2026-10-24-worker-remote-boundary.md) |
-| Execution v2 for remote workers and external fairness v2 (PRs #77, #78); schemas 8–10 (collection, program ledger, relational) | Unreleased source on main, opt-in. Main is ahead of the 0.1.25 schema 7. | [Worker execution candidate](contracts/worker-execution-v1-candidate.md) |
+| Execution v2 for remote workers, external fairness v2 (PRs #77, #78) | Unreleased source on main, opt-in | [Worker execution candidate](contracts/worker-execution-v1-candidate.md) |
+| Schemas 8–10 (collection, program ledger, relational; dormant tables applied by migration) | Unreleased source on main. The migration on main goes to schema 10, ahead of 0.1.25's schema 7; the tables are dormant but not opt-in. | This spec; `MIGRATIONS` in `sovite/db.py` |
 | Model gateway, helper enrollment, connector protocol | Source-only; the helper is development-only | [Connector protocol](CONNECTOR-PROTOCOL.md), [Gateway authority](#gateway-and-execution-authority-pr-3) |
 | Hosting policy envelope | Source-only; hosted composition held | [Hosted envelope](#hosted-policy-envelope-and-qualification) |
 | Repository runs API v1: runs, cancel, recovery 1.2, recovery release 1.3, repair 1.4, native activation read, candidate retention, currentness guard, repository-only worker mode | Source-only, disabled unless `SOVITE_REPOSITORY_RUNTIME_CONFIG` composes the runtime | [Repository runtime](repository-runtime.md), [Repair contract](contracts/repository-repair-v1.md), [Recovery](repository-interruption-recovery.md), [Currentness](repository-currentness.md), [Candidate retention](candidate-retention.md) |
@@ -511,6 +512,8 @@ only.
 | Portable workflows SV-PW4 (enrolled hosts) and qualification scenarios | Proposed or open | [Portable workflow plan](plans/2026-10-24-portable-agent-workflows.md) |
 | Outcome-settlement gateway publication proof | Proposed | [Outcome-settlement plan](plans/2026-11-06-outcome-settlement-gateway.md) |
 | Hosted per-workspace distribution end to end | Held; owned by vuoro-cloud CL-K06 | [Operating modes](#operating-modes) |
+
+This table lists capabilities, not every module added after the v0.1.25 tag. Post-tag modules that are not separate rows include `collection_owner_api.py` (#51), `work_projection.py`, `repository_cancel.py`, `recovery_cursor.py` and `census_report.py`; they are source on main and not part of the 0.1.25 release.
 
 ## Glossary
 
