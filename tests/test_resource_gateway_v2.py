@@ -1,10 +1,12 @@
 """Actual owner HTTP plus durable gateway: no real host or LAN calls."""
 import asyncio
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -118,6 +120,62 @@ def test_restart_after_admission_never_reissues_unknown_create(owner,tmp_path):
     grant(f,'kvm-lab.observe','synthetic-lab')
     assert asyncio.run(gateway.process(packet(f,follow['request_id'])))['accepted']
     assert [row[1]['verb'] for row in effects.calls]==['create','observe']
+
+
+def test_two_gateway_instances_share_one_admission_before_effect(owner,tmp_path):
+    """Two pollers on one commissioned host share the durable local fence."""
+    f,store,wire,effects,gateway=fixture(owner,tmp_path)
+    selected=submit(f,{'operation':'kvm-lab.create','target_id':'synthetic-lab'}).json()
+    grant(f,'kvm-lab.create','synthetic-lab')
+    value=packet(f,selected['request_id'])
+    other_store=ResourceOperationStore(store.path)
+    other=GatewayV2(other_store,wire,gateway.catalog,effects)
+    barrier=threading.Barrier(2)
+    unknown_seen=threading.Event()
+    for local_store in (store,other_store):
+        admit=local_store.admit
+        def synchronized_admit(operation_id,request,admit=admit):
+            barrier.wait(timeout=5)
+            result=admit(operation_id,request)
+            if result['state']=='admitted':
+                assert unknown_seen.wait(timeout=5)
+            elif result['state']=='unknown':
+                unknown_seen.set()
+            return result
+        local_store.admit=synchronized_admit
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures=[pool.submit(asyncio.run,instance.process(value))
+                 for instance in (gateway,other)]
+        results=[future.result(timeout=10) for future in futures]
+    assert len(effects.calls)==1
+    assert all(result in ({'state':'unknown'},{'accepted':True,'state':'stored'}) for result in results)
+    assert {'state':'unknown'} in results
+    assert {'accepted':True,'state':'stored'} in results
+
+
+def test_independent_local_stores_are_not_a_two_owner_fence(owner,tmp_path):
+    """Negative control: separate local histories can both admit one identity."""
+    f,store,wire,effects,gateway=fixture(owner,tmp_path)
+    selected=submit(f,{'operation':'kvm-lab.create','target_id':'synthetic-lab'}).json()
+    grant(f,'kvm-lab.create','synthetic-lab')
+    value=packet(f,selected['request_id'])
+    other_dir=tmp_path/'other-private';other_dir.mkdir(mode=0o700)
+    other_store=ResourceOperationStore(other_dir/'operations');other_store.install()
+    other_store.set_policy(store.policy())
+    other=GatewayV2(other_store,wire,gateway.catalog,effects)
+    barrier=threading.Barrier(2)
+    for local_store in (store,other_store):
+        admit=local_store.admit
+        def synchronized_admit(operation_id,request,admit=admit):
+            barrier.wait(timeout=5)
+            return admit(operation_id,request)
+        local_store.admit=synchronized_admit
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures=[pool.submit(asyncio.run,instance.process(value))
+                 for instance in (gateway,other)]
+        results=[future.result(timeout=10) for future in futures]
+    assert len(effects.calls)==2
+    assert results==[{'accepted':True,'state':'stored'}]*2
 
 
 def test_helper_unknown_is_explicit_and_does_not_complete_execution(owner,tmp_path):
