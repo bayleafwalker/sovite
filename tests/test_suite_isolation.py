@@ -84,5 +84,7 @@ def test_order_a_leaves_a_disposed_engine_in_mapper_caches(tmp_path, _engine_lef
 def test_order_b_previous_test_cache_was_released_by_the_autouse_fixture(_engine_left_by_previous_test):
     # No helper call here: only the autouse teardown of the previous test can
     # have emptied the caches.
-    assert _engine_left_by_previous_test.get("cached", 0) >= 1
+    if "cached" not in _engine_left_by_previous_test:
+        pytest.skip("test_order_a did not run in this session (deselected or run alone); nothing to release")
+    assert _engine_left_by_previous_test["cached"] >= 1
     assert _cached_dialects() == set()
