@@ -80,16 +80,38 @@ Merge the stanza in `config/codex.mcp.toml` into the caller's user-level Codex c
 
 The caller sees `list_candidates`, `begin_task`, `task_status` and `read_result`. Discovery lists only caller-visible grants; detailed metadata requires the installed discovery-class clearance. Its labelled observations are not reservations or live account/capacity checks. Preferences stay with the coordinator. A receipt is an independent server-created identifier, not a bearer capability. A `reference` contract returns receipt/status only; `class-aware` permits output only within the caller's clearance. Explicit `result_readers` give coordinator and reviewer identities scoped content access without operator-wide authority. Every content release rechecks current producing-job authority and artifact integrity. Operator tokens are rejected by MCP. See [caller discovery and attempt lineage](docs/CALLER-DISCOVERY.md).
 
-## Repository-session status
+## Operating modes
 
-An internal pre-launch workspace/evidence foundation now validates a closed
-`sovite-repository-session/v1` packet against a trusted owner binding, creates
-an exact-base detached Git worktree, and records candidate evidence. **There is
-no released repository-session API or worker launch capability.** This
-foundation is not wired to job admission, the execution lease API, native
-provider launchers, or merge authority, and it does not claim a hard process
-sandbox. See the [repository-session workspace decision record](docs/plans/2026-10-25-repository-session-workspace-foundation.md)
-and [the broader portable-workflow plan](docs/plans/2026-10-24-portable-agent-workflows.md).
+Sovite runs in two maintained modes:
+
+- **Standalone installation:** the local, Compose and Helm profiles above, with
+  bundled PostgreSQL, Garage and Ollama (or externally managed equivalents).
+  This repository maintains and CI-validates these profiles.
+- **Workspace-hosted execution owner:** one Sovite instance per Vuoro
+  workspace. Cloud hosts control/admission and the model gateway. Workspace
+  hosts run the execution worker and model helper, and artifacts go to storage
+  the workspace owns. Bundled storage, inference and local workers are
+  disabled. This repository maintains the source (hosting envelope, execution
+  API, remote worker, helper enrollment). vuoro-cloud owns composition and the
+  hosted end-to-end acceptance, which is currently held.
+
+See [operating modes](docs/PLATFORM-SPEC.md#operating-modes) for authority and
+maintenance details.
+
+## Repository execution status
+
+Releases 0.1.22 to 0.1.25 ship repository-execution **source** behind an
+explicit opt-in. The repository runs API (`/api/repository-runs/v1`: runs,
+cancel, interruption recovery, recovery release, repair, native activation read
+and candidate retention), the currentness guard and the repository-only worker
+mode are unavailable unless `SOVITE_REPOSITORY_RUNTIME_CONFIG` composes a
+protected [repository runtime](docs/repository-runtime.md). The native VM driver
+is source-only. No installed observer, qualified native execution profile,
+automatic provider allocation or merge authority exists. Source or
+configuration does not establish them. See the
+[implementation status table](docs/PLATFORM-SPEC.md#implementation-status-2026-11-07),
+the [repository-session workspace decision record](docs/plans/2026-10-25-repository-session-workspace-foundation.md)
+and [the portable-workflow plan](docs/plans/2026-10-24-portable-agent-workflows.md).
 
 ## Configuration and runtime boundaries
 
@@ -144,7 +166,7 @@ The release is a complete implementation for whole-platform assessment. It does 
 
 ## Repository guide
 
-- [Platform specification](docs/PLATFORM-SPEC.md): product boundary, architecture and whole-platform assessment.
+- [Platform specification](docs/PLATFORM-SPEC.md): product boundary, architecture, whole-platform assessment, operating modes, [implementation status](docs/PLATFORM-SPEC.md#implementation-status-2026-11-07) and the [glossary](docs/PLATFORM-SPEC.md#glossary) of lease, fence, attempt, receipt and qualification.
 - [Operations](docs/OPERATIONS.md): installation, staging, activation, backup, restore and export.
 - [Security and qualification](docs/SECURITY.md): trusted components, enforcement duties and evidence.
 - [API contract](docs/API_CONTRACT.md): operator API, receipts and the external native-harness contract.
@@ -155,9 +177,20 @@ No production credentials, private keys, runtime databases or model weights are 
 
 ## Vuoro private workflow integration
 
-Release 0.1.17 sends hosted compilation and activation through the authenticated control API, without local database access. It bounds transport errors and preserves uncertain activation outcomes.
+The current release is 0.1.25. Its Compose and Helm defaults select the
+`0.1.25` images, which are built from the source release. The Vuoro integration
+points below were introduced earlier and are unchanged in 0.1.25:
 
-Python owner release 0.1.16 adds a local-only task/receipt catalog and rejects
-explicitly truncated model responses. See [the integration contract](docs/integrations/vuoro-private-workflow.md)
-for identity binding, private artifact separation and the bounded C0 evaluation.
-This Python release does not change published deployment image tags or hosted gates.
+- Since 0.1.16, an optional local-only task/receipt owner catalog is
+  available (`sovite.task.request-v1`, `sovite.task.status-v1`). Model
+  completion also rejects explicitly truncated responses. See [the integration contract](docs/integrations/vuoro-private-workflow.md)
+  for identity binding, private artifact separation and the bounded C0 evaluation.
+- Since 0.1.17, hosted compilation and activation go through the authenticated
+  control API, without local database access. Transport errors are bounded and
+  uncertain activation outcomes are preserved.
+- Retained repository candidates can be sent to a fixed Vuoro Workspace
+  target through the released `vuoro-client`. This path is source-only and
+  disabled unless composed ([candidate retention](docs/candidate-retention.md)).
+
+Publishing a wheel or image does not upgrade a running installation or change
+hosted gates.
