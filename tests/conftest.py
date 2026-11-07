@@ -63,3 +63,21 @@ def pytest_collection_finish(session):
     # objects instead of rescanning the whole import graph every time.
     gc.collect()
     gc.freeze()
+
+
+_FREEZE_EVERY = 200
+_finished = 0
+
+
+def pytest_runtest_logfinish(nodeid, location):
+    # Some third-party state (for example FastAPI/pydantic-core route schemas)
+    # stays reachable only through references the cycle collector cannot see.
+    # It therefore survives every collection. After the ORM fix it still grew
+    # the heap to about 1 M objects, and hosted gen-2 pauses still reached
+    # about 0.75 s. Periodically moving survivors into the permanent generation
+    # bounds each full collection to objects created since the last freeze.
+    global _finished
+    _finished += 1
+    if _finished % _FREEZE_EVERY == 0:
+        gc.collect()
+        gc.freeze()
