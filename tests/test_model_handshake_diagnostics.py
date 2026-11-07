@@ -134,7 +134,7 @@ def test_nested_out_of_order_fixtures_work_across_event_loops(tmp_path, v2_bundl
     from sovite.db import Database
     original_serve = HelperConnection.serve
     async def scenario(first, second):
-        outer, inner = connected(first), connected(second)
+        outer, inner = connected(first, relaxed_open_setup=True), connected(second, relaxed_open_setup=True)
         outer_open = inner_open = False
         try:
             await outer.__aenter__()
