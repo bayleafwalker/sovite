@@ -77,7 +77,7 @@ def pytest_runtest_logfinish(nodeid, location):
     # about 0.75 s. Periodically moving survivors into the permanent generation
     # bounds each full collection to objects created since the last freeze.
     # Trade-off: frozen survivors that later become cyclic garbage are not
-    # reclaimed. The full run peaks around 0.95 GB RSS with about 4.4 M frozen
+    # reclaimed. The full run (measured locally) peaks around 0.95 GB RSS with about 4.4 M frozen
     # objects.
     global _finished
     _finished += 1
