@@ -1,12 +1,22 @@
 ---
 doc_id: portable-agent-workflows.sovite.v1
-status: proposed
+status: active
 supersedes: []
 ---
 
 # Repository-editing sessions on enrolled execution hosts
 
-Status: investigated implementation plan, 2026-10-24. Source surveyed at
+Status (updated 2026-11-07): **active, partially implemented as opt-in source;
+nothing is deployed or qualified.** SV-PW1 (closed repository-session packet and
+repository runs API v1) and SV-PW3 (launch intent, interruption recovery 1.2 and
+recovery release 1.3) exist in source. Parts of SV-PW2 (native VM driver,
+Responses forwarding) and SV-PW5 (candidate export and retention) also exist in
+source. All of them are disabled unless `SOVITE_REPOSITORY_RUNTIME_CONFIG`
+composes the [repository runtime](../repository-runtime.md). SV-PW4 (enrolled
+hosts) and every qualification scenario below remain open. Current state is in
+the [implementation status table](../PLATFORM-SPEC.md#implementation-status-2026-11-07).
+
+Original status: investigated implementation plan, 2026-10-24. Source surveyed at
 `b712d5f69a62e618e66acb6a6beae9dad5e25e56` (canonical main).
 Cross-repository dependencies, PW package definitions and qualification scenarios
 are in the [programme plan](https://github.com/bayleafwalker/agentops/blob/main/docs/plans/agentops/2026-10-24-portable-agent-workflows.md).

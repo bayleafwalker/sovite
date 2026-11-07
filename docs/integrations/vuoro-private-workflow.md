@@ -1,8 +1,9 @@
 # Local private task receipts for Vuoro
 
-The Python 0.1.16 owner release adds an optional owner catalog integration.
-Container/Helm deployment examples continue to select their published 0.1.15
-images; publishing this wheel does not upgrade any running installation.
+The optional owner catalog integration was introduced in Python owner release
+0.1.16 and is unchanged in the current release, 0.1.25. Container and Helm
+defaults select the current release image. Publishing a wheel or image does not
+upgrade any running installation.
 
 `register_sovite_catalog` exposes only `sovite.task.request-v1` and
 `sovite.task.status-v1`. It requires an explicit loopback installation binding,
