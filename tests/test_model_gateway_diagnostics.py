@@ -612,7 +612,7 @@ def test_inference_failure_reports_sanitized_authority_action(authority_env, fai
     from connector_support import BODY
 
     async def scenario():
-        async with connected(authority_env) as env:
+        async with connected(authority_env, relaxed_open_setup=True) as env:
             transport = env.gateway.authority.client._transport.transport
             original = transport.handle_async_request
 
