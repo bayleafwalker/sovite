@@ -5,10 +5,10 @@ SQLAlchemy keeps a per-mapper compiled-statement LRU cache
 production process uses a few long-lived engines. The suite creates a new
 engine, and therefore a new dialect, for almost every test. Without this
 fixture, the module-level ORM mappers keep up to 100 dead dialects each, along
-with their type caches and compiled statements. The live heap then grows from
-about 0.45 M to more than 1.3 M objects over a full run. Generation-2
-collections over that heap paused every thread for 0.6-0.8 s on a developer
-workstation and longer on hosted runners. Those pauses exceeded the
+with their type caches and compiled statements. In a local full run on
+2026-11-07, the live heap grew from about 0.45 M to 1.6 M objects. That run
+had 105 generation-2 collections: median 333 ms, max 1028 ms. Hosted runners
+pause longer (see below). Those pauses exceeded the
 production 1 s authority and lifecycle budgets that in-process tests exercise,
 and they showed up as the "unexplained" ``authority_unavailable``,
 handshake-timeout and interrupted-fixture CI failures.

@@ -475,8 +475,8 @@ the other.
 | --- | --- | --- |
 | Shape | One operator installs the whole platform: local Python (SQLite, synthetic inference), Docker Compose (PostgreSQL, Garage, Ollama, optional native Codex) or the Helm reference chart (PostgreSQL, Garage, Ollama, optional native harness). | One Sovite instance per Vuoro workspace, in that workspace's `vuoro-ws-*` namespace. Cloud hosts control/admission and the model gateway only. Bundled PostgreSQL, Garage, Ollama, local workers, native harnesses and Kubernetes tools are disabled. Workspace-owned hosts run the execution worker and the model helper, which connects outbound over mTLS per binding. Artifacts go to storage the workspace owns. |
 | Authority | The installation's bundle, grants, qualification keys and operator. | The same Sovite bundle, grants and qualifications, plus the hosting policy envelope (`SOVITE_HOSTING_ENVELOPE`) and workspace qualification. Cloud holds no provider credentials or artifact storage. Only C0 and approved C1 work is hosted. |
-| Maintained by | This repository: [README](../README.md) install paths, `scripts/local_platform.py`, `scripts/installation.py`, `compose.yaml`, `deploy/helm/sovite`, `scripts/validate_deployment.py` (run in CI), [Operations](OPERATIONS.md) and per-release candidate notes. | This repository maintains the source: hosting envelope, execution API and remote worker, helper enrollment and model gateway, explicit migrations. vuoro-cloud owns composition, enrollment and the hosted end-to-end acceptance (distribution item 9 / CL-K06, vuoro-cloud PR #275). Accepted design: [Sovite over vuoro-cloud](https://github.com/bayleafwalker/agentops/blob/main/docs/plans/2026-10-20-sovite-over-vuoro-cloud.md). |
-| Current state | Released (0.1.25). Live evidence is limited to the 2026-10-19 appservice rollout of 0.1.1 and the records in [Release readiness](RELEASE-READINESS.md). | Source-only and opt-in. Hosted acceptance is held. As of 2026-11-06 there is no private Cloud-owner transport, concrete service identity, service credential mint, versioned receiver registration or end-to-end delivery qualification. |
+| Maintained by | This repository: [README](../README.md) install paths, `scripts/local_platform.py`, `scripts/installation.py`, `compose.yaml`, `deploy/helm/sovite`, `scripts/validate_deployment.py` (run in CI), [Operations](OPERATIONS.md) and per-release candidate notes. | This repository maintains the source: hosting envelope, execution API and remote worker, helper enrollment and model gateway, explicit migrations. vuoro-cloud owns composition, enrollment and the hosted end-to-end acceptance (distribution item 9 / CL-K06, as recorded in the accepted design). Accepted design: [Sovite over vuoro-cloud](https://github.com/bayleafwalker/agentops/blob/main/docs/plans/2026-10-20-sovite-over-vuoro-cloud.md). |
+| Current state | Released (0.1.25). Exercised evidence is recorded in [Release readiness](RELEASE-READINESS.md). Source tests and packaging do not qualify a deployment. | Source-only and opt-in. Hosted acceptance is held. As of 2026-11-06 there is no private Cloud-owner transport, concrete service identity, service credential mint, versioned receiver registration or end-to-end delivery qualification. |
 
 A change to a shared owner contract must keep both modes working. The
 standalone profiles also serve as the reference that hosted composition is
@@ -487,8 +487,10 @@ checked against.
 This table is consistent with the AgentOps full-track handoff of 2026-11-06.
 **Released** means default-available in a released profile. Its live
 qualification is still recorded per installation. **Source-only, disabled**
-means the code ships in the package but is unavailable unless explicitly
-composed, and it is neither deployed nor qualified. **Proposed** means design
+means the code is in the 0.1.25 package but is unavailable unless explicitly
+composed, and it is neither deployed nor qualified. **Unreleased source on
+main** means the code is merged after the `v0.1.25` tag and is in no released
+package yet. **Proposed** means design
 only.
 
 | Capability | State | Owning document |
@@ -499,7 +501,8 @@ only.
 | Local, Compose and Helm installs; explicit offline migration (schema 7) | Released | [Operations](OPERATIONS.md) |
 | Native answer-only Codex, Claude and OpenCode Go launchers | Released, with synthetic validation only; no live account qualification | [README](../README.md#subscription-models-and-opencode-go) |
 | Vuoro owner catalog adapter (0.1.16); hosted compile/activate over the API (0.1.17) | Released, opt-in | [Vuoro integration](integrations/vuoro-private-workflow.md) |
-| Remote worker execution API (`agent-http-v1`), remote worker CLI, execution v2 for remote workers, external fairness v2 | Source-only, disabled (opt-in) | [Worker execution candidate](contracts/worker-execution-v1-candidate.md), [Remote boundary](plans/2026-10-24-worker-remote-boundary.md) |
+| Remote worker execution API (`agent-http-v1`), remote worker CLI | Source-only, disabled (opt-in) | [Worker execution candidate](contracts/worker-execution-v1-candidate.md), [Remote boundary](plans/2026-10-24-worker-remote-boundary.md) |
+| Execution v2 for remote workers and external fairness v2 (PRs #77, #78); schemas 8–10 (collection, program ledger, relational) | Unreleased source on main, opt-in. Main is ahead of the 0.1.25 schema 7. | [Worker execution candidate](contracts/worker-execution-v1-candidate.md) |
 | Model gateway, helper enrollment, connector protocol | Source-only; the helper is development-only | [Connector protocol](CONNECTOR-PROTOCOL.md), [Gateway authority](#gateway-and-execution-authority-pr-3) |
 | Hosting policy envelope | Source-only; hosted composition held | [Hosted envelope](#hosted-policy-envelope-and-qualification) |
 | Repository runs API v1: runs, cancel, recovery 1.2, recovery release 1.3, repair 1.4, native activation read, candidate retention, currentness guard, repository-only worker mode | Source-only, disabled unless `SOVITE_REPOSITORY_RUNTIME_CONFIG` composes the runtime | [Repository runtime](repository-runtime.md), [Repair contract](contracts/repository-repair-v1.md), [Recovery](repository-interruption-recovery.md), [Currentness](repository-currentness.md), [Candidate retention](candidate-retention.md) |
