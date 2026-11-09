@@ -46,3 +46,7 @@ sovite = ["static/*", "static/**/*", "execution_contract/**/*.json", "repository
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# `pytest` (as opposed to `python -m pytest`) does not put the working directory
+# on sys.path on its own. Some tests import repo-root packages like `scripts`,
+# so make the repo root importable relative to the pytest rootdir.
+pythonpath = ["."]
