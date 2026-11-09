@@ -32,6 +32,23 @@ Source baseline inspected on 2026-11-06:
 `db7487fe8beb22268bed4d53fdebefaaabeb76c0`. Source, release, installation and
 qualification are separate evidence states throughout this plan.
 
+### 9 November clarification: correctness and primitive reuse
+
+Lost-acknowledgement recovery is a correctness obligation, qualified through the
+fault histories below. Correct reconciliation remains required regardless of
+whether an efficiency comparison is available; failure is a bug, not a reason
+to prefer blind retry. Measure recovery effort separately. The
+[decision-observation plan](2026-11-09-decision-observation-feedback.md) runs
+next-observation and quota-allocation work concurrently with this qualification.
+
+Reuse the selected target's transaction, deduplication and conditional-write
+primitives. The current fixture is PostgreSQL, not Delta. A different target may
+already supply most effect mechanics; document its exact scope and limits and
+reduce the adapter accordingly. Content-addressed artifacts or desired-state
+reconciliation alone do not establish arbitrary external-effect deduplication.
+This proof qualifies the installed authority, effect-intent lineage and recovery
+composition; it does not claim to invent the underlying target guarantees.
+
 ## Reuse the current owner path
 
 The [v2 resource contract](../contracts/resource-owner-v2.md) already contains

@@ -82,6 +82,13 @@ the existing owner operations and a versioned repository execution profile;
 they do not change the current generated `agent-http-v1` wire or enable a
 mutable host.
 
+The [9 November decision-observation plan](2026-11-09-decision-observation-feedback.md)
+adds accepted planning scope for SV-PW2/5: bounded execution/usage observations
+and decision-to-application joins for the existing lane owner. Deterministic
+next-observation and quota-allocation work can proceed concurrently under their
+own gates; neither waits for the protected-publication showcase. These additions
+remain proposed interfaces and do not change this document's implementation status.
+
 SV-PW1 depends on PW-01 review; SV-PW2/3 depend on host isolation PW-02.
 SV-PW4 consumes broker/appservice commissioning and vuoro-cloud composition;
 versioned releases must let those consumers pin a qualified capability.
