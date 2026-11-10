@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "repo_id": "sovite",
+  "authority_repo_uuid": "996d2893-0cd1-5d0d-a700-aa0a5100f9cc",
+  "adoption_level": "guidance-only",
+  "routing": {
+    "default_harness": "caller",
+    "default_model_alias": "fast-build",
+    "action_classes": {
+      "plan": {
+        "enabled": true
+      },
+      "build": {
+        "enabled": true,
+        "review_required": true
+      },
+      "review": {
+        "enabled": true
+      },
+      "verify": {
+        "enabled": true,
+        "review_required": true
+      }
+    }
+  },
+  "skills": {
+    "template_root": "/projects/dev/agentops/templates/dispatch/skills",
+    "selected": [
+      "dispatch-plan",
+      "dispatch-build",
+      "dispatch-review",
+      "code-change-verification"
+    ]
+  },
+  "verification": {
+    "command_families": [
+      "unit"
+    ]
+  },
+  "hooks": {
+    "level": "none",
+    "publishers": []
+  }
+}
