@@ -263,7 +263,8 @@ def test_git_whole_deadline_and_live_revocation_stop_a_running_parser():
     asyncio.run(scenario(False));asyncio.run(scenario(True))
 
 
-def test_existing_qualification_authoring_signs_native_facts_and_tampering_revokes(tmp_path,monkeypatch):
+@pytest.mark.parametrize('validity',['legacy','until-change','timed','issuer','hosted'])
+def test_existing_qualification_authoring_signs_native_facts_and_tampering_revokes(tmp_path,monkeypatch,validity):
     import copy
     import hashlib
     from test_repository_runs import setup as fixture_setup
@@ -271,8 +272,14 @@ def test_existing_qualification_authoring_signs_native_facts_and_tampering_revok
     from sovite.qualification import initialize_keys,issue_qualification,verify_qualification,runtime_settings_fingerprint
     from sovite.repository_native_vm import _CHECKS,_source_digest
     from sovite.repository_sessions import _canonical_json
-    settings,platform=fixture_setup.__wrapped__(tmp_path)
-    initialize_keys(settings)
+    if validity=='hosted':
+        from test_hosting import build_hosted,signing
+        settings,platform,_,_=build_hosted(tmp_path)
+        signer=signing(settings,'platform')
+    else:
+        settings,platform=fixture_setup.__wrapped__(tmp_path)
+        initialize_keys(settings)
+        signer=settings
     generation=platform.active()[1]
     import sovite.repository_native_isolation as isolation
     supervisor=SimpleNamespace(sha256='f'*64)
@@ -297,10 +304,35 @@ def test_existing_qualification_authoring_signs_native_facts_and_tampering_revok
         'runtime_binding':runtime_settings_fingerprint(settings),
         'scope':'Synthetic signature-format fixture only; no deployed VM qualification.',
         'checks':[{'name':name,'status':'passed'} for name in sorted(_CHECKS)],'native_vm':facts}
-    row=issue_qualification(platform.db,settings,generation,'local',evidence)
+    if validity != 'legacy':
+        from test_commissioning_qualification import observations
+        commissioning=observations(settings,generation,role='platform' if validity=='hosted' else 'operator',deadline=time.time()+120 if validity=='timed' else None)
+        for check in evidence['checks']:
+            if check['name'] not in {item['name'] for item in commissioning['checks']}:
+                commissioning['checks'].append({**commissioning['checks'][0],**check})
+        evidence={**commissioning,'native_vm':facts}
+    row=issue_qualification(platform.db,signer,generation,'local',evidence,role='platform' if validity=='hosted' else 'operator',until_change=validity!='legacy')
+    tenant=None
+    if validity=='hosted':
+        # A valid selected platform record alone must not advertise execution.
+        driver.config['qualification_id']=row.id
+        assert driver.execution_profile() is None
+        tenant=issue_qualification(platform.db,signing(settings,'tenant'),generation,'local',observations(settings,generation,'tenant',deadline=time.time()+60),role='tenant',until_change=True)
+    if validity=='issuer':
+        settings.qualification_issuers=[{'path':settings.qualification_public_keys[0],'role':'operator','expires_at':time.time()+60}]
     driver.config['qualification_id']=row.id
     assert verify_qualification(row,settings)
-    assert driver.execution_profile()['qualification_ref']==row.id
+    profile=driver.execution_profile()
+    assert profile['qualification_ref']==row.id
+    from datetime import datetime
+    from sovite.qualification import qualification_deadline
+    expected=qualification_deadline(row,settings)
+    if tenant is not None:
+        tenant_deadline=qualification_deadline(tenant,settings)
+        expected=min(expected,tenant_deadline) if expected is not None else tenant_deadline
+    expected=min(expected,driver.config['accounting']['valid_until']) if expected is not None else driver.config['accounting']['valid_until']
+    assert datetime.fromisoformat(profile['qualification_expires_at']).timestamp()==pytest.approx(expected,abs=.00001)
+    assert expected>time.time()
     supervisor.sha256='0'*64
     assert driver.execution_profile()is None
     supervisor.sha256=facts['supervisor_sha256']

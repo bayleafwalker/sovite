@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 
 from .db import AuditEvent, AuthSession, BundleRevision, GrantState, Job, Qualification, WorkerHeartbeat
-from .qualification import current_qualification, is_qualified, verify_qualification
+from .qualification import current_qualification, is_qualified, qualification_deadline, verify_qualification
 from .repository_runs import RepositoryRunError
 from .service import PUBLIC_STATUS, Platform, PlatformError, job_dict
 from .settings import Settings
@@ -534,10 +534,12 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
             qualified = is_qualified(session, settings, generation, bundle.get("default_profile", "local"))
             row = current_qualification(session, settings, generation, bundle.get("default_profile", "local"))
             healthy = session.scalar(select(func.count()).select_from(WorkerHeartbeat).where(WorkerHeartbeat.updated_at > time.time() - 120)) or 0
+        deadline = qualification_deadline(row, settings) if row else None
         lines = [
             "# HELP sovite_qualification_required Whether dispatch requires a trusted qualification.", "# TYPE sovite_qualification_required gauge", f"sovite_qualification_required {int(settings.require_qualification)}",
             "# HELP sovite_qualified Whether the active generation may dispatch under its qualification rules.", "# TYPE sovite_qualified gauge", f"sovite_qualified {int(qualified)}",
-            "# HELP sovite_qualification_expiry_timestamp_seconds Expiry of the latest trusted qualification for the active generation; 0 when there is none.", "# TYPE sovite_qualification_expiry_timestamp_seconds gauge", f"sovite_qualification_expiry_timestamp_seconds {int(row.expires_at) if row else 0}",
+            "# HELP sovite_qualification_expiry_timestamp_seconds Effective evidence, record or issuer deadline; 0 when absent or change-bound without a deadline.", "# TYPE sovite_qualification_expiry_timestamp_seconds gauge", f"sovite_qualification_expiry_timestamp_seconds {int(deadline) if deadline is not None else 0}",
+            "# HELP sovite_qualification_time_bounded Whether the current trusted qualification has an absolute deadline.", "# TYPE sovite_qualification_time_bounded gauge", f"sovite_qualification_time_bounded {int(deadline is not None)}",
             "# HELP sovite_workers_healthy Workers with a heartbeat in the last 120 seconds.", "# TYPE sovite_workers_healthy gauge", f"sovite_workers_healthy {healthy}",
         ]
         return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
@@ -674,7 +676,12 @@ def create_app(settings: Settings | None = None, platform: Platform | None = Non
     async def qualifications(auth=Depends(operator)):
         with platform.db.sessions() as session:
             rows = session.scalars(select(Qualification).order_by(Qualification.created_at.desc()).limit(100)).all()
-            return {"required": settings.require_qualification, "items": [{**{key: getattr(row, key) for key in ("id", "generation", "profile", "created_at", "expires_at", "passed", "issuer", "payload", "signature", "public_key")}, "valid": verify_qualification(row, settings)} for row in rows]}
+            items = []
+            for row in rows:
+                valid = verify_qualification(row, settings)
+                items.append({**{key: getattr(row, key) for key in ("id", "generation", "profile", "created_at", "expires_at", "passed", "issuer", "payload", "signature", "public_key")},
+                              "valid": valid, "effective_expires_at": qualification_deadline(row, settings) if valid else None})
+            return {"required": settings.require_qualification, "items": items}
 
     @app.get("/api/deployments")
     async def deployments(auth=Depends(operator)):

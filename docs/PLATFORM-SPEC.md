@@ -419,7 +419,8 @@ before; bundle mutation HTTP routes are registered only in hosted mode.
 These roles use the existing bearer/session mechanism and exact-origin cookie
 checks; they do not introduce caller delegation.
 
-Hosted qualification uses signed `sovite.qualification/v2` payloads declaring
+Hosted qualification uses signed `sovite.qualification/v2` payloads, or opt-in
+change-bound `sovite.qualification/v3` commissioning payloads, declaring
 `role`, `workspace` and `hosting` (digest, revision, workspace, installation).
 Trusted Ed25519 issuer entries specify one role, an expiry and, for tenant keys,
 one workspace. A public key cannot serve multiple configured roles. Legacy
@@ -442,7 +443,12 @@ are assertions about collected evidence, not evidence collectors or attestation.
 
 `verify_qualification` validates an individual role record; `current_qualification`
 and `is_qualified` require the pair in hosted mode. The reported effective expiry
-is the earlier expiry of the latest valid record for each role. Key expiry,
+is the earlier effective deadline of the longest usable record for each role.
+For V3, the effective deadline is the earliest absolute observation or issuer
+deadline, if any; the signed zero record expiry is only a storage sentinel.
+See [change-bound commissioning](SECURITY.md#change-bound-commissioning-opt-in)
+for required observation dates, evidence provenance, explicit applicability and
+mixed-version behavior. Key expiry,
 not-before bounds, removal and digest revocation are checked on each verification.
 Admission, worker claim/renewal and result release continue to pass through
 `Platform.authorize`; receipt access and grant resume also require current
@@ -452,8 +458,11 @@ of its included check names.
 Signed JSON records can be exported and imported without private keys on the
 runtime. Import checks document bounds, public key id, signature, role/workspace,
 validity, evidence, compiled generation/profile and current runtime binding before
-storage; duplicate record ids are refused. Reuse of measurements requires a newly
-signed valid record. Gateway execution, caller assertions, external worker and BYO
+storage; duplicate record ids are refused. Existing V1/V2 records retain their
+original time bounds. A V3 commissioning record needs no calendar re-signing
+while its bindings, issuer trust and declared observation lifetimes remain
+valid. Re-signing never refreshes an absolute observation deadline. Gateway
+execution, caller assertions, external worker and BYO
 artifact protocols, and hosted deployment rendering remain separate work; this
 contract alone does not make hosted dispatch operational.
 

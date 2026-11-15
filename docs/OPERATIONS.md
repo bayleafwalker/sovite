@@ -256,7 +256,7 @@ PostgreSQL migration/isolation tests use `SOVITE_TEST_POSTGRES_URL` pointing to 
 
 Model outages leave authorized jobs queued or retrying according to their grant. They do not invoke an undeclared cloud fallback. Durable leases let a worker recover abandoned work; non-idempotent or uncertain execution requires intervention instead of blindly repeating an action. A worker that is stopped mid-task (rollout, node drain, eviction) hands the task back at once instead of leaving its lease to expire: a replay-safe task returns to the queue as `worker_shutdown` without being charged the interrupted attempt, and a task that is not replay-safe, such as native Codex, is blocked as `execution_uncertain`. Before 0.1.7 a stopped worker recorded its running task as cancelled. A harness or model that disconnects mid-response, for example because its pod was killed, is treated as an outage: a bounded model call retries, and a non-idempotent harness call such as native Codex is blocked as `execution_uncertain`. Before 0.1.8 that disconnect surfaced as `failed`/`internal_execution_error`, and in 0.1.8 as `failed`/`external_execution_uncertain`; from 0.1.9 every route to an unknown external effect ends `blocked`/`execution_uncertain`. The native service stores request identity separately from the worker queue and returns a cached completed result for a repeat of the same request.
 
-`health/live` checks the API process; `health/ready` checks database and artifact access. Neither endpoint certifies model quality, GPU placement or information-flow policy. `/metrics` is unauthenticated Prometheus text for in-cluster scraping. It reports numbers only: whether qualification is required, whether the active generation is qualified, the expiry of its latest trusted qualification (`sovite_qualification_expiry_timestamp_seconds`, 0 when none) and the healthy worker count. Alert well before expiry: an expired qualification refuses new work and blocks queued tasks at dispatch. Allow scrapers with `networkPolicy.metricsScrapers` and keep `/metrics` off public routes. Use the console's worker, queue, inhibit, qualification and audit views to distinguish readiness from authorization.
+`health/live` checks the API process; `health/ready` checks database and artifact access. Neither endpoint certifies model quality, GPU placement or information-flow policy. `/metrics` is unauthenticated Prometheus text for in-cluster scraping. It reports numbers only: whether qualification is required, whether the active generation is qualified, the effective evidence/record/issuer deadline (`sovite_qualification_expiry_timestamp_seconds`, 0 when none or no absolute deadline), and whether that current record has an absolute deadline (`sovite_qualification_time_bounded`) and the healthy worker count. Alert on `sovite_qualified == 0` whenever qualification is required. Alert before expiry only when `sovite_qualification_time_bounded == 1`: expired evidence, records or issuer keys refuse new work and block queued tasks at dispatch. Allow scrapers with `networkPolicy.metricsScrapers` and keep `/metrics` off public routes. Use the console's worker, queue, inhibit, qualification and audit views to distinguish readiness from authorization.
 
 `installation.py down` removes Compose services and networks while keeping named volumes. Do not use volume deletion as routine shutdown. Helm-managed stateful claims and the explicitly retained model/native claims require an intentional retention decision when uninstalling. To remove an unneeded component later, update its package bindings and grants, drain/inhibit its jobs, export retained state and then remove its deployment. The platform contracts and private artifacts remain inspectable outside the UI.
 
@@ -662,3 +662,56 @@ protected resolver, owner, worker and retained-candidate transport. This source
 does not yet ship the fixed native VM driver or a qualified native model
 bridge; configuring the runtime currently keeps repository launch unavailable.
 Commission and qualify those actual boundaries before advertising execution.
+
+
+## Adopting change-bound commissioning
+
+The [security contract](SECURITY.md#change-bound-commissioning-opt-in) defines
+which evidence can use `--until-change`. This removes repeated signatures over
+unchanged commissioning evidence. It does not run checks, convert existing
+records, clear recovery inhibits, or qualify an unobserved installation.
+
+1. Release and install the reviewed Sovite source on **every** control API,
+   worker and offline signing/import client. V3 uses the existing numeric expiry
+   column; no database migration is needed. Older verifiers fail closed on V3.
+   Keep the installation held or retain suitable unexpired legacy evidence
+   during a mixed-version rollout. Source tests establish neither image
+   publication nor deployment.
+2. Update deadline alerts before adoption: combine an approaching
+   `sovite_qualification_expiry_timestamp_seconds` with
+   `sovite_qualification_time_bounded == 1`. Continue monitoring
+   `sovite_qualified == 0` and actual service/network/recovery health.
+3. Re-evaluate retained deployment evidence under the current generation and
+   runtime binding. Collect missing observations. For every required check,
+   preserve its actual observation time and reference/hash, and explicitly set
+   `valid_until` to its real absolute deadline or `null` for a change-bound
+   commissioning fact. A scope must say what was tested and what remains
+   unqualified. Review time-sensitive network/provider/recovery/model claims;
+   do not remove their real deadlines or relabel synthetic tests as deployment
+   evidence. No automatic conversion or periodic signer is provided.
+4. Under the installation's existing operational authority, sign/import once:
+
+   ```sh
+   sovite qualify --evidence commissioning.json --profile PROFILE --until-change --output commissioning.qualification.json
+   sovite qualification-import commissioning.qualification.json
+   ```
+
+   The Kubernetes operator helper also accepts `--until-change`, mutually
+   exclusive with `--valid-days`, and retains its live generation/runtime
+   cross-checks. Hosted installations must still issue and import independent
+   `--role platform` and `--role tenant` records using their separate issuers;
+   the generic example above is for a standalone operator.
+5. Observe qualified status, the current binding, both hosted roles where
+   applicable, effective evidence/issuer deadline, worker behavior and all
+   inhibits before retiring calendar renewal. The API exposes
+   `effective_expires_at`; the console labels an unbounded current V3 record
+   "Until configuration or runtime change". Zero expiry alone proves nothing.
+   An expired observation requires a new observation. A changed configuration,
+   runtime placement or hosting envelope requires applicable new qualification;
+   loss/revocation/expiry of issuer trust blocks the existing signature.
+
+Rollback to a pre-V3 runtime rejects change-bound records. Restore valid legacy
+evidence for that exact binding or keep admission held. Signing/importing
+records never clears recovery inhibits or resolves uncertain worker effects.
+Application rollout, issuer/key management and any real signing remain
+separately authorized operational work.

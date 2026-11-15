@@ -16,7 +16,7 @@ Hosted installations only (a `SOVITE_HOSTING_ENVELOPE` is configured on the serv
 - Job states are `queued,running,retry_wait,completed,failed,cancelled,blocked`. A retained artifact does not by itself establish current content-release authority. Error codes are bounded values, never provider exception text.
 - `GET /api/receipts` is operator-only. Caller projections do not reveal private job IDs, artifact-store URLs, provider task IDs or provider errors.
 - `GET /api/audit?limit=200` returns bounded metadata and chain verification. Task, model and tool bodies are excluded.
-- `GET /api/qualifications` returns signed evidence and current validity. Creation occurs through CLI, not the console.
+- `GET /api/qualifications` returns signed evidence, current validity and `effective_expires_at` (the earliest record/evidence/issuer deadline for a valid record, or `null` when no absolute deadline exists or the record is invalid). Use `valid` independently: `null` alone grants no authority. V3 commissioning records sign `expires_at: 0` as a schema-specific storage sentinel; it is not an execution deadline. Creation occurs through CLI, not the console. See [change-bound commissioning](SECURITY.md#change-bound-commissioning-opt-in).
 - `GET /api/deployments` reports desired bundle revisions, not proof of completed Kubernetes reconciliation.
 - `GET /health/live` returns `{"status":"ok"}`. `GET /health/ready` checks the database and artifact backend, not model competence.
 

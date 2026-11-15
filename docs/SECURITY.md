@@ -71,6 +71,52 @@ sovite audit verify
 
 The built-in `sovite assess --output evidence/synthetic.json` exercises the whole synthetic installation workflow. It rejects real-model profiles and does not produce production deployment evidence. Qualification is required in enforced bundles and cannot be disabled there. [CLI](../sovite/cli.py).
 
+### Change-bound commissioning (opt-in)
+
+`qualify --until-change` signs `sovite.qualification/v3`. It is an alternative
+lifetime for explicitly reviewed commissioning facts; signing still executes no
+deployment test. The signature remains bound to generation, profile and runtime
+placement and, when hosted, workspace and hosting envelope. Admission still
+requires current issuer trust, key validity, both hosted roles, enabled grants
+and no runtime/recovery inhibit. A configured issuer expiry remains a deadline.
+An unobserved change outside those bindings (for example, privileged edits to
+live network policy or an external provider's behavior) is not detected by a
+signature: observe those controls independently and inhibit on drift. Use actual
+deadlines for facts that require periodic observation; do not declare them
+permanent to avoid collecting evidence.
+
+Evidence must have `schema: sovite.commissioning/v1`, `evidence_kind: deployment`,
+the exact generation and runtime binding, a matching profile, a nonempty scope
+that states actual limitations, and every required passing check for its role.
+Duplicate check names are refused. Each check additionally requires:
+
+| Field | Meaning |
+|---|---|
+| `observed_at` | Positive finite Unix timestamp of the actual observation, at most 60 seconds ahead of signing/current time |
+| `evidence_ref` | Nonempty reference to the retained observation (up to 4096 characters) |
+| `evidence_sha256` | `sha256:` plus 64 lowercase hex characters identifying its bytes |
+| `valid_until` | Absolute positive finite Unix deadline, or explicit `null` when that commissioning fact remains applicable until a bound configuration/runtime change |
+
+A deadline must follow its observation and remain in the future at issuance and
+every verification. A later signature over the same observation cannot move
+that deadline. A new deadline requires genuinely renewed evidence and the
+issuer's judgement; the verifier cannot establish the truth of a signed claim
+or fetch/verify referenced bytes. Do not replace observation dates with signing
+dates. `null` is an explicit applicability judgement, never a missing/default
+freshness policy. Task-competence and recovery claims need their actual tested
+scope and limits; the required check names alone establish neither production
+suitability nor current recoverability.
+
+V3 signs `validity: until-change` and `expires_at: 0`. Zero is a storage sentinel
+only for this signed schema; it is not an infinite date or a qualification
+bypass. Each record's effective deadline is the earliest non-null evidence or
+issuer deadline. No database migration is needed. V1/V2 records retain their
+original time bounds and are never converted automatically. Old verifiers
+reject V3's zero expiry, so mixed-version API/worker deployments must retain
+suitable legacy records or hold dispatch until every verifier is upgraded.
+Commissioning evidence cannot be sent through `--valid-days` to reset its
+observation deadlines.
+
 ## 6. Persistence, recovery and key changes
 
 Private artifact persistence precedes the database transaction that records its reference, the trusted projection and release audit event. Finalization rechecks the lease and authority. Filesystem writes use a temporary file, fsync and atomic replacement; reads verify the stored digest. S3 and the database do not share a transaction: a crash or expired lease can leave an unreferenced private object. A recorded release does not prove network delivery to a caller. [Artifact storage](../sovite/storage.py), [finalization](../sovite/worker.py).

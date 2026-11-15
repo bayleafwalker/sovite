@@ -20,7 +20,7 @@ import time
 
 from .adapters import RuntimeFailure
 from .db import Qualification
-from .qualification import canonical, verify_qualification
+from .qualification import canonical, current_qualification, qualification_deadline, verify_qualification
 from .repository_candidate_retention import MAX_BYTES
 from .repository_native_inference import NativeInferenceBridge, Accounting
 from .repository_native_git import NativeGit, EXPANDED_LIMIT, tool_facts, tools_current
@@ -218,6 +218,13 @@ class NativeVMDriver:
                 need(row is not None and row.generation == generation
                      and row.profile in {bundle.get('default_profile','local'),'all'}
                      and verify_qualification(row,self.platform.settings))
+                deadline = qualification_deadline(row, self.platform.settings)
+                if self.platform.settings.require_qualification or self.platform.settings.hosting_envelope_path:
+                    current = current_qualification(session, self.platform.settings, generation, bundle.get('default_profile','local'))
+                    need(current is not None)
+                    current_deadline = qualification_deadline(current, self.platform.settings)
+                    if current_deadline is not None:
+                        deadline = min(deadline, current_deadline) if deadline is not None else current_deadline
                 need(tools_current(self.git_facts))
                 adapter=None
                 if 'opencode_go' in self.config['accounting']:
@@ -254,7 +261,7 @@ class NativeVMDriver:
                 return {'schema_version':'sovite-repository-execution-profile/v1','mode':'mutable-native',
                     'executor_id':self.config['executor_id'],'publication_revision':self.config['publication_revision'],
                     'qualification_ref':row.id,'qualification_sha256':hashlib.sha256(canonical(row.payload)).hexdigest(),
-                    'qualification_expires_at':datetime.fromtimestamp(min(row.expires_at,self.config['accounting']['valid_until']),timezone.utc).isoformat(),
+                    'qualification_expires_at':datetime.fromtimestamp(min(deadline,self.config['accounting']['valid_until']) if deadline is not None else self.config['accounting']['valid_until'],timezone.utc).isoformat(),
                     'per_attempt_isolation':True,'credential_containment':True,'exact_binding':True,
                     'durable_checkpoint_and_candidate':True,'predecessor_reconciliation':True,'bounded_usage':True}
         except Exception:

@@ -12,7 +12,7 @@ from pathlib import Path
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.engine import make_url
 
 from .db import BundleRevision, Database, Qualification, canonical, digest
@@ -69,6 +69,60 @@ ROLE_CHECKS = {
     "platform": {"runtime-identity", "network-isolation", "recovery"},
     "tenant": {"binding-identity", "retention", "artifact-placement", "receipt-boundary", "task-competence", "recovery"},
 }
+OPERATOR_CHECKS = {"runtime-identity", "network-isolation", "receipt-boundary", "recovery", "task-competence"}
+COMMISSIONING_SCHEMA = "sovite.qualification/v3"
+
+
+def _timestamp(value) -> bool:
+    # Bound before float conversion: arbitrary JSON integers can overflow isfinite.
+    return type(value) in {int, float} and 0 < value <= 253402300799
+
+
+def _commissioning_evidence(payload: dict, now: float) -> bool:
+    """Check declared observation lifetimes, never refresh them from signing time."""
+    evidence = payload.get("evidence")
+    if (payload.get("validity") != "until-change" or type(payload.get("expires_at")) not in {int, float} or payload["expires_at"] != 0
+            or not isinstance(evidence, dict) or evidence.get("schema") != "sovite.commissioning/v1"
+            or evidence.get("evidence_kind") != "deployment"
+            or evidence.get("generation") != payload.get("generation")
+            or evidence.get("runtime_binding") != payload.get("runtime_binding")
+            or evidence.get("profile") not in {payload.get("profile"), "all"}
+            or not isinstance(evidence.get("scope"), str) or not evidence["scope"].strip()):
+        return False
+    checks = evidence.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return False
+    names = set()
+    for check in checks:
+        if not isinstance(check, dict):
+            return False
+        name, observed = check.get("name"), check.get("observed_at")
+        ref, sha = check.get("evidence_ref"), check.get("evidence_sha256")
+        if (not isinstance(name, str) or not name or name in names or check.get("status") != "passed"
+                or not _timestamp(observed) or observed > min(now, payload["created_at"]) + 60
+                or not isinstance(ref, str) or not 1 <= len(ref.strip()) <= 4096
+                or not isinstance(sha, str) or len(sha) != 71 or not sha.startswith("sha256:")
+                or any(c not in "0123456789abcdef" for c in sha[7:]) or "valid_until" not in check):
+            return False
+        deadline = check["valid_until"]
+        if deadline is not None and (not _timestamp(deadline) or deadline <= max(now, observed)):
+            return False
+        names.add(name)
+    return (ROLE_CHECKS.get(payload.get("role"), OPERATOR_CHECKS) <= names)
+
+
+def qualification_deadline(row: Qualification, settings: Settings) -> float | None:
+    """Effective absolute deadline of a verified record; None means change-bound."""
+    deadlines = [row.expires_at] if row.expires_at > 0 else []
+    if row.payload.get("schema") == COMMISSIONING_SCHEMA:
+        deadlines.extend(check["valid_until"] for check in row.payload["evidence"]["checks"]
+                         if check["valid_until"] is not None)
+    if settings.qualification_issuers:
+        identity = key_digest(row.public_key)
+        for entry in settings.qualification_issuers:
+            if key_digest(Path(entry["path"]).read_text()) == identity:
+                deadlines.append(entry["expires_at"])
+    return min(deadlines) if deadlines else None
 
 
 def key_digest(public_key: str) -> str:
@@ -128,7 +182,7 @@ def trusted_key(settings: Settings, public_key: str, role: str = "operator", wor
                     return True
             except (OSError, ValueError):
                 continue
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, OverflowError):
         pass
     return False
 
@@ -145,7 +199,7 @@ def _hosted_payload(payload: dict, settings: Settings) -> bool:
     if any(not isinstance(check, dict) or not isinstance(check.get("name"), str) or check.get("status") != "passed" for check in checks):
         return False
     names = [check["name"] for check in checks]
-    return (payload.get("schema") == "sovite.qualification/v2" and role in ROLE_CHECKS
+    return (payload.get("schema") in {"sovite.qualification/v2", COMMISSIONING_SCHEMA} and role in ROLE_CHECKS
             and payload.get("hosting") == envelope_binding(envelope)
             and payload.get("workspace") == envelope["workspace"]
             and evidence.get("evidence_kind") == "deployment"
@@ -159,11 +213,20 @@ def _hosted_payload(payload: dict, settings: Settings) -> bool:
 def verify_qualification(row: Qualification, settings: Settings, now: float | None = None) -> bool:
     now = time.time() if now is None else now
     try:
-        if not row.passed or not all(type(value) in {int, float} and math.isfinite(value) for value in (row.expires_at, row.created_at)) or row.expires_at <= now or row.created_at > now + 60 or row.expires_at <= row.created_at:
+        if (not row.passed or not _timestamp(row.created_at) or row.created_at > now + 60
+                or type(row.expires_at) not in {int, float}
+                or not (row.expires_at == 0 or _timestamp(row.expires_at))):
             return False
         if not isinstance(row.payload, dict):
             return False
-        if settings.hosting_envelope_path and row.expires_at - row.created_at > 90 * 86400:
+        commissioning = row.payload.get("schema") == COMMISSIONING_SCHEMA
+        if commissioning:
+            if not _commissioning_evidence(row.payload, now) or row.expires_at != 0:
+                return False
+        elif (row.payload.get("schema") != ("sovite.qualification/v2" if settings.hosting_envelope_path else "sovite.qualification/v1")
+              or "validity" in row.payload or row.expires_at <= max(now, row.created_at)):
+            return False
+        if not commissioning and settings.hosting_envelope_path and row.expires_at - row.created_at > 90 * 86400:
             return False
         role = row.payload.get("role", "operator")
         if not trusted_key(settings, row.public_key, role, row.payload.get("workspace"), now, created_at=row.created_at):
@@ -175,7 +238,7 @@ def verify_qualification(row: Qualification, settings: Settings, now: float | No
         key = serialization.load_pem_public_key(row.public_key.encode())
         key.verify(base64.b64decode(row.signature, validate=True), canonical(row.payload))
         return True
-    except (OSError, ValueError, InvalidSignature, TypeError, KeyError, AttributeError):
+    except (OSError, ValueError, InvalidSignature, TypeError, KeyError, AttributeError, OverflowError):
         return False
 
 
@@ -187,7 +250,7 @@ def is_qualified(session, settings: Settings, generation: str, profile: str | No
 
 
 def current_qualification(session, settings: Settings, generation: str, profile: str | None = None) -> Qualification | None:
-    """Latest trusted record; hosted pairs report their earlier expiry."""
+    """Longest effective trusted record; hosted pairs report their earlier deadline."""
     revision = session.get(BundleRevision, generation)
     enforced = bool(revision and revision.bundle.get("mode") == "enforced")
     if settings.hosting_envelope_path:
@@ -198,26 +261,27 @@ def current_qualification(session, settings: Settings, generation: str, profile:
             return None
         profile = profile or revision.bundle.get("default_profile", "local")
     roles = {}
-    rows = session.scalars(select(Qualification).where(Qualification.generation == generation, Qualification.passed == True, Qualification.expires_at > time.time()).order_by(Qualification.expires_at.desc())).all()
+    now = time.time()
+    rows = session.scalars(select(Qualification).where(Qualification.generation == generation, Qualification.passed == True,
+        or_(Qualification.expires_at == 0, Qualification.expires_at > now))).all()
+    rows = [row for row in rows if (profile is None or row.profile in {profile, "all"}) and verify_qualification(row, settings, now)]
+    rows.sort(key=lambda row: qualification_deadline(row, settings) or math.inf, reverse=True)
     for row in rows:
-        if (profile is not None and row.profile not in {profile, "all"}) or not verify_qualification(row, settings):
-            continue
         if settings.hosting_envelope_path:
             roles.setdefault(row.payload["role"], row)
             if set(roles) == {"platform", "tenant"}:
-                return min(roles.values(), key=lambda item: item.expires_at)
+                return min(roles.values(), key=lambda item: qualification_deadline(item, settings) or math.inf)
             continue
         if enforced:
             evidence = row.payload.get("evidence", {})
             checks = {check.get("name"): check.get("status") for check in evidence.get("checks", [])}
-            required = {"runtime-identity", "network-isolation", "receipt-boundary", "recovery", "task-competence"}
-            if evidence.get("evidence_kind") != "deployment" or not all(checks.get(name) == "passed" for name in required):
+            if evidence.get("evidence_kind") != "deployment" or not all(checks.get(name) == "passed" for name in OPERATOR_CHECKS):
                 continue
         return row
     return None
 
 
-def issue_qualification(db: Database | None, settings: Settings, generation: str, profile: str, evidence: dict, valid_days: int = 30, issuer: str = "operator", role: str = "operator") -> Qualification:
+def issue_qualification(db: Database | None, settings: Settings, generation: str, profile: str, evidence: dict, valid_days: int | None = None, issuer: str = "operator", role: str = "operator", *, until_change: bool = False) -> Qualification:
     checks = evidence.get("checks")
     if not isinstance(checks, list) or not checks or any(not isinstance(c, dict) or not c.get("name") or c.get("status") not in {"passed", "failed", "not_run"} for c in checks):
         raise ValueError("Evidence needs a nonempty checks array with name and status=passed|failed|not_run")
@@ -238,8 +302,22 @@ def issue_qualification(db: Database | None, settings: Settings, generation: str
         bundle = load_bundle(settings.bundle_path)[0]
     if bundle and bundle.get("mode") == "enforced" and evidence.get("runtime_binding") != binding:
         raise ValueError("Enforced qualification evidence must bind the runtime placement settings")
-    if not 1 <= valid_days <= 90:
+    if until_change and valid_days is not None:
+        raise ValueError("Choose until-change commissioning or valid-days, not both")
+    if valid_days is None:
+        valid_days = 30
+    if type(valid_days) is not int or not 1 <= valid_days <= 90:
         raise ValueError("Qualification validity must be 1..90 days")
+    now = time.time()
+    payload = {"schema": "sovite.qualification/v1", "id": uuid.uuid4().hex, "generation": generation, "runtime_binding": binding, "profile": profile, "created_at": now, "expires_at": now + valid_days * 86400, "passed": all(check["status"] == "passed" for check in checks), "issuer": issuer, "evidence": evidence}
+    if until_change:
+        payload.update(schema=COMMISSIONING_SCHEMA, validity="until-change", expires_at=0)
+        if settings.hosting_envelope_path:
+            payload["role"] = role
+        if not _commissioning_evidence(payload, now):
+            raise ValueError("Commissioning requires complete dated deployment evidence with explicit valid_until, reference and digest for every check")
+    elif evidence.get("schema") == "sovite.commissioning/v1":
+        raise ValueError("Commissioning evidence requires --until-change; signing must not reset observation deadlines")
     private = serialization.load_pem_private_key(Path(settings.qualification_private_key).read_bytes(), password=None)
     if not isinstance(private, Ed25519PrivateKey):
         raise ValueError("Only Ed25519 qualification keys are supported")
@@ -249,11 +327,9 @@ def issue_qualification(db: Database | None, settings: Settings, generation: str
         raise ValueError("Non-hosted signing uses the operator role")
     if not trusted_key(settings, public, role, envelope["workspace"] if envelope else None):
         raise ValueError("Signing key is not configured as a trusted qualification issuer")
-    now = time.time()
-    passed = all(check["status"] == "passed" for check in checks)
-    payload = {"schema": "sovite.qualification/v1", "id": uuid.uuid4().hex, "generation": generation, "runtime_binding": binding, "profile": profile, "created_at": now, "expires_at": now + valid_days * 86400, "passed": passed, "issuer": issuer, "evidence": evidence}
+    passed = payload["passed"]
     if envelope is not None:
-        payload.update(schema="sovite.qualification/v2", role=role, workspace=envelope["workspace"], hosting=envelope_binding(envelope))
+        payload.update(schema=COMMISSIONING_SCHEMA if until_change else "sovite.qualification/v2", role=role, workspace=envelope["workspace"], hosting=envelope_binding(envelope))
         if not _hosted_payload(payload, settings):
             raise ValueError("Hosted qualification requires complete passing deployment evidence for its role")
         if db is None:
@@ -293,9 +369,11 @@ def import_qualification(db: Database, settings: Settings, generation: str, path
     fields = {"schema", "id", "generation", "runtime_binding", "profile", "created_at", "expires_at", "passed", "issuer", "evidence"}
     if settings.hosting_envelope_path:
         fields |= {"role", "workspace", "hosting"}
+    if isinstance(payload, dict) and payload.get("schema") == COMMISSIONING_SCHEMA:
+        fields.add("validity")
     if not isinstance(payload, dict) or set(payload) != fields:
         raise ValueError("Invalid qualification payload")
-    if payload["schema"] != ("sovite.qualification/v2" if settings.hosting_envelope_path else "sovite.qualification/v1"):
+    if payload["schema"] not in {COMMISSIONING_SCHEMA, "sovite.qualification/v2" if settings.hosting_envelope_path else "sovite.qualification/v1"}:
         raise ValueError("Unsupported qualification schema")
     if any(not isinstance(payload.get(field), str) or not 1 <= len(payload[field]) <= limit for field, limit in (("id", 64), ("generation", 80), ("runtime_binding", 80), ("profile", 160), ("issuer", 160))):
         raise ValueError("Invalid qualification identity")
