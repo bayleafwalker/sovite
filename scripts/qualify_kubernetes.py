@@ -28,7 +28,9 @@ def main():
     p.add_argument('--public-key', type=Path, required=True)
     p.add_argument('--evidence', type=Path, required=True)
     p.add_argument('--database-port', type=int, required=True)
-    p.add_argument('--valid-days', type=int, default=1)
+    validity = p.add_mutually_exclusive_group()
+    validity.add_argument('--valid-days', type=int, help='Time-bound validity in days (default: 1)')
+    validity.add_argument('--until-change', action='store_true', help='Sign explicit commissioning evidence without calendar renewal')
     args = p.parse_args()
     values = yaml.safe_load(args.values.read_text())
     credentials = json.loads(args.runtime_env.read_text())
@@ -55,7 +57,8 @@ def main():
             raise ValueError('Live generation differs from the reviewed bundle; refusing to sign')
     evidence = json.loads(args.evidence.read_text())
     row = issue_qualification(db, settings, generation, bundle['default_profile'], evidence,
-                              valid_days=args.valid_days, issuer='appservice-operator')
+                              valid_days=args.valid_days if args.valid_days is not None else (None if args.until_change else 1),
+                              issuer='appservice-operator', until_change=args.until_change)
     print(json.dumps({'id': row.id, 'passed': row.passed, 'runtime_binding': remote,
                       'generation': generation, 'expires_at': row.expires_at}))
 

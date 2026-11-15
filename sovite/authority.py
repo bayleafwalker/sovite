@@ -451,12 +451,14 @@ class Authority:
         until = min(now + PERMIT_SECONDS, request["deadline"], execution.expires_at, execution.deadline,
                     session.get(Job, request["job_id"]).lease_until)
         if self.platform.settings.require_qualification:
-            from .qualification import current_qualification
+            from .qualification import current_qualification, qualification_deadline
             bundle, generation = self.platform.active(session)
             qualification = current_qualification(session, self.platform.settings, generation, bundle.get("default_profile", "local"))
             if qualification is None:
                 fail("qualification_required")
-            until = min(until, qualification.expires_at)
+            deadline = qualification_deadline(qualification, self.platform.settings)
+            if deadline is not None:
+                until = min(until, deadline)
         if int((until - now) * 1000) < 1:
             fail("permit_expired")
         return now, until

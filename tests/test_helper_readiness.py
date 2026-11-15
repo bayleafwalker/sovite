@@ -131,3 +131,30 @@ def test_host_class_timestamp_bounds_reject_huge_integers_and_out_of_range_value
     assert _bounded_timestamp(10**10000) is None
     record["observed_at"] = 10**10000
     assert _validate_host_class(record, expected, qualification, now) == "host_class_record_time_invalid_or_stale"
+
+
+@pytest.mark.parametrize("lifetime", ["until-change", "timed", "issuer-too-short", "evidence-too-short"])
+def test_host_class_projection_uses_effective_commissioning_deadline(authority_env, lifetime):
+    from sovite.helper_admin_api import helper_readiness
+    from sovite.qualification import initialize_keys, issue_qualification
+    from test_commissioning_qualification import observations
+    env = authority_env
+    env.settings.require_qualification = True
+    env.settings.qualification_private_key = str(env.path / 'qualification.key')
+    env.settings.qualification_public_keys = [str(env.path / 'qualification.pem')]
+    initialize_keys(env.settings)
+    now = time.time()
+    bundle, generation = env.platform.active()
+    expected, error = _expected_host_class(env.model, bundle)
+    assert error is None
+    record = {"schema": HOST_CLASS_SCHEMA, "id": "commissioning-host-class", **expected,
+              "observed_at": now - 30, "expires_at": now + 600,
+              "evidence_refs": ["inventory://fixture/host-class"]}
+    deadline = now + (60 if lifetime == 'evidence-too-short' else 1000) if lifetime in {'timed','evidence-too-short'} else None
+    evidence = observations(env.settings, generation, deadline=deadline)
+    evidence['host_classes'] = [record]
+    issue_qualification(env.platform.db, env.settings, generation, 'local', evidence, until_change=True)
+    if lifetime == 'issuer-too-short':
+        env.settings.qualification_issuers = [{'path':env.settings.qualification_public_keys[0], 'role':'operator', 'expires_at':now + 60}]
+    item = helper_readiness(env.platform)['items'][0]
+    assert item['qualification_evidence']['host_class_match'] == (lifetime in {'until-change','timed'})

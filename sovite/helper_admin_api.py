@@ -13,7 +13,7 @@ from sqlalchemy import select
 from .authority import provision_enrollment, reconcile_helper_demand, revoke_enrollment, rotate_enrollment
 from .connector.protocol import FRESHNESS_SECONDS
 from .db import BindingState, HelperEnrollment, HelperSession, Qualification
-from .qualification import verify_qualification
+from .qualification import qualification_deadline, verify_qualification
 from .service import PlatformError
 
 
@@ -94,7 +94,7 @@ def _expected_host_class(binding, bundle):
     return expected, None
 
 
-def _validate_host_class(record, expected, qualification, now):
+def _validate_host_class(record, expected, qualification, now, *, deadline=None):
     if not isinstance(record, dict) or set(record) != HOST_CLASS_KEYS:
         return "host_class_record_shape_invalid"
     if record.get("schema") != HOST_CLASS_SCHEMA:
@@ -117,10 +117,11 @@ def _validate_host_class(record, expected, qualification, now):
         return "host_class_record_retention_invalid"
     observed = _bounded_timestamp(record.get("observed_at"))
     expires = _bounded_timestamp(record.get("expires_at"))
+    deadline = deadline if deadline is not None else (qualification.expires_at or None)
     if (observed is None or expires is None
             or observed > now + 60 or expires <= now or expires <= observed
             or expires - observed > HOST_CLASS_MAX_AGE
-            or observed > qualification.created_at or expires > qualification.expires_at):
+            or observed > qualification.created_at or (deadline is not None and expires > deadline)):
         return "host_class_record_time_invalid_or_stale"
     refs = record.get("evidence_refs")
     if (not isinstance(refs, list) or not 1 <= len(refs) <= 64
@@ -165,7 +166,8 @@ def helper_readiness(platform):
                     if expected_host_class is None:
                         error = host_config_error
                     else:
-                        error = _validate_host_class(record, expected_host_class, row, now)
+                        error = _validate_host_class(record, expected_host_class, row, now,
+                                                     deadline=qualification_deadline(row, platform.settings))
                     if error is None:
                         host_class_evidence.append(record)
                     else:

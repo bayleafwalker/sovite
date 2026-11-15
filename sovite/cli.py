@@ -119,7 +119,9 @@ def main():
     qualify = commands.add_parser("qualify")
     qualify.add_argument("--evidence", required=True)
     qualify.add_argument("--profile")
-    qualify.add_argument("--valid-days", default=30, type=int)
+    validity = qualify.add_mutually_exclusive_group()
+    validity.add_argument("--valid-days", type=int, help="Time-bound signature, 1..90 days (default: 30)")
+    validity.add_argument("--until-change", action="store_true", help="Commissioning evidence with explicit observation lifetimes; no calendar renewal")
     qualify.add_argument("--issuer", default="operator")
     qualify.add_argument("--role", choices=["operator", "platform", "tenant"], default="operator")
     qualify.add_argument("--output", help="Sign offline to a file without opening the database")
@@ -209,7 +211,7 @@ def main():
         if args.command == "qualify" and args.output:
             bundle, generation = compile_bundle(policy.load_bundle(settings.bundle_path)[0], load_envelope(settings.hosting_envelope_path))
             evidence = load_json(args.evidence, 2_000_000)
-            row = issue_qualification(None, settings, generation, args.profile or bundle.get("default_profile", "local"), evidence, args.valid_days, args.issuer, args.role)
+            row = issue_qualification(None, settings, generation, args.profile or bundle.get("default_profile", "local"), evidence, args.valid_days, args.issuer, args.role, until_change=args.until_change)
             write_qualification(row, args.output)
             emit({"id": row.id, "generation": generation, "passed": row.passed, "output": args.output})
             return
@@ -265,7 +267,7 @@ def main():
         elif args.command == "qualify":
             bundle, generation = platform.active()
             evidence = json.loads(Path(args.evidence).read_text())
-            row = issue_qualification(platform.db, settings, generation, args.profile or bundle.get("default_profile", "local"), evidence, args.valid_days, args.issuer, args.role)
+            row = issue_qualification(platform.db, settings, generation, args.profile or bundle.get("default_profile", "local"), evidence, args.valid_days, args.issuer, args.role, until_change=args.until_change)
             emit({"id": row.id, "generation": row.generation, "passed": row.passed, "expires_at": row.expires_at, "scope": evidence["scope"]})
             if not row.passed:
                 raise SystemExit(1)

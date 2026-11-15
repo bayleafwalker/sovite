@@ -393,3 +393,38 @@ def test_o2_actual_legacy_gateway_fence_matches_universal_and_captured_workload(
     with env.platform.db.sessions() as session:
         assert session.get(WorkerExecutionLease, env.job.id).phase == "finished"
         assert session.get(ExecutionAuthority, env.job.id).capability_digest == ""
+
+
+@pytest.mark.parametrize('lifetime',['until-change','timed','issuer'])
+def test_commissioning_inference_permit_preserves_actual_deadlines(authority_env,monkeypatch,lifetime):
+    async def scenario():
+        async with connected(authority_env) as env:
+            from sovite.qualification import initialize_keys,issue_qualification
+            from test_commissioning_qualification import observations
+            env.settings.require_qualification=True
+            env.settings.qualification_private_key=str(env.path/'qualification.key')
+            env.settings.qualification_public_keys=[str(env.path/'qualification.pem')]
+            initialize_keys(env.settings)
+            now=time.time()
+            deadline=now+1
+            evidence=observations(env.settings,env.job.generation,deadline=deadline if lifetime=='timed' else None)
+            issue_qualification(env.platform.db,env.settings,env.job.generation,'local',evidence,until_change=True)
+            if lifetime=='issuer':
+                env.settings.qualification_issuers=[{'path':env.settings.qualification_public_keys[0],'role':'operator','expires_at':deadline}]
+            values=request_values(env)
+            permit=env.authority.authorize_request(**values)
+            renewed=env.authority.renew_permit(**renewal(values,permit['permit']))
+            assert renewed['permit_ttl_ms']>0
+            with env.platform.db.sessions() as session:
+                ledger=session.get(RequestLedger,values['request_id'])
+                assert ledger.permit_until>now
+                if lifetime!='until-change':
+                    assert ledger.permit_until<=deadline
+            if lifetime!='until-change':
+                import sovite.qualification as module
+                monkeypatch.setattr(module,'time',SimpleNamespace(time=lambda:deadline))
+                with pytest.raises(PlatformError) as denied:
+                    env.authority.renew_permit(**renewal(values,permit['permit']))
+                assert denied.value.code=='qualification_required'
+            assert env.engine.calls==[]  # Owner authorization only; no model execution.
+    asyncio.run(scenario())
