@@ -56,11 +56,18 @@ class OperatorHelpFormatter(argparse.RawDescriptionHelpFormatter):
         # argparse has no public API for retrieving the help strings attached
         # to subparser choices. Keep that private detail contained here.
         by_name = {item.dest: item for item in action._choices_actions}
-        width = max(1, int(os.environ.get("COLUMNS", self._width)))
+        width = self._width
         indent = self._current_indent + 2
         command_width = max((len(name) for name in action.choices), default=0)
         description_column = indent + command_width + 2
         description_width = max(1, width - description_column)
+
+        def row(item):
+            wrapped = textwrap.wrap(item.help or "", width=description_width) or [""]
+            lines = [" " * indent + f"{item.dest:<{command_width}}  " + wrapped[0]]
+            lines += [" " * description_column + line for line in wrapped[1:]]
+            return "".join(line + "\n" for line in lines)
+
         rows = []
         listed = set()
         for title, names in _COMMAND_GROUPS:
@@ -69,21 +76,11 @@ class OperatorHelpFormatter(argparse.RawDescriptionHelpFormatter):
                 continue
             listed.update(item.dest for item in entries)
             rows.append(" " * self._current_indent + title + ":\n")
-            for item in entries:
-                command = item.dest
-                help_text = item.help or ""
-                prefix = " " * indent + f"{command:<{command_width}}  "
-                wrapped = textwrap.wrap(help_text, width=description_width) or [""]
-                rows.append(prefix + wrapped[0] + "\n")
-                rows.extend(" " * description_column + line + "\n" for line in wrapped[1:])
+            rows.extend(row(item) for item in entries)
         others = [by_name[name] for name in action.choices if name not in listed and name in by_name]
         if others:
             rows.append(" " * self._current_indent + "Other:\n")
-            for item in others:
-                prefix = " " * indent + f"{item.dest:<{command_width}}  "
-                wrapped = textwrap.wrap(item.help or "", width=description_width) or [""]
-                rows.append(prefix + wrapped[0] + "\n")
-                rows.extend(" " * description_column + line + "\n" for line in wrapped[1:])
+            rows.extend(row(item) for item in others)
         return "".join(rows)
 
     def _format_action(self, action):
