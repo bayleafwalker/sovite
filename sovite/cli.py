@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import json
 import logging
 import os
+import re
 import signal
 import sys
+import textwrap
 import tempfile
 import time
 from dataclasses import replace
@@ -14,13 +17,91 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from . import policy
+from . import __version__, policy
 from .db import Database, DatabaseSchemaError, Job, WorkerExecutionLease, WorkerHeartbeat
 from .hosting import compile_bundle, load_envelope, load_json
 from .qualification import export_qualification, import_qualification, initialize_keys, issue_qualification, runtime_settings_fingerprint, write_qualification
 from .service import Platform
 from .settings import Settings
 from .worker import Worker, healthy_worker_count
+
+
+_COMMAND_GROUPS = (
+    ("Start here", ("init",)),
+    ("Daily operations", ("serve", "worker", "worker-health", "workflow")),
+    ("Inspect", ("validate", "runtime-binding", "assess", "audit")),
+    ("Change", ("compile", "reload", "activate", "qualify", "recovery-lock")),
+    ("Maintain", ("qualification-export", "qualification-import")),
+    ("Plumbing", ("db", "keys", "helper", "gateway")),
+)
+
+
+def _subparser_action(parser_or_action):
+    """Isolate argparse's private subparser discovery behind one helper."""
+    if isinstance(parser_or_action, argparse._SubParsersAction):
+        return parser_or_action
+    if not isinstance(parser_or_action, argparse.ArgumentParser):
+        return None
+    return next(
+        (action for action in parser_or_action._actions
+         if isinstance(action, argparse._SubParsersAction)),
+        None,
+    )
+
+
+class OperatorHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Keep command discovery grouped while retaining argparse's option help."""
+
+    def _format_subcommand_help(self, action):
+        # argparse has no public API for retrieving the help strings attached
+        # to subparser choices. Keep that private detail contained here.
+        by_name = {item.dest: item for item in action._choices_actions}
+        width = self._width
+        indent = self._current_indent + 2
+        command_width = max((len(name) for name in action.choices), default=0)
+        description_column = indent + command_width + 2
+        description_width = max(1, width - description_column)
+
+        def row(item):
+            wrapped = textwrap.wrap(item.help or "", width=description_width) or [""]
+            lines = [" " * indent + f"{item.dest:<{command_width}}  " + wrapped[0]]
+            lines += [" " * description_column + line for line in wrapped[1:]]
+            return "".join(line + "\n" for line in lines)
+
+        rows = []
+        listed = set()
+        for title, names in _COMMAND_GROUPS:
+            entries = [by_name[name] for name in names if name in by_name and name in action.choices]
+            if not entries:
+                continue
+            listed.update(item.dest for item in entries)
+            rows.append(" " * self._current_indent + title + ":\n")
+            rows.extend(row(item) for item in entries)
+        others = [by_name[name] for name in action.choices if name not in listed and name in by_name]
+        if others:
+            rows.append(" " * self._current_indent + "Other:\n")
+            rows.extend(row(item) for item in others)
+        return "".join(rows)
+
+    def _format_action(self, action):
+        subparsers = _subparser_action(action)
+        if subparsers is not None:
+            return self._format_subcommand_help(subparsers)
+        return super()._format_action(action)
+
+
+class OperatorArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        match = re.search(r"invalid choice: '([^']+)'", message)
+        if match:
+            command = match.group(1)
+            subparsers = _subparser_action(self)
+            candidates = list(subparsers.choices) if subparsers else []
+            suggestion = difflib.get_close_matches(command, candidates, n=1, cutoff=0.55)
+            if suggestion:
+                self.print_usage(sys.stderr)
+                self.exit(2, f"{self.prog}: error: unknown command '{command}'\n  did you mean {suggestion[0]}?\n")
+        super().error(message)
 
 
 def emit(value):
@@ -83,59 +164,102 @@ async def assessment(settings: Settings, output: str) -> dict:
     return evidence
 
 
-def main():
-    parser = argparse.ArgumentParser(prog="sovite", description="Operate the provisioned agent platform")
-    commands = parser.add_subparsers(dest="command", required=True)
-    database = commands.add_parser("db", help="Explicit database lifecycle; no bundle activation")
-    database.add_argument("action", choices=["migrate", "check"])
-    commands.add_parser("init", help="Initialize schema and import the first configuration revision")
-    serve = commands.add_parser("serve")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", default=8080, type=int)
-    commands.add_parser("helper", help="Run the development connector pilot with preprovisioned credentials")
-    commands.add_parser("gateway", help="Run the isolated model gateway; not yet routed from workers (PR 4)")
-    commands.add_parser("worker")
-    commands.add_parser("worker-health")
-    commands.add_parser("runtime-binding", help="Print the nonsecret deployment-settings fingerprint for qualification evidence")
+def _build_parser():
+    parser = OperatorArgumentParser(
+        prog="sovite", description="Operate the provisioned agent platform.",
+        formatter_class=OperatorHelpFormatter,
+        epilog=("Examples:\n"
+                "  sovite db check\n"
+                "  sovite validate config/platform.local.yaml\n"
+                "  sovite workflow validate config/workflows/software-delivery.yaml\n\n"
+                "Run 'sovite <command> --help' for command details."),
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}",
+                        help="Show the installed version and exit")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="{command}", title="Commands")
+    database = commands.add_parser("db", help="Check compatibility or migrate the database",
+                                   description="Check database compatibility or apply explicit schema migrations.")
+    database.add_argument("action", choices=["migrate", "check"], metavar="{migrate,check}",
+                          help="migrate applies schema changes; check is read-only")
+    commands.add_parser("init", help="Initialize the platform and import its first configuration revision",
+                        description="Initialize platform state and import the first configuration revision.")
+    serve = commands.add_parser("serve", help="Run the operator API and console",
+                                description="Run the Sovite operator API and web console.")
+    serve.add_argument("--host", default="127.0.0.1", metavar="HOST", help="Bind address (default: 127.0.0.1)")
+    serve.add_argument("--port", default=8080, type=int, metavar="PORT", help="TCP port (default: 8080)")
+    commands.add_parser("helper", help="Run the development connector pilot",
+                        description="Run the development connector pilot with preprovisioned credentials.")
+    commands.add_parser("gateway", help="Run the isolated model gateway",
+                        description="Run the isolated model gateway; workers do not route through it yet.")
+    commands.add_parser("worker", help="Run the configured execution worker",
+                        description="Run the configured platform and repository execution worker.")
+    commands.add_parser("worker-health", help="Report healthy workers in the configured compute pool",
+                        description="Report healthy workers for this host and configured compute pool.")
+    commands.add_parser("runtime-binding", help="Print the nonsecret deployment settings fingerprint",
+                        description="Print the nonsecret runtime settings fingerprint used by qualification evidence.")
     for name in ("validate", "compile", "reload"):
-        command = commands.add_parser(name)
-        command.add_argument("path", nargs="?")
-    workflow = commands.add_parser("workflow", help="Validate or bind a delivery workflow without activating or dispatching it")
+        descriptions = {
+            "validate": ("Validate a bundle without activating it", "Validate a bundle and report its resolved generation; no activation occurs."),
+            "compile": ("Compile a bundle into a configuration revision", "Compile a bundle into a configuration revision (writes platform state)."),
+            "reload": ("Compile and activate a bundle revision", "Compile and activate a bundle revision (changes active configuration)."),
+        }
+        short, long = descriptions[name]
+        command = commands.add_parser(name, help=short, description=long)
+        command.add_argument("path", nargs="?", metavar="BUNDLE", help="Bundle YAML path (defaults to SOVITE_BUNDLE_PATH)")
+    workflow = commands.add_parser("workflow", help="Validate or bind a delivery workflow",
+                                   description="Validate a delivery workflow or compile its immutable binding without dispatching it.")
     workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
-    workflow_validate = workflow_commands.add_parser("validate")
-    workflow_validate.add_argument("path")
-    workflow_compile = workflow_commands.add_parser("compile")
-    workflow_compile.add_argument("path")
-    workflow_compile.add_argument("--bundle", required=True)
-    workflow_compile.add_argument("--installation-id", required=True)
+    workflow_validate = workflow_commands.add_parser("validate", help="Validate a workflow definition")
+    workflow_validate.add_argument("path", metavar="WORKFLOW", help="Workflow YAML definition path")
+    workflow_compile = workflow_commands.add_parser("compile", help="Compile an immutable workflow binding")
+    workflow_compile.add_argument("path", metavar="WORKFLOW", help="Workflow YAML definition path")
+    workflow_compile.add_argument("--bundle", required=True, metavar="BUNDLE", help="Platform bundle YAML path")
+    workflow_compile.add_argument("--installation-id", required=True, metavar="ID", help="Target installation identity")
     workflow_compile.add_argument("--requirements-ref", required=True, help="JSON revision reference, not requirements content")
     workflow_compile.add_argument("--session-policy-ref", required=True, help="JSON revision reference, not dispatch authority")
     workflow_compile.add_argument("--input-class", help="Defaults to the most restrictive class in the bundle")
     workflow_compile.add_argument("--output", help="Write the immutable binding to a new JSON file")
-    activate = commands.add_parser("activate", help="Activate an already compiled generation")
-    activate.add_argument("generation")
-    keys = commands.add_parser("keys")
-    keys.add_argument("action", choices=["init"])
-    qualify = commands.add_parser("qualify")
-    qualify.add_argument("--evidence", required=True)
-    qualify.add_argument("--profile")
+    activate = commands.add_parser("activate", help="Activate a compiled configuration generation",
+                                   description="Activate an already compiled configuration generation.")
+    activate.add_argument("generation", metavar="GENERATION", help="Compiled generation identifier")
+    keys = commands.add_parser("keys", help="Initialize qualification signing keys",
+                               description="Create the qualification signing key pair if it is not already initialized.")
+    keys.add_argument("action", choices=["init"], metavar="{init}", help="init creates the signing keys")
+    qualify = commands.add_parser("qualify", help="Sign evidence for a platform generation",
+                                  description="Sign supplied evidence for the active generation; this command does not run deployment tests.")
+    qualify.add_argument("--evidence", required=True, metavar="FILE", help="JSON evidence file to sign")
+    qualify.add_argument("--profile", metavar="NAME", help="Deployment profile (defaults to the active bundle profile)")
     validity = qualify.add_mutually_exclusive_group()
     validity.add_argument("--valid-days", type=int, help="Time-bound signature, 1..90 days (default: 30)")
     validity.add_argument("--until-change", action="store_true", help="Commissioning evidence with explicit observation lifetimes; no calendar renewal")
-    qualify.add_argument("--issuer", default="operator")
-    qualify.add_argument("--role", choices=["operator", "platform", "tenant"], default="operator")
+    qualify.add_argument("--issuer", default="operator", metavar="NAME", help="Qualification issuer (default: operator)")
+    qualify.add_argument("--role", choices=["operator", "platform", "tenant"], default="operator",
+                         metavar="{operator,platform,tenant}", help="Qualification role (default: operator)")
     qualify.add_argument("--output", help="Sign offline to a file without opening the database")
-    export = commands.add_parser("qualification-export")
-    export.add_argument("id")
-    export.add_argument("--output", required=True)
-    ingest = commands.add_parser("qualification-import")
-    ingest.add_argument("path")
-    assess = commands.add_parser("assess")
-    assess.add_argument("--output", required=True)
-    audit = commands.add_parser("audit")
-    audit.add_argument("action", choices=["verify"])
-    recovery = commands.add_parser("recovery-lock")
-    recovery.add_argument("--reason", required=True)
+    export = commands.add_parser("qualification-export", help="Export a qualification record to a file",
+                                 description="Export a stored qualification record to a JSON file.")
+    export.add_argument("id", metavar="ID", help="Qualification identifier")
+    export.add_argument("--output", required=True, metavar="FILE", help="Destination JSON file path")
+    ingest = commands.add_parser("qualification-import", help="Import a signed qualification record",
+                                  description="Verify and store a signed qualification record for the active generation.")
+    ingest.add_argument("path", metavar="FILE", help="Signed qualification JSON file")
+    assess = commands.add_parser("assess", help="Run the synthetic integration assessment",
+                                 description="Exercise the synthetic installation and write assessment evidence; real deployments need separate evidence.")
+    assess.add_argument("--output", required=True, metavar="FILE", help="Destination path for synthetic assessment evidence")
+    audit = commands.add_parser("audit", help="Verify the platform audit chain",
+                                description="Verify the stored platform audit chain.")
+    audit.add_argument("action", choices=["verify"], metavar="{verify}", help="verify checks the audit chain")
+    recovery = commands.add_parser("recovery-lock", help="Inhibit all grants after recovery",
+                                   description="Inhibit every active grant and record the recovery lock in the audit chain.")
+    recovery.add_argument("--reason", required=True, metavar="TEXT", help="Reason recorded with the recovery lock")
+    return parser
+
+
+def main():
+    parser = _build_parser()
+    if len(sys.argv) == 1:
+        parser.print_help()
+        return
     args = parser.parse_args()
     try:
         if args.command == "workflow":
