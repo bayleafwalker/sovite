@@ -9,6 +9,7 @@ import os
 import re
 import signal
 import sys
+import textwrap
 import tempfile
 import time
 from dataclasses import replace
@@ -35,25 +36,61 @@ _COMMAND_GROUPS = (
 )
 
 
+def _subparser_action(parser_or_action):
+    """Isolate argparse's private subparser discovery behind one helper."""
+    if isinstance(parser_or_action, argparse._SubParsersAction):
+        return parser_or_action
+    if not isinstance(parser_or_action, argparse.ArgumentParser):
+        return None
+    return next(
+        (action for action in parser_or_action._actions
+         if isinstance(action, argparse._SubParsersAction)),
+        None,
+    )
+
+
 class OperatorHelpFormatter(argparse.RawDescriptionHelpFormatter):
     """Keep command discovery grouped while retaining argparse's option help."""
 
-    def _format_action(self, action):
-        if not isinstance(action, argparse._SubParsersAction):
-            return super()._format_action(action)
+    def _format_subcommand_help(self, action):
+        # argparse has no public API for retrieving the help strings attached
+        # to subparser choices. Keep that private detail contained here.
         by_name = {item.dest: item for item in action._choices_actions}
-        indent = self._current_indent
+        width = max(1, int(os.environ.get("COLUMNS", self._width)))
+        indent = self._current_indent + 2
+        command_width = max((len(name) for name in action.choices), default=0)
+        description_column = indent + command_width + 2
+        description_width = max(1, width - description_column)
         rows = []
+        listed = set()
         for title, names in _COMMAND_GROUPS:
-            entries = [by_name[name] for name in names if name in by_name]
+            entries = [by_name[name] for name in names if name in by_name and name in action.choices]
             if not entries:
                 continue
-            rows.append(" " * indent + title + ":\n")
+            listed.update(item.dest for item in entries)
+            rows.append(" " * self._current_indent + title + ":\n")
             for item in entries:
                 command = item.dest
                 help_text = item.help or ""
-                rows.append(" " * (indent + 2) + f"{command:<24} {help_text}\n")
+                prefix = " " * indent + f"{command:<{command_width}}  "
+                wrapped = textwrap.wrap(help_text, width=description_width) or [""]
+                rows.append(prefix + wrapped[0] + "\n")
+                rows.extend(" " * description_column + line + "\n" for line in wrapped[1:])
+        others = [by_name[name] for name in action.choices if name not in listed and name in by_name]
+        if others:
+            rows.append(" " * self._current_indent + "Other:\n")
+            for item in others:
+                prefix = " " * indent + f"{item.dest:<{command_width}}  "
+                wrapped = textwrap.wrap(item.help or "", width=description_width) or [""]
+                rows.append(prefix + wrapped[0] + "\n")
+                rows.extend(" " * description_column + line + "\n" for line in wrapped[1:])
         return "".join(rows)
+
+    def _format_action(self, action):
+        subparsers = _subparser_action(action)
+        if subparsers is not None:
+            return self._format_subcommand_help(subparsers)
+        return super()._format_action(action)
 
 
 class OperatorArgumentParser(argparse.ArgumentParser):
@@ -61,12 +98,8 @@ class OperatorArgumentParser(argparse.ArgumentParser):
         match = re.search(r"invalid choice: '([^']+)'", message)
         if match:
             command = match.group(1)
-            candidates = [
-                name
-                for action in self._actions
-                if isinstance(action, argparse._SubParsersAction)
-                for name in action.choices
-            ]
+            subparsers = _subparser_action(self)
+            candidates = list(subparsers.choices) if subparsers else []
             suggestion = difflib.get_close_matches(command, candidates, n=1, cutoff=0.55)
             if suggestion:
                 self.print_usage(sys.stderr)
@@ -134,7 +167,7 @@ async def assessment(settings: Settings, output: str) -> dict:
     return evidence
 
 
-def main():
+def _build_parser():
     parser = OperatorArgumentParser(
         prog="sovite", description="Operate the provisioned agent platform.",
         formatter_class=OperatorHelpFormatter,
@@ -222,6 +255,11 @@ def main():
     recovery = commands.add_parser("recovery-lock", help="Inhibit all grants after recovery",
                                    description="Inhibit every active grant and record the recovery lock in the audit chain.")
     recovery.add_argument("--reason", required=True, metavar="TEXT", help="Reason recorded with the recovery lock")
+    return parser
+
+
+def main():
+    parser = _build_parser()
     if len(sys.argv) == 1:
         parser.print_help()
         return
